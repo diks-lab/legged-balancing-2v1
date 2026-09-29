@@ -34,6 +34,7 @@ Commands are newline-terminated:
 | `c3ping` | Send the ID3 `0xA0` ASCII command `PING` (expected payload: `OK PONG`). |
 | `c3help` | Send the ID3 `0xA0` ASCII command `HELP` and display its ASCII response. |
 | `c3status` | Send the ID3 `0xA0` ASCII command `STATUS` and display its ASCII response. |
+| `c3tilt <us>` | Send one ID3 `0xA0` ASCII command `TILT <us>` to set the barrel servo pulse. `<us>` must contain only decimal digits and be in the inclusive range 500–2400; invalid input is not transmitted. Success requires the exact ASCII response `OK TILT <us> us`. |
 
 Leg moves use the values already present in the balancing firmware: speed 150
 and acceleration 15. Startup, help, position reads, and Ping never issue a move.
@@ -46,10 +47,11 @@ timeout, malformed packet, TX echo, or packet from another ID is never reported
 as success. Response parameters from `0xA0` commands must be printable ASCII and
 are displayed on the USB monitor.
 
-Only the non-actuating C3 queries `PING`, `HELP`, and `STATUS` are exposed. The
-diagnostic does not provide `ARM`, `FIRE`, `TEST`, or `SOUND`. `LASER` and `TILT`
-are also absent because the referenced C3 command processor does not implement
-them.
+In addition to the non-actuating C3 queries `PING`, `HELP`, and `STATUS`, the
+diagnostic exposes only the `TILT` actuator command. It does not provide `ARM`,
+`FIRE`, `TEST`, `SOUND`, or `LASER`. The authoritative 2c3 firmware already
+implements `TILT`; the older reference-only copy in this repository is not
+modified or used to implement it.
 
 ### Recommended on-machine order
 
@@ -65,8 +67,14 @@ them.
    Expected values include `OK PONG`, a help line beginning `OK HELP`, and an
    `OK STATUS ...` line. A timeout or a response classified as another ID,
    malformed, non-ASCII, or nonzero-error is a failed check.
-5. Run `pos1`, then `pos2`, and compare the raw readings with the physical legs.
-6. Only after securing each leg, run one command at a time in this order:
+5. With the barrel mechanism secured and clear, run `c3tilt 1500` once. Confirm
+   that exactly one `TILT 1500` packet is transmitted and that success is shown
+   only after a valid, non-echo ID3 response containing exactly
+   `OK TILT 1500 us`. Also try missing, signed, suffixed, and out-of-range inputs
+   such as `c3tilt`, `c3tilt +1500`, `c3tilt 1500x`, `c3tilt 499`, and
+   `c3tilt 2401`; each must print an error without a `TX:` line or servo motion.
+6. Run `pos1`, then `pos2`, and compare the raw readings with the physical legs.
+7. Only after securing each leg, run one command at a time in this order:
    `rhome`, `rext`, `rhome`, then `lhome`, `lext`, `lhome`.
 
 ## Unverified hardware/protocol items
