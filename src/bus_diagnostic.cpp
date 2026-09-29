@@ -147,7 +147,8 @@ bool pingServo(uint8_t id) {
   return ok;
 }
 
-void sendC3AsciiCommand(const char* command) {
+void sendC3AsciiCommand(const char* command,
+                        const char* expectedResponse = nullptr) {
   const size_t parameterCount = strlen(command);
   if (parameterCount == 0 || parameterCount > 253) {
     Serial.println("RESULT: invalid local C3 command length; nothing sent");
@@ -185,7 +186,63 @@ void sendC3AsciiCommand(const char* command) {
   Serial.print("C3 ASCII response: ");
   Serial.write(response.bytes + 5, responseParameterCount);
   Serial.println();
+  if (expectedResponse != nullptr) {
+    const size_t expectedResponseLength = strlen(expectedResponse);
+    if (responseParameterCount != expectedResponseLength ||
+        memcmp(response.bytes + 5, expectedResponse,
+               expectedResponseLength) != 0) {
+      Serial.printf("RESULT: unexpected C3 response; expected: %s\n",
+                    expectedResponse);
+      return;
+    }
+  }
   Serial.println("RESULT: valid C3 response");
+}
+
+void handleC3Tilt(const String& command) {
+  constexpr char kPrefix[] = "c3tilt ";
+  constexpr uint16_t kMinimumPulseUs = 500;
+  constexpr uint16_t kMaximumPulseUs = 2400;
+
+  if (!command.startsWith(kPrefix)) {
+    Serial.println(
+        "ERROR: usage: c3tilt <500-2400>; nothing was transmitted");
+    return;
+  }
+
+  const String pulseText = command.substring(sizeof(kPrefix) - 1);
+  if (pulseText.isEmpty()) {
+    Serial.println(
+        "ERROR: usage: c3tilt <500-2400>; nothing was transmitted");
+    return;
+  }
+
+  uint32_t pulseUs = 0;
+  for (size_t i = 0; i < pulseText.length(); ++i) {
+    const char value = pulseText.charAt(i);
+    if (value < '0' || value > '9') {
+      Serial.println(
+          "ERROR: c3tilt requires digits only (no sign or extra characters); "
+          "nothing was transmitted");
+      return;
+    }
+    pulseUs = pulseUs * 10 + static_cast<uint32_t>(value - '0');
+    if (pulseUs > kMaximumPulseUs) break;
+  }
+  if (pulseUs < kMinimumPulseUs || pulseUs > kMaximumPulseUs) {
+    Serial.println(
+        "ERROR: c3tilt pulse must be from 500 through 2400 us; nothing was "
+        "transmitted");
+    return;
+  }
+
+  char request[16];
+  char expectedResponse[24];
+  snprintf(request, sizeof(request), "TILT %lu",
+           static_cast<unsigned long>(pulseUs));
+  snprintf(expectedResponse, sizeof(expectedResponse), "OK TILT %lu us",
+           static_cast<unsigned long>(pulseUs));
+  sendC3AsciiCommand(request, expectedResponse);
 }
 
 void readPosition(uint8_t id) {
@@ -237,7 +294,8 @@ void printHelp() {
   Serial.println("c3ping     : send C3 0xA0 ASCII command PING");
   Serial.println("c3help     : send C3 0xA0 ASCII command HELP");
   Serial.println("c3status   : send C3 0xA0 ASCII command STATUS");
-  Serial.println("No ARM/FIRE/TEST/SOUND/LASER/TILT commands are provided.");
+  Serial.println("c3tilt <us>: set C3 ID 3 barrel servo pulse (500-2400 us)");
+  Serial.println("No ARM/FIRE/TEST/SOUND/LASER commands are provided.");
 }
 
 void handleCommand(String command) {
@@ -262,6 +320,8 @@ void handleCommand(String command) {
   else if (command == "c3ping") sendC3AsciiCommand("PING");
   else if (command == "c3help") sendC3AsciiCommand("HELP");
   else if (command == "c3status") sendC3AsciiCommand("STATUS");
+  else if (command == "c3tilt" || command.startsWith("c3tilt"))
+    handleC3Tilt(command);
   else Serial.println("Unknown command; enter 'help'. Nothing was transmitted.");
 }
 }  // namespace
