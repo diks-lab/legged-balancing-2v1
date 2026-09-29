@@ -34,6 +34,10 @@ Commands are newline-terminated:
 | `c3ping` | Send the ID3 `0xA0` ASCII command `PING` (expected payload: `OK PONG`). |
 | `c3help` | Send the ID3 `0xA0` ASCII command `HELP` and display its ASCII response. |
 | `c3status` | Send the ID3 `0xA0` ASCII command `STATUS` and display its ASCII response. |
+| `c3arm` | Send the ID3 `0xA0` ASCII command `ARM` exactly once and display the response. It does not fire and no ARM state is cached locally. |
+| `c3fire <n>` | Send the ID3 `0xA0` ASCII command `FIRE <n>` exactly once, where `<n>` is exactly one digit from 1 through 9. Missing, signed, out-of-range, whitespace-containing, or suffixed values are rejected before transmission. There is no automatic ARM or retry. |
+| `c3disarm` | Send the ID3 `0xA0` ASCII command `DISARM` exactly once and display the response. |
+| `c3stop` | Send the ID3 `0xA0` ASCII command `STOP` exactly once and display the response. |
 | `c3tilt <us>` | Send one ID3 `0xA0` ASCII command `TILT <us>` to set the barrel servo pulse. `<us>` must contain only decimal digits and be in the inclusive range 500–2400; invalid input is not transmitted. Success requires the exact ASCII response `OK TILT <us> us`. |
 
 Leg moves use the values already present in the balancing firmware: speed 150
@@ -47,11 +51,26 @@ timeout, malformed packet, TX echo, or packet from another ID is never reported
 as success. Response parameters from `0xA0` commands must be printable ASCII and
 are displayed on the USB monitor.
 
-In addition to the non-actuating C3 queries `PING`, `HELP`, and `STATUS`, the
-diagnostic exposes only the `TILT` actuator command. It does not provide `ARM`,
-`FIRE`, `TEST`, `SOUND`, or `LASER`. The authoritative 2c3 firmware already
-implements `TILT`; the older reference-only copy in this repository is not
-modified or used to implement it.
+The diagnostic also exposes the existing C3 `ARM`, `FIRE`, `DISARM`, and `STOP`
+commands for deliberate manual testing. It never sends `ARM` or `FIRE` during
+startup, help, or any Ping, never automatically arms or repeats a fire request,
+and does not infer or retain ARM or firing state. Use `c3status` to ask the C3
+for its actual state. Even when a FIRE response times out or is rejected, the
+diagnostic does not claim that firing did not occur and does not retry it.
+
+The reference-only 2c3 copy implements these command/state rules: it starts
+`DISARMED`; `ARM` changes any state except `FIRING` to `ARMED`; `FIRE 1` through
+`FIRE 9` is accepted only while `ARMED` and changes the state to `FIRING` after
+the firing output starts; completion returns to `ARMED` on success or `ERROR`
+on failure. `DISARM` and `STOP` both stop firing and audio and change the state
+to `DISARMED`. Its response strings are `OK ARMED`, `OK FIRE`, `OK DISARMED`,
+`OK STOPPED`, `ERR BUSY`, `ERR NOT ARMED`, `ERR FIRE START`, and `ERR COMMAND`;
+`STATUS` returns `OK STATUS` followed by `DISARMED`, `ARMED`, `FIRING`, or
+`ERROR`. Because the checked-in reference may predate the C3 installed on the
+robot, the diagnostic displays the received body but does not guess or require
+one of those strings as the success condition for these four commands. It only
+reports a valid C3 response after checking packet ID, declared length,
+checksum, zero error byte, printable ASCII, and excluding a TX echo.
 
 ### Recommended on-machine order
 
@@ -67,14 +86,24 @@ modified or used to implement it.
    Expected values include `OK PONG`, a help line beginning `OK HELP`, and an
    `OK STATUS ...` line. A timeout or a response classified as another ID,
    malformed, non-ASCII, or nonzero-error is a failed check.
-5. With the barrel mechanism secured and clear, run `c3tilt 1500` once. Confirm
+5. **Never aim the laser at the eyes of a person or animal.** Secure the robot,
+   point it in a safe direction, and initially observe the firing LED, laser,
+   and audio behavior using this exact manual sequence: `c3ping`, `c3status`,
+   `c3arm`, `c3status`, `c3fire 1`, `c3status`, `c3disarm`, `c3status`. Inspect
+   every printed response. One `c3fire 1` input must produce exactly one TX.
+   Also try `c3fire`, `c3fire 0`, `c3fire 10`, `c3fire -1`, `c3fire +1`,
+   `c3fire 1x`, and `c3fire 1 2`; each must be rejected without a `TX:` line.
+   A timeout or invalid response does not prove the mechanism did not fire, so
+   do not repeat FIRE automatically. If anything abnormal occurs, manually
+   issue `c3stop` followed by `c3disarm`.
+6. With the barrel mechanism secured and clear, run `c3tilt 1500` once. Confirm
    that exactly one `TILT 1500` packet is transmitted and that success is shown
    only after a valid, non-echo ID3 response containing exactly
    `OK TILT 1500 us`. Also try missing, signed, suffixed, and out-of-range inputs
    such as `c3tilt`, `c3tilt +1500`, `c3tilt 1500x`, `c3tilt 499`, and
    `c3tilt 2401`; each must print an error without a `TX:` line or servo motion.
-6. Run `pos1`, then `pos2`, and compare the raw readings with the physical legs.
-7. Only after securing each leg, run one command at a time in this order:
+7. Run `pos1`, then `pos2`, and compare the raw readings with the physical legs.
+8. Only after securing each leg, run one command at a time in this order:
    `rhome`, `rext`, `rhome`, then `lhome`, `lext`, `lhome`.
 
 ## Unverified hardware/protocol items
