@@ -26,35 +26,52 @@ Commands are newline-terminated:
 | --- | --- |
 | `help` | Print the menu; no bus transmission. |
 | `ping1`, `ping2` | Ping the right ID1 or left ID2 STS3215 without moving it. A valid, checksummed non-echo status packet is `RESPONDED`; otherwise it times out. |
-| `ping3` | Currently transmits nothing and reports that the 2c3 protocol is unavailable. |
-| `pingall` | Run ID1 and ID2 Ping once each, then report ID3 unavailable. |
+| `ping3` | Send one standard STS-style Ping to ESP32C3 ID3. A matching, zero-error, length-2 status packet is required; a transmitted-packet echo is logged and ignored. |
+| `pingall` | Run one standard Ping each for ID1, ID2, and ID3. |
 | `pos1`, `pos2` | Read the current raw position at STS address 56 from ID1 or ID2. |
 | `rhome`, `rext` | Move only right ID1 to HOME 2061 or small extension 2044. |
 | `lhome`, `lext` | Move only left ID2 to HOME 2026 or small extension 2044. |
-| `c3help`, `c3status`, `c3laser`, `c3tilt`, `c3sound` | Disabled; no packet is sent until the current 2c3 implementation is source-verified. |
+| `c3ping` | Send the ID3 `0xA0` ASCII command `PING` (expected payload: `OK PONG`). |
+| `c3help` | Send the ID3 `0xA0` ASCII command `HELP` and display its ASCII response. |
+| `c3status` | Send the ID3 `0xA0` ASCII command `STATUS` and display its ASCII response. |
 
 Leg moves use the values already present in the balancing firmware: speed 150
 and acceleration 15. Startup, help, position reads, and Ping never issue a move.
 Every move prints its target ID and position and is sent once, with no retry.
+The ID3 commands were checked against the source under
+`reference/legged-balancing-2c3`; that directory remains reference-only and is
+not part of either PlatformIO build. The diagnostic validates the ID, declared
+length, checksum, and zero error byte before accepting an ID3 response. A
+timeout, malformed packet, TX echo, or packet from another ID is never reported
+as success. Response parameters from `0xA0` commands must be printable ASCII and
+are displayed on the USB monitor.
+
+Only the non-actuating C3 queries `PING`, `HELP`, and `STATUS` are exposed. The
+diagnostic does not provide `ARM`, `FIRE`, `TEST`, or `SOUND`. `LASER` and `TILT`
+are also absent because the referenced C3 command processor does not implement
+them.
 
 ### Recommended on-machine order
 
 1. Secure the robot, keep the wheels clear, select and upload only
    `bus_diagnostic`, and open the 115200 baud USB monitor.
 2. Run `help`. Confirm that neither wheel motor is driven at startup.
-3. Run `ping1`, then `ping2`, then `pingall`. Confirm TX echo is labelled and
-   ignored rather than counted as success.
-4. Run `pos1`, then `pos2`, and compare the raw readings with the physical legs.
-5. Only after securing each leg, run one command at a time in this order:
+3. Run `ping1`, then `ping2`, then `ping3`. Confirm each TX echo is labelled and
+   ignored rather than counted as success, and that `ping3` accepts only a
+   zero-error ID3 status packet with length 2. Run `pingall` to repeat all three
+   Pings once each.
+4. Run `c3ping`, `c3help`, and `c3status` individually. Confirm each report says
+   `ID=3`, `checksum=OK`, and `error=00`, and inspect the printed ASCII response.
+   Expected values include `OK PONG`, a help line beginning `OK HELP`, and an
+   `OK STATUS ...` line. A timeout or a response classified as another ID,
+   malformed, non-ASCII, or nonzero-error is a failed check.
+5. Run `pos1`, then `pos2`, and compare the raw readings with the physical legs.
+6. Only after securing each leg, run one command at a time in this order:
    `rhome`, `rext`, `rhome`, then `lhome`, `lext`, `lhome`.
-6. Do not test ID3 commands until `legged-balancing-2c3` source supplies the
-   exact frame, checksum, response, and implemented command list. Current ID3
-   menu entries deliberately transmit nothing.
 
 ## Unverified hardware/protocol items
 
 - The external half-duplex transmit-enable circuit and whether it echoes TX.
 - Any direction-enable pin (none is used by the existing source).
-- ID3 packet framing, checksum, response framing, and supported command syntax.
 - All responses and physical motion; this repository change has not been tested
   on the robot.
