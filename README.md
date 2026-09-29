@@ -39,6 +39,8 @@ Commands are newline-terminated:
 | `c3disarm` | Send the ID3 `0xA0` ASCII command `DISARM` exactly once and display the response. |
 | `c3stop` | Send the ID3 `0xA0` ASCII command `STOP` exactly once and display the response. |
 | `c3tilt <us>` | Send one ID3 `0xA0` ASCII command `TILT <us>` to set the barrel servo pulse. `<us>` must contain only decimal digits and be in the inclusive range 500–2400; invalid input is not transmitted. Success requires the exact ASCII response `OK TILT <us> us`. |
+| `c3mute on` | Send the ID3 `0xA0` ASCII command `MUTE ON` exactly once. Success requires the exact ASCII response `OK MUTE ON`. This mutes only the automatic firing audio produced by `FIRE`. |
+| `c3mute off` | Send the ID3 `0xA0` ASCII command `MUTE OFF` exactly once. Success requires the exact ASCII response `OK MUTE OFF`. |
 
 Leg moves use the values already present in the balancing firmware: speed 150
 and acceleration 15. Startup, help, position reads, and Ping never issue a move.
@@ -50,6 +52,14 @@ length, checksum, and zero error byte before accepting an ID3 response. A
 timeout, malformed packet, TX echo, or packet from another ID is never reported
 as success. Response parameters from `0xA0` commands must be printable ASCII and
 are displayed on the USB monitor.
+
+The diagnostic does not send either MUTE command at startup, while displaying
+help, or during Ping. It neither saves nor infers MUTE state: that state belongs
+to the C3's RAM, and restarting the C3 restores its default of audio enabled.
+MUTE applies only to the automatic firing sound made by `FIRE`; a manual C3
+`SOUND` command still plays while MUTE is on. (The diagnostic does not expose a
+manual `SOUND` command.) Missing arguments, values other than exactly `on` or
+`off`, extra whitespace, and suffixes are rejected before bus transmission.
 
 The diagnostic also exposes the existing C3 `ARM`, `FIRE`, `DISARM`, and `STOP`
 commands for deliberate manual testing. It never sends `ARM` or `FIRE` during
@@ -103,7 +113,14 @@ checksum, zero error byte, printable ASCII, and excluding a TX echo.
    such as `c3tilt`, `c3tilt +1500`, `c3tilt 1500x`, `c3tilt 499`, and
    `c3tilt 2401`; each must print an error without a `TX:` line or servo motion.
 7. Run `pos1`, then `pos2`, and compare the raw readings with the physical legs.
-8. Only after securing each leg, run one command at a time in this order:
+8. Run `c3mute on` and confirm that exactly one `MUTE ON` packet is transmitted
+   and that success is shown only for the exact response `OK MUTE ON`. Then run
+   `c3mute off` and perform the equivalent checks for `MUTE OFF` and
+   `OK MUTE OFF`. Try `c3mute`, `c3mute yes`, `c3mute on `, and `c3mute offx`;
+   each must be rejected without a `TX:` line. MUTE affects FIRE's automatic
+   audio only; manually requested SOUND playback remains audible. These are
+   on-machine checks, not claims that this repository change was hardware-tested.
+9. Only after securing each leg, run one command at a time in this order:
    `rhome`, `rext`, `rhome`, then `lhome`, `lext`, `lhome`.
 
 ## Unverified hardware/protocol items
