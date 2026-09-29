@@ -13,6 +13,7 @@ constexpr uint8_t kC3Id = 3;
 constexpr uint8_t kInstPing = 0x01;
 constexpr uint8_t kInstRead = 0x02;
 constexpr uint8_t kInstWrite = 0x03;
+constexpr uint8_t kInstAscii = 0xA0;
 constexpr uint8_t kPresentPositionAddress = 56;
 constexpr uint8_t kAccelerationAddress = 41;
 constexpr uint32_t kResponseTimeoutMs = 30;
@@ -25,7 +26,8 @@ constexpr uint16_t kMoveSpeed = 150;
 constexpr uint8_t kMoveAcceleration = 15;
 
 struct Packet {
-  uint8_t bytes[32];
+  // The C3 protocol permits up to 253 response parameters.
+  uint8_t bytes[259];
   size_t size;
 };
 
@@ -131,14 +133,59 @@ bool pingServo(uint8_t id) {
   request[5] = checksum(request, 2, 5);
   Packet response = {};
   Serial.printf("PING ID %u (no motion command)\n", id);
-  const bool ok = transact(request, sizeof(request), id, response);
+  bool ok = transact(request, sizeof(request), id, response);
+  if (ok && (response.size != 6 || response.bytes[3] != 2)) {
+    Serial.printf("RESULT: ID %u invalid Ping response length=%u\n", id,
+                  response.bytes[3]);
+    ok = false;
+  }
+  if (ok && response.bytes[4] != 0) {
+    Serial.printf("RESULT: ID %u Ping error=%02X\n", id, response.bytes[4]);
+    ok = false;
+  }
   Serial.printf("RESULT: ID %u %s\n", id, ok ? "RESPONDED" : "NO RESPONSE");
   return ok;
 }
 
-void pingC3Unavailable() {
-  Serial.printf("ID %u: NOT SENT - legged-balancing-2c3 packet and response "
-                "format were not available for source verification.\n", kC3Id);
+void sendC3AsciiCommand(const char* command) {
+  const size_t parameterCount = strlen(command);
+  if (parameterCount == 0 || parameterCount > 253) {
+    Serial.println("RESULT: invalid local C3 command length; nothing sent");
+    return;
+  }
+
+  uint8_t request[259] = {0xFF, 0xFF, kC3Id,
+                          static_cast<uint8_t>(parameterCount + 2), kInstAscii};
+  memcpy(request + 5, command, parameterCount);
+  const size_t requestSize = parameterCount + 6;
+  request[requestSize - 1] = checksum(request, 2, requestSize - 1);
+
+  Packet response = {};
+  Serial.printf("C3 ASCII ID %u: %s\n", kC3Id, command);
+  if (!transact(request, requestSize, kC3Id, response)) return;
+
+  const uint8_t length = response.bytes[3];
+  const uint8_t error = response.bytes[4];
+  Serial.printf("C3 response: ID=%u length=%u error=%02X checksum=OK\n",
+                response.bytes[2], length, error);
+  if (error != 0) {
+    Serial.println("RESULT: C3 returned an error; response rejected");
+    return;
+  }
+
+  const size_t responseParameterCount = static_cast<size_t>(length) - 2;
+  for (size_t i = 0; i < responseParameterCount; ++i) {
+    const uint8_t value = response.bytes[5 + i];
+    if (value < 0x20 || value > 0x7E) {
+      Serial.printf("RESULT: non-ASCII response parameter at offset %u: %02X\n",
+                    static_cast<unsigned>(i), value);
+      return;
+    }
+  }
+  Serial.print("C3 ASCII response: ");
+  Serial.write(response.bytes + 5, responseParameterCount);
+  Serial.println();
+  Serial.println("RESULT: valid C3 response");
 }
 
 void readPosition(uint8_t id) {
@@ -177,24 +224,20 @@ void moveServo(uint8_t id, int16_t position, const char* action) {
   Serial.println("RESULT: command sent once; no retry and no motion inferred");
 }
 
-void printC3CommandsUnavailable() {
-  Serial.println("ID 3 COMMAND: NOT SENT");
-  Serial.println("Reason: current legged-balancing-2c3 command framing, checksum, "
-                 "and response format have not been verified from source.");
-}
-
 void printHelp() {
   Serial.println("\n=== 1 Mbps BUS DIAGNOSTIC (wheel motors are never initialized) ===");
   Serial.println("help       : show this menu");
   Serial.println("ping1      : ping right STS3215 ID 1");
   Serial.println("ping2      : ping left STS3215 ID 2");
-  Serial.println("ping3      : report ID 3 protocol unavailable; transmit nothing");
-  Serial.println("pingall    : ping ID 1/2; report ID 3 unavailable");
+  Serial.println("ping3      : standard Ping to C3 ID 3");
+  Serial.println("pingall    : ping ID 1, ID 2, and ID 3 once each");
   Serial.println("pos1/pos2  : read current STS3215 position");
   Serial.println("rhome/rext : move right ID 1 to HOME/small extension");
   Serial.println("lhome/lext : move left ID 2 to HOME/small extension");
-  Serial.println("c3help/c3status/c3laser/c3tilt/c3sound");
-  Serial.println("           : disabled until 2c3 source protocol is verified");
+  Serial.println("c3ping     : send C3 0xA0 ASCII command PING");
+  Serial.println("c3help     : send C3 0xA0 ASCII command HELP");
+  Serial.println("c3status   : send C3 0xA0 ASCII command STATUS");
+  Serial.println("No ARM/FIRE/TEST/SOUND/LASER/TILT commands are provided.");
 }
 
 void handleCommand(String command) {
@@ -205,18 +248,20 @@ void handleCommand(String command) {
   if (command == "help" || command == "h" || command == "?") printHelp();
   else if (command == "ping1") pingServo(kRightId);
   else if (command == "ping2") pingServo(kLeftId);
-  else if (command == "ping3") pingC3Unavailable();
+  else if (command == "ping3") pingServo(kC3Id);
   else if (command == "pingall") {
     pingServo(kRightId);
     pingServo(kLeftId);
-    pingC3Unavailable();
+    pingServo(kC3Id);
   } else if (command == "pos1") readPosition(kRightId);
   else if (command == "pos2") readPosition(kLeftId);
   else if (command == "rhome") moveServo(kRightId, kRightHome, "HOME");
   else if (command == "rext") moveServo(kRightId, kRightExtend, "SMALL_EXTEND");
   else if (command == "lhome") moveServo(kLeftId, kLeftHome, "HOME");
   else if (command == "lext") moveServo(kLeftId, kLeftExtend, "SMALL_EXTEND");
-  else if (command.startsWith("c3")) printC3CommandsUnavailable();
+  else if (command == "c3ping") sendC3AsciiCommand("PING");
+  else if (command == "c3help") sendC3AsciiCommand("HELP");
+  else if (command == "c3status") sendC3AsciiCommand("STATUS");
   else Serial.println("Unknown command; enter 'help'. Nothing was transmitted.");
 }
 }  // namespace
