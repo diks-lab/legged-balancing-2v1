@@ -273,6 +273,24 @@ void handleC3Fire(const String& command) {
       "not inferred and FIRE will not be retried");
 }
 
+void handleC3Mute(const String& command) {
+  if (command == "c3mute on") {
+    sendC3AsciiCommand("MUTE ON", "OK MUTE ON");
+    return;
+  }
+  if (command == "c3mute off") {
+    sendC3AsciiCommand("MUTE OFF", "OK MUTE OFF");
+    return;
+  }
+
+  // Match only the two complete commands above. In particular, do not trim
+  // whitespace or accept suffixes, so malformed actuator input cannot reach
+  // the bus.
+  Serial.println(
+      "ERROR: usage: c3mute on|off (no extra characters); nothing was "
+      "transmitted");
+}
+
 void readPosition(uint8_t id) {
   uint8_t request[] = {0xFF, 0xFF, id, 4, kInstRead,
                        kPresentPositionAddress, 2, 0};
@@ -327,6 +345,9 @@ void printHelp() {
   Serial.println("c3disarm   : send C3 0xA0 ASCII command DISARM once");
   Serial.println("c3stop     : send C3 0xA0 ASCII command STOP once");
   Serial.println("c3tilt <us>: set C3 ID 3 barrel servo pulse (500-2400 us)");
+  Serial.println("c3mute on  : mute FIRE automatic firing audio (RAM state only)");
+  Serial.println("c3mute off : enable FIRE automatic firing audio (RAM state only)");
+  Serial.println("MUTE does not suppress manually requested SOUND playback.");
   Serial.println("No automatic ARM, FIRE retry, or local ARM-state tracking is used.");
 }
 
@@ -362,6 +383,8 @@ void handleCommand(String command) {
     handleC3Fire(command);
   else if (command == "c3tilt" || command.startsWith("c3tilt"))
     handleC3Tilt(command);
+  else if (command == "c3mute" || command.startsWith("c3mute"))
+    handleC3Mute(command);
   else Serial.println("Unknown command; enter 'help'. Nothing was transmitted.");
 }
 }  // namespace
