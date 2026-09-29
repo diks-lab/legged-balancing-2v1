@@ -196,7 +196,8 @@ void sendC3AsciiCommand(const char* command,
       return;
     }
   }
-  Serial.println("RESULT: valid C3 response");
+  Serial.println(
+      "RESULT: valid C3 response (command outcome is the response text above)");
 }
 
 void handleC3Tilt(const String& command) {
@@ -243,6 +244,33 @@ void handleC3Tilt(const String& command) {
   snprintf(expectedResponse, sizeof(expectedResponse), "OK TILT %lu us",
            static_cast<unsigned long>(pulseUs));
   sendC3AsciiCommand(request, expectedResponse);
+}
+
+void handleC3Fire(const String& command) {
+  constexpr char kPrefix[] = "c3fire ";
+
+  if (!command.startsWith(kPrefix)) {
+    Serial.println("ERROR: usage: c3fire <1-9>; nothing was transmitted");
+    return;
+  }
+
+  const String numberText = command.substring(sizeof(kPrefix) - 1);
+  // Deliberately accept exactly one ASCII digit. This rejects missing values,
+  // signs, whitespace, and suffixes before any packet can reach the bus.
+  if (numberText.length() != 1 || numberText.charAt(0) < '1' ||
+      numberText.charAt(0) > '9') {
+    Serial.println(
+        "ERROR: c3fire requires exactly one digit from 1 through 9 (no sign "
+        "or extra characters); nothing was transmitted");
+    return;
+  }
+
+  char request[] = "FIRE 0";
+  request[5] = numberText.charAt(0);
+  sendC3AsciiCommand(request);
+  Serial.println(
+      "NOTICE: the response reports protocol validity only; firing outcome is "
+      "not inferred and FIRE will not be retried");
 }
 
 void readPosition(uint8_t id) {
@@ -294,12 +322,19 @@ void printHelp() {
   Serial.println("c3ping     : send C3 0xA0 ASCII command PING");
   Serial.println("c3help     : send C3 0xA0 ASCII command HELP");
   Serial.println("c3status   : send C3 0xA0 ASCII command STATUS");
+  Serial.println("c3arm      : send C3 0xA0 ASCII command ARM once");
+  Serial.println("c3fire <n> : send FIRE <n> once (n is one digit, 1-9)");
+  Serial.println("c3disarm   : send C3 0xA0 ASCII command DISARM once");
+  Serial.println("c3stop     : send C3 0xA0 ASCII command STOP once");
   Serial.println("c3tilt <us>: set C3 ID 3 barrel servo pulse (500-2400 us)");
-  Serial.println("No ARM/FIRE/TEST/SOUND/LASER commands are provided.");
+  Serial.println("No automatic ARM, FIRE retry, or local ARM-state tracking is used.");
 }
 
 void handleCommand(String command) {
-  command.trim();
+  // Serial monitors commonly terminate a line with CRLF. Remove only that
+  // framing CR; do not trim user input because actuator arguments must reject
+  // leading/trailing whitespace rather than silently normalizing it.
+  if (command.endsWith("\r")) command.remove(command.length() - 1);
   command.toLowerCase();
   if (command.isEmpty()) return;
   Serial.printf("COMMAND: %s\n", command.c_str());
@@ -320,6 +355,11 @@ void handleCommand(String command) {
   else if (command == "c3ping") sendC3AsciiCommand("PING");
   else if (command == "c3help") sendC3AsciiCommand("HELP");
   else if (command == "c3status") sendC3AsciiCommand("STATUS");
+  else if (command == "c3arm") sendC3AsciiCommand("ARM");
+  else if (command == "c3disarm") sendC3AsciiCommand("DISARM");
+  else if (command == "c3stop") sendC3AsciiCommand("STOP");
+  else if (command == "c3fire" || command.startsWith("c3fire"))
+    handleC3Fire(command);
   else if (command == "c3tilt" || command.startsWith("c3tilt"))
     handleC3Tilt(command);
   else Serial.println("Unknown command; enter 'help'. Nothing was transmitted.");
