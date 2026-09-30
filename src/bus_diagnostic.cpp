@@ -19,10 +19,10 @@ constexpr uint8_t kAccelerationAddress = 41;
 constexpr uint32_t kResponseTimeoutMs = 30;
 
 // New-board battery monitor: 100 kohm (battery side) / 33 kohm (GND side).
-constexpr int kBatteryAdcPin = 36;
+constexpr int kBatteryAdcPin = 34;
 constexpr int kBatteryLedPin = 22;
 constexpr float kBatteryDividerMultiplier = 133.0f / 33.0f;
-constexpr float kBatteryCalibration = 1.0f;
+constexpr float kBatteryCalibration = 0.9728f;
 constexpr float kLowVoltage = 7.2f;
 constexpr float kCriticalVoltage = 7.0f;
 constexpr float kRecoveryHysteresis = 0.1f;
@@ -83,7 +83,7 @@ void applyBatteryState(BatteryState state, uint32_t now) {
 }
 
 void updateBatteryState(float volts, bool valid, uint32_t now) {
-  if (!valid) {
+  if (!valid || volts < 1.0f) {
     pendingBatteryState = BatteryState::kInvalid;
     applyBatteryState(BatteryState::kInvalid, now);
     return;
@@ -546,7 +546,7 @@ void setup() {
   pinMode(kBatteryLedPin, OUTPUT);
   setLed(false);
   // Arduino-ESP32 3.x names the former 11 dB range ADC_ATTEN_DB_12.
-  analogSetPinAttenuation(kBatteryAdcPin, ADC_ATTEN_DB_12);
+  analogSetPinAttenuation(kBatteryAdcPin, ADC_11db);
   delay(200);
   Serial.println("Bus diagnostic ready: RX=GPIO16 TX=GPIO17 1000000 8N1");
   printHelp();
