@@ -18,12 +18,152 @@ constexpr uint8_t kPresentPositionAddress = 56;
 constexpr uint8_t kAccelerationAddress = 41;
 constexpr uint32_t kResponseTimeoutMs = 30;
 
+// New-board battery monitor: 100 kohm (battery side) / 33 kohm (GND side).
+constexpr int kBatteryAdcPin = 36;
+constexpr int kBatteryLedPin = 22;
+constexpr float kBatteryDividerMultiplier = 133.0f / 33.0f;
+constexpr float kBatteryCalibration = 1.0f;
+constexpr float kLowVoltage = 7.2f;
+constexpr float kCriticalVoltage = 7.0f;
+constexpr float kRecoveryHysteresis = 0.1f;
+constexpr uint32_t kWarningHoldMs = 1000;
+constexpr uint32_t kNormalBlinkMs = 0;
+constexpr uint32_t kLowBlinkMs = 500;
+constexpr uint32_t kCriticalBlinkMs = 125;
+constexpr uint32_t kBatterySampleIntervalMs = 10;
+constexpr uint8_t kBatterySamplesPerAverage = 16;
+constexpr uint32_t kBatteryStreamIntervalMs = 1000;
+// The expected full-battery ADC input is only about 2084 mV. Values close to
+// ground mean no battery, and values near the ADC range limit are not trusted.
+constexpr uint32_t kMinimumValidAdcMv = 50;
+constexpr uint32_t kMaximumValidAdcMv = 3000;
+
 constexpr int16_t kRightHome = 2061;
 constexpr int16_t kRightExtend = 2044;
 constexpr int16_t kLeftHome = 2026;
 constexpr int16_t kLeftExtend = 2044;
 constexpr uint16_t kMoveSpeed = 150;
 constexpr uint8_t kMoveAcceleration = 15;
+
+enum class BatteryState { kNormal, kLow, kCritical, kInvalid };
+
+BatteryState batteryState = BatteryState::kInvalid;
+BatteryState pendingBatteryState = BatteryState::kInvalid;
+uint32_t pendingBatterySinceMs = 0;
+uint32_t batteryAdcMv = 0;
+float batteryVoltage = 0.0f;
+uint32_t batterySampleSumMv = 0;
+uint8_t batterySampleCount = 0;
+bool batteryAverageHasInvalidSample = false;
+uint32_t lastBatterySampleMs = 0;
+uint32_t lastLedToggleMs = 0;
+bool ledIsOn = false;
+bool batteryStreamEnabled = false;
+uint32_t lastBatteryStreamMs = 0;
+
+const char* batteryStateName(BatteryState state) {
+  switch (state) {
+    case BatteryState::kNormal: return "NORMAL";
+    case BatteryState::kLow: return "LOW";
+    case BatteryState::kCritical: return "CRITICAL";
+    default: return "INVALID";
+  }
+}
+
+void setLed(bool on) {
+  ledIsOn = on;
+  digitalWrite(kBatteryLedPin, on ? HIGH : LOW);
+}
+
+void applyBatteryState(BatteryState state, uint32_t now) {
+  if (batteryState == state) return;
+  batteryState = state;
+  lastLedToggleMs = now;
+  setLed(state == BatteryState::kNormal);
+}
+
+void updateBatteryState(float volts, bool valid, uint32_t now) {
+  if (!valid) {
+    pendingBatteryState = BatteryState::kInvalid;
+    applyBatteryState(BatteryState::kInvalid, now);
+    return;
+  }
+
+  // A valid first reading starts in NORMAL. Any warning still has to remain
+  // below its threshold for a full second before it is displayed.
+  if (batteryState == BatteryState::kInvalid)
+    applyBatteryState(BatteryState::kNormal, now);
+
+  BatteryState desired = batteryState;
+  if (batteryState == BatteryState::kNormal) {
+    if (volts < kCriticalVoltage) desired = BatteryState::kCritical;
+    else if (volts < kLowVoltage) desired = BatteryState::kLow;
+  } else if (batteryState == BatteryState::kLow) {
+    if (volts < kCriticalVoltage) desired = BatteryState::kCritical;
+    else if (volts >= kLowVoltage + kRecoveryHysteresis)
+      desired = BatteryState::kNormal;
+  } else if (batteryState == BatteryState::kCritical) {
+    if (volts >= kLowVoltage + kRecoveryHysteresis)
+      desired = BatteryState::kNormal;
+    else if (volts >= kCriticalVoltage + kRecoveryHysteresis)
+      desired = BatteryState::kLow;
+  }
+
+  const bool becomingMoreSevere =
+      static_cast<int>(desired) > static_cast<int>(batteryState) &&
+      desired != BatteryState::kInvalid;
+  if (!becomingMoreSevere) {
+    pendingBatteryState = BatteryState::kInvalid;
+    applyBatteryState(desired, now);
+  } else if (pendingBatteryState != desired) {
+    pendingBatteryState = desired;
+    pendingBatterySinceMs = now;
+  } else if (now - pendingBatterySinceMs >= kWarningHoldMs) {
+    pendingBatteryState = BatteryState::kInvalid;
+    applyBatteryState(desired, now);
+  }
+}
+
+void printBattery() {
+  Serial.printf("BATTERY: adc=%lu mV voltage=%.3f V led=%s\n",
+                static_cast<unsigned long>(batteryAdcMv), batteryVoltage,
+                batteryStateName(batteryState));
+}
+
+void serviceBattery() {
+  const uint32_t now = millis();
+  if (now - lastBatterySampleMs >= kBatterySampleIntervalMs) {
+    lastBatterySampleMs = now;
+    const uint32_t sampleMv = analogReadMilliVolts(kBatteryAdcPin);
+    batterySampleSumMv += sampleMv;
+    batteryAverageHasInvalidSample |=
+        sampleMv <= kMinimumValidAdcMv || sampleMv >= kMaximumValidAdcMv;
+    if (++batterySampleCount == kBatterySamplesPerAverage) {
+      batteryAdcMv = batterySampleSumMv / kBatterySamplesPerAverage;
+      batteryVoltage = batteryAdcMv * 0.001f * kBatteryDividerMultiplier *
+                       kBatteryCalibration;
+      updateBatteryState(batteryVoltage, !batteryAverageHasInvalidSample, now);
+      batterySampleSumMv = 0;
+      batterySampleCount = 0;
+      batteryAverageHasInvalidSample = false;
+    }
+  }
+
+  uint32_t blinkMs = kNormalBlinkMs;
+  if (batteryState == BatteryState::kLow) blinkMs = kLowBlinkMs;
+  else if (batteryState == BatteryState::kCritical) blinkMs = kCriticalBlinkMs;
+  if (blinkMs != 0 && now - lastLedToggleMs >= blinkMs) {
+    lastLedToggleMs = now;
+    setLed(!ledIsOn);
+  }
+
+  if (batteryStreamEnabled && now - lastBatteryStreamMs >=
+                                  kBatteryStreamIntervalMs &&
+      Serial.availableForWrite() >= 64) {
+    lastBatteryStreamMs = now;
+    printBattery();
+  }
+}
 
 struct Packet {
   // The C3 protocol permits up to 253 response parameters.
@@ -347,6 +487,8 @@ void printHelp() {
   Serial.println("c3tilt <us>: set C3 ID 3 barrel servo pulse (500-2400 us)");
   Serial.println("c3mute on  : mute FIRE automatic firing audio (RAM state only)");
   Serial.println("c3mute off : enable FIRE automatic firing audio (RAM state only)");
+  Serial.println("battery    : show ADC mV, battery voltage, and LED state");
+  Serial.println("battery stream on/off : enable/disable 1 Hz battery output");
   Serial.println("MUTE does not suppress manually requested SOUND playback.");
   Serial.println("No automatic ARM, FIRE retry, or local ARM-state tracking is used.");
 }
@@ -385,6 +527,15 @@ void handleCommand(String command) {
     handleC3Tilt(command);
   else if (command == "c3mute" || command.startsWith("c3mute"))
     handleC3Mute(command);
+  else if (command == "battery") printBattery();
+  else if (command == "battery stream on") {
+    batteryStreamEnabled = true;
+    lastBatteryStreamMs = millis();
+    Serial.println("Battery stream enabled (1 Hz).");
+  } else if (command == "battery stream off") {
+    batteryStreamEnabled = false;
+    Serial.println("Battery stream disabled.");
+  }
   else Serial.println("Unknown command; enter 'help'. Nothing was transmitted.");
 }
 }  // namespace
@@ -392,11 +543,16 @@ void handleCommand(String command) {
 void setup() {
   Serial.begin(kUsbBaud);
   Serial2.begin(kBusBaud, SERIAL_8N1, kBusRxPin, kBusTxPin);
+  pinMode(kBatteryLedPin, OUTPUT);
+  setLed(false);
+  // Arduino-ESP32 3.x names the former 11 dB range ADC_ATTEN_DB_12.
+  analogSetPinAttenuation(kBatteryAdcPin, ADC_ATTEN_DB_12);
   delay(200);
   Serial.println("Bus diagnostic ready: RX=GPIO16 TX=GPIO17 1000000 8N1");
   printHelp();
 }
 
 void loop() {
+  serviceBattery();
   if (Serial.available()) handleCommand(Serial.readStringUntil('\n'));
 }
