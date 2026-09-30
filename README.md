@@ -41,6 +41,9 @@ Commands are newline-terminated:
 | `c3tilt <us>` | Send one ID3 `0xA0` ASCII command `TILT <us>` to set the barrel servo pulse. `<us>` must contain only decimal digits and be in the inclusive range 500–2400; invalid input is not transmitted. Success requires the exact ASCII response `OK TILT <us> us`. |
 | `c3mute on` | Send the ID3 `0xA0` ASCII command `MUTE ON` exactly once. Success requires the exact ASCII response `OK MUTE ON`. This mutes only the automatic firing audio produced by `FIRE`. |
 | `c3mute off` | Send the ID3 `0xA0` ASCII command `MUTE OFF` exactly once. Success requires the exact ASCII response `OK MUTE OFF`. |
+| `battery` | Print averaged GPIO36 ADC mV, converted battery voltage, and GPIO22 LED state (`NORMAL`, `LOW`, `CRITICAL`, or `INVALID`). |
+| `battery stream on` | Enable the same battery report at 1 Hz; measurement and LED operation are independent of streaming. |
+| `battery stream off` | Disable the 1 Hz battery report. |
 
 Leg moves use the values already present in the balancing firmware: speed 150
 and acceleration 15. Startup, help, position reads, and Ping never issue a move.
@@ -60,6 +63,50 @@ MUTE applies only to the automatic firing sound made by `FIRE`; a manual C3
 `SOUND` command still plays while MUTE is on. (The diagnostic does not expose a
 manual `SOUND` command.) Missing arguments, values other than exactly `on` or
 `off`, extra whitespace, and suffixes are rejected before bus transmission.
+
+### Battery voltage and status LED
+
+The new-board battery divider is monitored only by this diagnostic firmware.
+GPIO36 uses the calibrated `analogReadMilliVolts()` API with the Arduino-ESP32
+3.x `ADC_ATTEN_DB_12` attenuation setting (the range formerly called 11 dB).
+Sixteen samples, spaced 10 ms apart without a blocking wait, are averaged.
+Battery voltage is `ADC volts * 133 / 33`; a separate calibration multiplier in
+`src/bus_diagnostic.cpp` is initially `1.0`. GPIO22 drives the active-HIGH LED:
+
+| Averaged voltage / condition | LED and state |
+| --- | --- |
+| At least 7.2 V | Steady on, `NORMAL` |
+| At least 7.0 V and below 7.2 V | Toggle every 500 ms, `LOW` |
+| Below 7.0 V | Toggle every 125 ms, `CRITICAL` |
+| ADC at/below 50 mV or at/above 3000 mV | Off, `INVALID` |
+
+A transition toward a warning must remain below its threshold for one second.
+Recovery is immediate only after 0.1 V hysteresis: LOW returns to NORMAL at
+7.3 V, while CRITICAL returns to LOW at 7.1 V (or directly to NORMAL at 7.3 V).
+Until the first complete valid average, the LED is off and state is `INVALID`.
+These are provisional low-voltage warnings, not a state-of-charge or “10%
+remaining” measurement. They cannot detect faults not inferable from voltage
+and do not inhibit wheels, leg movement, or firing.
+
+#### Meter comparison and threshold test
+
+1. Secure the robot and make the wheel and firing mechanisms safe. Connect a
+   multimeter across battery positive and ground.
+2. With a normally charged 2S LiPo connected, run `battery` and compare it with
+   the meter. At 8.4 V battery voltage, expect about 2.084 V (2084 mV) on
+   GPIO36. Do not apply more than the board permits to the ADC pin.
+3. If a consistent ratio remains after checking wiring and resistor values,
+   calculate `meter voltage / reported voltage` and use it as the diagnostic's
+   calibration multiplier. Its checked-in value intentionally remains `1.0`.
+4. **Do not discharge a LiPo to test warnings.** Disconnect it and use a
+   current-limited adjustable bench supply on the battery input. Sweep around
+   7.2 V and 7.0 V, allowing over one second below each threshold, and verify
+   states and LED periods. Raise the supply through 7.1 V and 7.3 V to verify
+   hysteresis. Disconnect the supply and verify `INVALID` with the LED off.
+
+Sampling, state timing, and blinking use `millis()` with no added delay. The
+optional stream writes once per second only when the USB serial buffer has
+room, so it does not intentionally hold up the 1 Mbps bus path.
 
 The diagnostic also exposes the existing C3 `ARM`, `FIRE`, `DISARM`, and `STOP`
 commands for deliberate manual testing. It never sends `ARM` or `FIRE` during
