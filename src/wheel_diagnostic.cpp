@@ -10,9 +10,9 @@
 namespace {
 // Wiring and the provisional 7 pole pairs follow main.cpp, not the 2208 label.
 constexpr int kPolePairs = 7;
-constexpr float kSupplyVoltage = 8.0f;  // Match actual supply before powering.
-constexpr float kAlignVoltage = 0.5f;   // Lower than main.cpp's 2 V; may not align.
-constexpr float kDriveVoltage = 0.3f;   // Voltage torque, NOT current limiting.
+constexpr float kSupplyVoltage = 8.3f;  // Match actual supply before powering.
+constexpr float kAlignVoltage = 1.0f;   // Lower than main.cpp's 2 V; may not align.
+constexpr float kDriveVoltage = 0.5f;   // Voltage torque, NOT current limiting.
 constexpr uint32_t kRunMs = 1500;       // Below 2 s, allowing loop/I2C overhead.
 constexpr uint32_t kAlignMs = 6000;     // Guard for blocking initFOC, not motor.init.
 constexpr uint32_t kStreamMs = 200;
@@ -118,8 +118,9 @@ class CheckedAS5600 : public Sensor {
     const int status = bus_.read(), high = bus_.read(), low = bus_.read();
     if (status < 0 || high < 0 || low < 0 || (high & 0xF0))
       return fail("INVALID_DATA");
-    if (!(status & 0x20) || (status & 0x18)) return fail("MAGNET_MISSING/WEAK/STRONG");
-    const float a = ((high << 8) | low) * (kTau / 4096.0f);
+    // 単体診断用：磁力不足は許容。磁石未検出・磁力過大は停止。
+    if (!(status & 0x20) || (status & 0x08)) return fail("MAGNET_MISSING/STRONG");
+    const float a = ((high << 8) | low) * kTau / 4096.0f;
     if (!isfinite(a) || a < 0 || a >= kTau) return fail("INVALID_ANGLE");
     lastGoodMs = millis();
     error = "OK";
@@ -253,6 +254,9 @@ void startWheel(Wheel& w, float sign) {
     const bool initOK = w.motor.init();
     const bool guardOK = initOK && armTimer(kAlignMs);
     const bool focOK = guardOK && w.motor.initFOC();
+    logLine("INIT ENTRY: initOK=%d guardOK=%d\n",
+        static_cast<int>(initOK),
+        static_cast<int>(guardOK));
     gateOff();
     if (timerReady) esp_timer_stop(outputTimer);
     w.motor.disable();
@@ -269,6 +273,11 @@ void startWheel(Wheel& w, float sign) {
     // SimpleFOC treats pole-pair mismatch as a warning, not failure. For this
     // diagnostic reject it; do not silently accept an estimated pole count.
     if (!focOK || timerExpired.load() || !w.motor.pp_check_result || !sensorsOK()) {
+      logLine("INIT CHECK: focOK=%d timeout=%d ppOK=%d sensorsOK=%d\n",
+              static_cast<int>(focOK),
+              static_cast<int>(timerExpired.load()),
+              static_cast<int>(w.motor.pp_check_result),
+              static_cast<int>(sensorsOK()));
       w.initFault = true;
       stopAll("FOC/sensor/pole-pair check failed (no voltage increase/retry)");
       return;
@@ -355,6 +364,8 @@ void setup() {
   pinMode(kRightEnable, OUTPUT);
   pinMode(kLeftEnable, OUTPUT);
   Serial.begin(115200);
+  leftMotor.useMonitoring(Serial);
+  rightMotor.useMonitoring(Serial);
   esp_timer_create_args_t timerArgs = {};
   timerArgs.callback = outputTimeout;
   timerArgs.name = "wheel_gate_off";
