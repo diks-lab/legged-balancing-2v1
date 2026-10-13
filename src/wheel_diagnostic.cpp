@@ -11,8 +11,8 @@ namespace {
 // Wiring and the provisional 7 pole pairs follow main.cpp, not the 2208 label.
 constexpr int kPolePairs = 7;
 constexpr float kSupplyVoltage = 8.3f;  // Match actual supply before powering.
-constexpr float kAlignVoltage = 1.0f;   // Lower than main.cpp's 2 V; may not align.
-constexpr float kDriveVoltage = 0.5f;   // Voltage torque, NOT current limiting.
+constexpr float kAlignVoltage = 2.0f;   // Alignment voltage verified on this robot.
+constexpr float kDriveVoltage = 0.9f;   // Voltage torque, NOT current limiting.
 constexpr uint32_t kRunMs = 1500;       // Below 2 s, allowing loop/I2C overhead.
 constexpr uint32_t kAlignMs = 6000;     // Guard for blocking initFOC, not motor.init.
 constexpr uint32_t kStreamMs = 200;
@@ -75,6 +75,7 @@ void pumpLog() {
 // requestFrom() length. Sensor::update() silently retains the previous angle
 // for a negative return. Explicitly latch errors and gate OFF in the callback,
 // including when initFOC() itself is polling. Never display retained data as OK.
+bool traceAlignment = false;
 class CheckedAS5600 : public Sensor {
  public:
   explicit CheckedAS5600(TwoWire& bus) : bus_(bus) {}
@@ -118,12 +119,20 @@ class CheckedAS5600 : public Sensor {
     const int status = bus_.read(), high = bus_.read(), low = bus_.read();
     if (status < 0 || high < 0 || low < 0 || (high & 0xF0))
       return fail("INVALID_DATA");
-    // 単体診断用：磁力不足は許容。磁石未検出・磁力過大は停止。
-    if (!(status & 0x20) || (status & 0x08)) return fail("MAGNET_MISSING/STRONG");
+    // 磁石未検出・磁力不足・磁力過大は停止。
+    if (!(status & 0x20) || (status & 0x18)) return fail("MAGNET_MISSING/WEAK/STRONG");
     const float a = ((high << 8) | low) * kTau / 4096.0f;
     if (!isfinite(a) || a < 0 || a >= kTau) return fail("INVALID_ANGLE");
     lastGoodMs = millis();
     error = "OK";
+
+    static uint32_t traceAt = 0;
+    if (traceAlignment && uint32_t(millis() - traceAt) >= 200) {
+      traceAt = millis();
+      logLine("ALIGN: ms=%lu angle=%.3f deg\n",
+              static_cast<unsigned long>(millis()),
+              a * 360.0f / kTau);
+    }
     return a;
   }
  private:
@@ -253,7 +262,9 @@ void startWheel(Wheel& w, float sign) {
     // CheckedAS5600. This synchronous path performs no subsequent enable.
     const bool initOK = w.motor.init();
     const bool guardOK = initOK && armTimer(kAlignMs);
+    traceAlignment = true;
     const bool focOK = guardOK && w.motor.initFOC();
+    traceAlignment = false;
     logLine("INIT ENTRY: initOK=%d guardOK=%d\n",
         static_cast<int>(initOK),
         static_cast<int>(guardOK));
@@ -389,6 +400,16 @@ void loop() {
     running->motor.loopFOC();  // Checked sensor callback can gate off here too.
     checkStop();
     if (running) running->motor.move(commandVoltage);
+  }
+  static uint32_t focLogAt = 0;
+  if (running && uint32_t(millis() - focLogAt) >= 200) {
+    focLogAt = millis();
+    auto& m = running->motor;
+    logLine("FOC: mech=%.3f el=%.3f Uq=%.3f "
+            "Ua=%.3f Ub=%.3f Uc=%.3f enabled=%d\n",
+            running->sensor.getMechanicalAngle(),
+            m.electrical_angle, m.voltage.q,
+            m.Ua, m.Ub, m.Uc, int(m.enabled));
   }
   if (streaming && static_cast<uint32_t>(millis() - streamAt) >= kStreamMs) {
     streamAt = millis();
