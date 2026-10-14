@@ -257,7 +257,7 @@ void startWheel(Wheel& w, float sign) {
     w.motor.PID_velocity.I = 0.4f;
     w.motor.PID_velocity.D = 0.0f;
     w.motor.PID_velocity.output_ramp = 5.0f;
-    w.motor.LPF_velocity.Tf = 0.02f;
+    w.motor.LPF_velocity.Tf = 0.05f;
     w.motor.velocity_limit = kTargetVelocity;
     w.motor.torque_controller = TorqueControlType::voltage;
     // motor.init() enables after a 500ms delay. An error BEFORE that enable
