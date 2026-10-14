@@ -12,13 +12,14 @@ namespace {
 constexpr int kPolePairs = 7;
 constexpr float kSupplyVoltage = 8.3f;  // Match actual supply before powering.
 constexpr float kAlignVoltage = 2.0f;   // Alignment voltage verified on this robot.
-constexpr float kDriveVoltage = 0.9f;   // Voltage torque, NOT current limiting.
+constexpr float kDriveVoltage = 1.0f;  // 0.9fから変更
 constexpr uint32_t kRunMs = 1500;       // Below 2 s, allowing loop/I2C overhead.
 constexpr uint32_t kAlignMs = 6000;     // Guard for blocking initFOC, not motor.init.
 constexpr uint32_t kStreamMs = 200;
 constexpr uint16_t kI2cTimeoutMs = 5;
 constexpr uint8_t kRightEnable = 27, kLeftEnable = 32;
 constexpr float kTau = 6.283185307179586f;
+constexpr float kTargetVelocity = 6.0f;  // rad/s：約57rpm
 
 void gateOff() {
   // Arduino-ESP32 3.x digitalWrite() ignores pins not yet registered by
@@ -107,7 +108,23 @@ class CheckedAS5600 : public Sensor {
     angle_prev = a;
     angle_prev_ts = micros();
   }
+  float getVelocity() override {
+    if (!ready || fault) return 0.0f;
 
+    const uint32_t dt =
+        uint32_t(angle_prev_ts) - uint32_t(vel_angle_prev_ts);
+    if (dt < 10000) return velocity;  // 10ms以上で更新
+
+    const float delta =
+        (float(full_rotations) - float(vel_full_rotations)) * kTau
+        + angle_prev - vel_angle_prev;
+
+    velocity = delta / (dt * 1e-6f);
+    vel_angle_prev = angle_prev;
+    vel_full_rotations = full_rotations;
+    vel_angle_prev_ts = angle_prev_ts;
+    return velocity;
+  }
  protected:
   float getSensorAngle() override {
     if (fault) return -1.0f;
@@ -166,7 +183,7 @@ Wheel left{"left", leftSensor, leftMotor, leftDriver, kLeftEnable};
 Wheel* running = nullptr;
 bool streaming = false;
 uint32_t runStarted = 0, streamAt = 0;
-float commandVoltage = 0;
+float commandVelocity = 0;
 char command[64];
 size_t commandLength = 0;
 bool discardLine = false;
@@ -180,7 +197,7 @@ void stopAll(const char* reason) {
     if (w->driverReady) w->motor.disable();
   }
   running = nullptr;
-  commandVoltage = 0;
+  commandVelocity = 0;
   logLine("STOP: %s; both outputs=0, drivers=DISABLED\n", reason);
 }
 
@@ -201,9 +218,10 @@ void reportSensor(Wheel& w) {
           static_cast<unsigned long>(millis() - w.sensor.lastGoodMs));
 }
 void reportStatus() {
-  logLine("state=%s selected=%s command=%+.2f V stream=%s dropped_logs=%lu\n",
+  logLine("state=%s selected=%s command=%+.2f rad/s stream=%s dropped_logs=%lu\n",
           running ? "RUNNING" : "IDLE", running ? running->name : "none",
-          commandVoltage, streaming ? "on" : "off", static_cast<unsigned long>(droppedLogs));
+          commandVelocity, streaming ? "on" : "off",
+          static_cast<unsigned long>(droppedLogs));
   logLine("pp=%d (provisional) supply=%.2f V align=%.2f V drive=%.2f V run=%lu ms I2C_timeout=%u ms\n",
           kPolePairs, kSupplyVoltage, kAlignVoltage, kDriveVoltage,
           static_cast<unsigned long>(kRunMs), kI2cTimeoutMs);
@@ -219,7 +237,7 @@ void reportStatus() {
 void help() {
   logLine("help | status | read left | read right | read both | stream on | stream off | stop\n");
   logLine("motor left + | motor left - | motor right + | motor right -\n");
-  logLine("First motor command aligns/moves that wheel. +/- is voltage sign, not vehicle direction.\n");
+  logLine("First motor command aligns/moves that wheel. +/- is target velocity sign, not vehicle direction.\n");
   logLine("Blocking init/initFOC: serial stop unavailable; FOC guard=6000ms, run timer=1500ms. Use power cut.\n");
 }
 
@@ -255,7 +273,13 @@ void startWheel(Wheel& w, float sign) {
     w.motor.linkSensor(&w.sensor);
     w.motor.voltage_limit = kAlignVoltage;
     w.motor.voltage_sensor_align = kAlignVoltage;
-    w.motor.controller = MotionControlType::torque;
+    w.motor.controller = MotionControlType::velocity;
+    w.motor.PID_velocity.P = 0.1f;
+    w.motor.PID_velocity.I = 0.4f;
+    w.motor.PID_velocity.D = 0.0f;
+    w.motor.PID_velocity.output_ramp = 5.0f;
+    w.motor.LPF_velocity.Tf = 0.05f;
+    w.motor.velocity_limit = kTargetVelocity;
     w.motor.torque_controller = TorqueControlType::voltage;
     // motor.init() enables after a 500ms delay. An error BEFORE that enable
     // is excluded by fresh checks above; errors during initFOC gate off in
@@ -307,15 +331,18 @@ void startWheel(Wheel& w, float sign) {
   rightSensor.update();
   leftSensor.update();
   if (!sensorsOK()) { stopAll("sensor fault before drive"); return; }
-  w.motor.voltage_limit = kDriveVoltage;
+  w.motor.updateVoltageLimit(kDriveVoltage);
   w.motor.target = 0;
+  w.motor.current_sp = 0;
+  w.motor.voltage.q = 0;
+  w.motor.voltage.d = 0;
   if (!armTimer(kRunMs)) { stopAll("output timer failed"); return; }
   runStarted = millis();
   w.motor.enable();
   running = &w;
-  commandVoltage = sign * kDriveVoltage;
-  logLine("RUN %s command=%+.2f V for %lu ms; other driver=DISABLED\n", w.name,
-          commandVoltage, static_cast<unsigned long>(kRunMs));
+  commandVelocity = sign * kTargetVelocity;
+  logLine("RUN %s command=%+.2f rad/s for %lu ms; other driver=DISABLED\n",
+          w.name, commandVelocity, static_cast<unsigned long>(kRunMs));
 }
 
 void dispatch(const char* s) {
@@ -399,17 +426,15 @@ void loop() {
   if (running) {
     running->motor.loopFOC();  // Checked sensor callback can gate off here too.
     checkStop();
-    if (running) running->motor.move(commandVoltage);
+    if (running) running->motor.move(commandVelocity);
   }
   static uint32_t focLogAt = 0;
   if (running && uint32_t(millis() - focLogAt) >= 200) {
     focLogAt = millis();
     auto& m = running->motor;
-    logLine("FOC: mech=%.3f el=%.3f Uq=%.3f "
-            "Ua=%.3f Ub=%.3f Uc=%.3f enabled=%d\n",
-            running->sensor.getMechanicalAngle(),
-            m.electrical_angle, m.voltage.q,
-            m.Ua, m.Ub, m.Uc, int(m.enabled));
+    logLine("VEL: target=%.3f actual=%.3f rad/s Uq=%.3f V loop_us=%lu\n",
+            commandVelocity, m.shaft_velocity, m.voltage.q,
+            static_cast<unsigned long>(m.loopfoc_time_us));
   }
   if (streaming && static_cast<uint32_t>(millis() - streamAt) >= kStreamMs) {
     streamAt = millis();
