@@ -85,6 +85,7 @@ class CheckedAS5600 : public Sensor {
   bool ready = false;
   const char* error = "NOT_INITIALIZED";
   uint32_t lastGoodMs = 0;
+  uint16_t lastRawCount = 0;  // Latest validated sample; logging never reads I2C.
 
   void begin(int sda, int scl) {
     if (!bus_.begin(sda, scl, 400000)) { fail("BUS_INIT"); return; }
@@ -103,8 +104,10 @@ class CheckedAS5600 : public Sensor {
     const int high = bus_.read(), low = bus_.read();
     if (high < 0 || high > 0x0F || low < 0 || low > 0xFF)
       return fail("INVALID_DATA");
-    const float a = (((high << 8) | low) / 4096.0f) * kTau;
+    const uint16_t raw = static_cast<uint16_t>((high << 8) | low);
+    const float a = (raw / 4096.0f) * kTau;
     if (!isfinite(a) || a < 0 || a >= kTau) return fail("INVALID_ANGLE");
+    lastRawCount = raw;
     lastGoodMs = millis();
     error = "OK";
 
@@ -397,9 +400,15 @@ void loop() {
   if (running && uint32_t(millis() - focLogAt) >= 50) {
     focLogAt = millis();
     auto& m = running->motor;
-    logLine("DRIVE: command=%.3f V velocity=%.3f rad/s Uq=%.3f V angle=%.3f deg\n",
+    const auto& sensor = running->sensor;
+    const uint32_t loggedAt = millis();
+    logLine("DRIVE: elapsed=%lu ms command=%.3f V velocity=%.3f rad/s Uq=%.3f V raw=%u raw_angle=%.3f deg sensor_angle=%.3f deg age=%lu ms\n",
+        static_cast<unsigned long>(loggedAt - runStarted),
         commandVoltage, m.shaft_velocity, m.voltage.q,
-        running->sensor.getMechanicalAngle() * 360.0f / kTau);
+        static_cast<unsigned int>(sensor.lastRawCount),
+        sensor.lastRawCount * 360.0f / 4096.0f,
+        running->sensor.getMechanicalAngle() * 360.0f / kTau,
+        static_cast<unsigned long>(loggedAt - sensor.lastGoodMs));
   }
   if (streaming && static_cast<uint32_t>(millis() - streamAt) >= kStreamMs) {
     streamAt = millis();
