@@ -92,6 +92,18 @@ class CheckedAS5600 : public Sensor {
     Sensor::init();
     ready = !fault;
   }
+  float getVelocity() override {
+    // SimpleFOC 2.4.0 retains the last nonzero velocity when delta_angle is
+    // zero, indefinitely. Clear only that stale result after its minimum
+    // sample interval; preserve the standard timestamps, wrap handling and
+    // moving-sample calculation (including elapsed time between count changes).
+    const float elapsed = (angle_prev_ts - vel_angle_prev_ts) * 1e-6f;
+    if (elapsed >= min_elapsed_time && full_rotations == vel_full_rotations &&
+        fabsf(angle_prev - vel_angle_prev) <= 1e-8f) {
+      velocity = 0.0f;
+    }
+    return Sensor::getVelocity();
+  }
  protected:
   float getSensorAngle() override {
     if (fault) return -1.0f;
@@ -387,9 +399,11 @@ void setup() {
 
 void loop() {
   checkStop();
-  rightSensor.update();
+  // loopFOC() updates the running wheel before move() reads its velocity.
+  // Poll only idle wheels here, keeping both fault checks without duplicate I2C.
+  if (running != &right) rightSensor.update();
   checkStop();
-  leftSensor.update();
+  if (running != &left) leftSensor.update();
   checkStop();
   receiveCommands();
   checkStop();
