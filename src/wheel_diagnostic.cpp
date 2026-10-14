@@ -19,7 +19,8 @@ constexpr uint32_t kStreamMs = 200;
 constexpr uint16_t kI2cTimeoutMs = 5;
 constexpr uint8_t kRightEnable = 27, kLeftEnable = 32;
 constexpr float kTau = 6.283185307179586f;
-constexpr float kTargetVelocity = 6.0f;  // rad/s：約57rpm
+constexpr float kTargetVelocity = 3.0f;  // Existing velocity limit; drive remains voltage torque.
+constexpr float kCommandVoltage = 0.70f;
 
 void gateOff() {
   // Arduino-ESP32 3.x digitalWrite() ignores pins not yet registered by
@@ -72,10 +73,10 @@ void pumpLog() {
   }
 }
 
-// MagneticSensorI2C 2.4.0 records endTransmission() but does not validate
-// requestFrom() length. Sensor::update() silently retains the previous angle
-// for a negative return. Explicitly latch errors and gate OFF in the callback,
-// including when initFOC() itself is polling. Never display retained data as OK.
+// Use SimpleFOC 2.4.0 Sensor initialization, wrap tracking and velocity calculation.
+// Read the same RAW_ANGLE registers as MagneticSensorI2C(AS5600_I2C), with
+// explicit communication/data checks because the standard reader does not
+// validate requestFrom() length. Faults latch and immediately gate both wheels.
 bool traceAlignment = false;
 class CheckedAS5600 : public Sensor {
  public:
@@ -88,57 +89,21 @@ class CheckedAS5600 : public Sensor {
   void begin(int sda, int scl) {
     if (!bus_.begin(sda, scl, 400000)) { fail("BUS_INIT"); return; }
     bus_.setTimeOut(kI2cTimeoutMs);
-    // Avoid Sensor::init() committing negative samples to its internal fields.
-    const float a = getSensorAngle();
-    if (fault) return;
-    angle_prev = vel_angle_prev = a;
-    angle_prev_ts = vel_angle_prev_ts = micros();
-    ready = true;
-  }
-
-  void update() override {
-    if (!ready || fault) return;
-    const float a = getSensorAngle();
-    if (fault) return;
-    // Shortest signed delta across 0/360. Poll continuously, even with stream
-    // off. Valid provided motion between samples is less than half a turn.
-    const float delta = a - angle_prev;
-    if (delta > kTau / 2) --full_rotations;
-    else if (delta < -kTau / 2) ++full_rotations;
-    angle_prev = a;
-    angle_prev_ts = micros();
-  }
-  float getVelocity() override {
-    if (!ready || fault) return 0.0f;
-
-    const uint32_t dt =
-        uint32_t(angle_prev_ts) - uint32_t(vel_angle_prev_ts);
-    if (dt < 10000) return velocity;  // 10ms以上で更新
-
-    const float delta =
-        (float(full_rotations) - float(vel_full_rotations)) * kTau
-        + angle_prev - vel_angle_prev;
-
-    velocity = delta / (dt * 1e-6f);
-    vel_angle_prev = angle_prev;
-    vel_full_rotations = full_rotations;
-    vel_angle_prev_ts = angle_prev_ts;
-    return velocity;
+    Sensor::init();
+    ready = !fault;
   }
  protected:
   float getSensorAngle() override {
     if (fault) return -1.0f;
     bus_.beginTransmission(0x36);
-    bus_.write(0x0B);  // STATUS, RAW_ANGLE high, RAW_ANGLE low (auto increment)
+    bus_.write(0x0C);  // RAW_ANGLE high and low, as AS5600_I2C.
     if (bus_.endTransmission(false) != 0) return fail("I2C_ADDRESS/NACK");
-    if (bus_.requestFrom(uint8_t(0x36), uint8_t(3)) != 3 || bus_.available() != 3)
+    if (bus_.requestFrom(uint8_t(0x36), uint8_t(2)) != 2 || bus_.available() != 2)
       return fail("I2C_SHORT_READ/TIMEOUT");
-    const int status = bus_.read(), high = bus_.read(), low = bus_.read();
-    if (status < 0 || high < 0 || low < 0 || (high & 0xF0))
+    const int high = bus_.read(), low = bus_.read();
+    if (high < 0 || high > 0x0F || low < 0 || low > 0xFF)
       return fail("INVALID_DATA");
-    // 磁石未検出・磁力不足・磁力過大は停止。
-    if (!(status & 0x20) || (status & 0x18)) return fail("MAGNET_MISSING/WEAK/STRONG");
-    const float a = ((high << 8) | low) * kTau / 4096.0f;
+    const float a = (((high << 8) | low) / 4096.0f) * kTau;
     if (!isfinite(a) || a < 0 || a >= kTau) return fail("INVALID_ANGLE");
     lastGoodMs = millis();
     error = "OK";
@@ -183,7 +148,7 @@ Wheel left{"left", leftSensor, leftMotor, leftDriver, kLeftEnable};
 Wheel* running = nullptr;
 bool streaming = false;
 uint32_t runStarted = 0, streamAt = 0;
-float commandVelocity = 0;
+float commandVoltage = 0;
 char command[64];
 size_t commandLength = 0;
 bool discardLine = false;
@@ -197,7 +162,7 @@ void stopAll(const char* reason) {
     if (w->driverReady) w->motor.disable();
   }
   running = nullptr;
-  commandVelocity = 0;
+  commandVoltage = 0;
   logLine("STOP: %s; both outputs=0, drivers=DISABLED\n", reason);
 }
 
@@ -218,9 +183,9 @@ void reportSensor(Wheel& w) {
           static_cast<unsigned long>(millis() - w.sensor.lastGoodMs));
 }
 void reportStatus() {
-  logLine("state=%s selected=%s command=%+.2f rad/s stream=%s dropped_logs=%lu\n",
+  logLine("state=%s selected=%s command=%+.2f V stream=%s dropped_logs=%lu\n",
           running ? "RUNNING" : "IDLE", running ? running->name : "none",
-          commandVelocity, streaming ? "on" : "off",
+          commandVoltage, streaming ? "on" : "off",
           static_cast<unsigned long>(droppedLogs));
   logLine("pp=%d (provisional) supply=%.2f V align=%.2f V drive=%.2f V run=%lu ms I2C_timeout=%u ms\n",
           kPolePairs, kSupplyVoltage, kAlignVoltage, kDriveVoltage,
@@ -237,7 +202,7 @@ void reportStatus() {
 void help() {
   logLine("help | status | read left | read right | read both | stream on | stream off | stop\n");
   logLine("motor left + | motor left - | motor right + | motor right -\n");
-  logLine("First motor command aligns/moves that wheel. +/- is target velocity sign, not vehicle direction.\n");
+  logLine("First motor command aligns/moves that wheel. +/- commands +0.70/-0.70 V, not vehicle direction.\n");
   logLine("Blocking init/initFOC: serial stop unavailable; FOC guard=6000ms, run timer=1500ms. Use power cut.\n");
 }
 
@@ -273,12 +238,12 @@ void startWheel(Wheel& w, float sign) {
     w.motor.linkSensor(&w.sensor);
     w.motor.voltage_limit = kAlignVoltage;
     w.motor.voltage_sensor_align = kAlignVoltage;
-    w.motor.controller = MotionControlType::velocity;
+    w.motor.controller = MotionControlType::torque;
     w.motor.PID_velocity.P = 0.1f;
     w.motor.PID_velocity.I = 0.4f;
     w.motor.PID_velocity.D = 0.0f;
     w.motor.PID_velocity.output_ramp = 5.0f;
-    w.motor.LPF_velocity.Tf = 0.05f;
+    w.motor.LPF_velocity.Tf = 0.02f;  // 0.05fから変更
     w.motor.velocity_limit = kTargetVelocity;
     w.motor.torque_controller = TorqueControlType::voltage;
     // motor.init() enables after a 500ms delay. An error BEFORE that enable
@@ -340,9 +305,9 @@ void startWheel(Wheel& w, float sign) {
   runStarted = millis();
   w.motor.enable();
   running = &w;
-  commandVelocity = sign * kTargetVelocity;
-  logLine("RUN %s command=%+.2f rad/s for %lu ms; other driver=DISABLED\n",
-          w.name, commandVelocity, static_cast<unsigned long>(kRunMs));
+  commandVoltage = sign * kCommandVoltage;
+  logLine("RUN %s command=%+.2f V for %lu ms; other driver=DISABLED\n",
+        w.name, commandVoltage, static_cast<unsigned long>(kRunMs));
 }
 
 void dispatch(const char* s) {
@@ -426,15 +391,15 @@ void loop() {
   if (running) {
     running->motor.loopFOC();  // Checked sensor callback can gate off here too.
     checkStop();
-    if (running) running->motor.move(commandVelocity);
+    if (running) running->motor.move(commandVoltage);
   }
   static uint32_t focLogAt = 0;
-  if (running && uint32_t(millis() - focLogAt) >= 200) {
+  if (running && uint32_t(millis() - focLogAt) >= 50) {
     focLogAt = millis();
     auto& m = running->motor;
-    logLine("VEL: target=%.3f actual=%.3f rad/s Uq=%.3f V loop_us=%lu\n",
-            commandVelocity, m.shaft_velocity, m.voltage.q,
-            static_cast<unsigned long>(m.loopfoc_time_us));
+    logLine("DRIVE: command=%.3f V velocity=%.3f rad/s Uq=%.3f V angle=%.3f deg\n",
+        commandVoltage, m.shaft_velocity, m.voltage.q,
+        running->sensor.getMechanicalAngle() * 360.0f / kTau);
   }
   if (streaming && static_cast<uint32_t>(millis() - streamAt) >= kStreamMs) {
     streamAt = millis();
