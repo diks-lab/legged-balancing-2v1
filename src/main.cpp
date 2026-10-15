@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 #include <atomic>
 #include "CheckedWheelSensor.h"
+#include "LqrMotorVoltage.h"
 
 #include "Servo_STS3032.h"
 #include "ssid.h"
@@ -888,12 +889,12 @@ void loop() {
     const float motor2_output_sign =
       m2_direction < 0.0f ? -1.0f : 1.0f;
 
-    right_output = constrain(-test_LQR_u * motor1_output_sign,
-                            -kLqrTestVoltageLimit,
-                            kLqrTestVoltageLimit);
-    left_output = constrain(-test_LQR_u * motor2_output_sign,
-                            -kLqrTestVoltageLimit,
-                            kLqrTestVoltageLimit);
+    right_output = lqrMotorVoltage(test_LQR_u, motor1_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
+    left_output = lqrMotorVoltage(test_LQR_u, motor2_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
   }
 
   if (polarity_test_active) {
@@ -1650,14 +1651,14 @@ void captureLqrDriveSignTrace(float speed_direct_term) {
       m2_direction < 0.0f ? -1.0f : 1.0f;
 
   sample.right_output =
-      constrain(-test_LQR_u * trace_motor1_output_sign,
-                -kLqrTestVoltageLimit,
-                kLqrTestVoltageLimit);
+      lqrMotorVoltage(test_LQR_u, trace_motor1_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
 
   sample.left_output =
-      constrain(-test_LQR_u * trace_motor2_output_sign,
-                -kLqrTestVoltageLimit,
-                kLqrTestVoltageLimit);
+      lqrMotorVoltage(test_LQR_u, trace_motor2_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
 
   sample.motor1_velocity = motor1.shaft_velocity;
   sample.motor2_velocity = motor2.shaft_velocity;
@@ -1810,14 +1811,14 @@ void captureLqrStopTrace(float speed_direct_term) {
       m2_direction < 0.0f ? -1.0f : 1.0f;
 
   sample.right_output =
-      constrain(-test_LQR_u * stop_trace_motor1_output_sign,
-                -kLqrTestVoltageLimit,
-                kLqrTestVoltageLimit);
+      lqrMotorVoltage(test_LQR_u, stop_trace_motor1_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
 
   sample.left_output =
-      constrain(-test_LQR_u * stop_trace_motor2_output_sign,
-                -kLqrTestVoltageLimit,
-                kLqrTestVoltageLimit);
+      lqrMotorVoltage(test_LQR_u, stop_trace_motor2_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
 
   sample.distance_delta =
       LQR_distance - lqr_stop_trace_origin_distance;
@@ -3140,11 +3141,13 @@ void updateLqrDiagnostic() {
       const float motor2_output_sign =
           m2_direction < 0.0f ? -1.0f : 1.0f;
       const float diagnostic_right_output =
-          constrain(-test_LQR_u * motor1_output_sign,
-                    -kLqrTestVoltageLimit, kLqrTestVoltageLimit);
+          lqrMotorVoltage(test_LQR_u, motor1_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
       const float diagnostic_left_output =
-          constrain(-test_LQR_u * motor2_output_sign,
-                    -kLqrTestVoltageLimit, kLqrTestVoltageLimit);
+          lqrMotorVoltage(test_LQR_u, motor2_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
 
       Serial.printf(
           "PS4 DRIVE CONTROL: drive_reference=%+.6f current_angle=%+.6f "
@@ -4641,36 +4644,28 @@ void printLqrStatus() {
       lqr_speed_source == LqrSpeedSource::SimpleFoc
           ? snapshot_lqr_speed
           : diag_LQR_speed_10ms;
-  float snapshot_angle_control = 0.0f;
-  float snapshot_gyro_control = 0.0f;
-  float snapshot_distance_control = 0.0f;
-  float snapshot_speed_control = 0.0f;
-  float snapshot_lqr_u = 0.0f;
-  if (lqr_diagnostic_armed) {
-    snapshot_angle_control = pid_angle(snapshot_angle_y - angle_zeropoint);
-    snapshot_gyro_control = pid_gyro(snapshot_gyro_y);
-    snapshot_distance_control =
-        pid_distance(distance_zeropoint - snapshot_lqr_distance);
-    snapshot_speed_control =
-        pid_speed(0.0f - snapshot_lqr_speed_for_control);
-    snapshot_lqr_u = snapshot_angle_control + snapshot_gyro_control +
-                     snapshot_distance_control + snapshot_speed_control;
-  }
-  updateTestLqrOutput(snapshot_angle_control, snapshot_gyro_control,
-                      snapshot_distance_control, snapshot_speed_control);
+  // Report the last control calculation, without re-running stateful PIDs or
+  // changing test_LQR_u from a diagnostic print. AttitudeOnly excludes both
+  // position and speed, exactly as updateLqrDiagnostic() does.
+  const float snapshot_angle_control = angle_control;
+  const float snapshot_gyro_control = gyro_control;
+  const bool attitude_only = lqr_test_mode == LqrTestMode::AttitudeOnly;
+  const float snapshot_distance_control = attitude_only ? 0.0f : distance_control;
+  const float snapshot_speed_control = attitude_only ? 0.0f : speed_control;
+  const float snapshot_lqr_u = LQR_u;
   const float snapshot_motor1_output_sign =
     m1_direction < 0.0f ? -1.0f : 1.0f;
   const float snapshot_motor2_output_sign =
     m2_direction < 0.0f ? -1.0f : 1.0f;
 
   const float snapshot_right_test_output =
-    constrain(-test_LQR_u * snapshot_motor1_output_sign,
-              -kLqrTestVoltageLimit,
-              kLqrTestVoltageLimit);
+    lqrMotorVoltage(test_LQR_u, snapshot_motor1_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
   const float snapshot_left_test_output =
-    constrain(-test_LQR_u * snapshot_motor2_output_sign,
-              -kLqrTestVoltageLimit,
-              kLqrTestVoltageLimit);
+    lqrMotorVoltage(test_LQR_u, snapshot_motor2_output_sign,
+                      lqr_test_mode == LqrTestMode::AttitudeOnly,
+                      kLqrTestVoltageLimit);
 
   Serial.printf("AngleY=%.6f GyroY=%.6f\n", snapshot_angle_y,
                 snapshot_gyro_y);

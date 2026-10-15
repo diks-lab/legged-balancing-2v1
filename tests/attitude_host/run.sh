@@ -7,3 +7,6 @@ trap 'rm -f "$binary"' EXIT
 c++ -std=c++17 -Wall -Wextra -Werror -Iinclude -Itests/wheel_host -I"$foc_src" \
   tests/attitude_host/sensor_test.cpp "$foc_src/common/base_classes/Sensor.cpp" -o "$binary"
 "$binary"
+c++ -std=c++17 -Wall -Wextra -Werror -Iinclude tests/attitude_host/voltage_test.cpp -o "$binary"
+"$binary"
+python3 tests/attitude_host/status_test.py
