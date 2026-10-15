@@ -6,6 +6,10 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <driver/gpio.h>
+#include <esp_timer.h>
+#include <atomic>
+#include "CheckedWheelSensor.h"
 
 #include "Servo_STS3032.h"
 #include "ssid.h"
@@ -18,6 +22,25 @@ constexpr uint8_t motor1EnablePin = 27;
 
 constexpr uint8_t motor2EnablePin = 32;
 constexpr uint8_t ledPin = 22;
+constexpr float kWheelSupplyVoltage = 8.3f;
+constexpr float kWheelAlignVoltage = 2.0f;
+constexpr float kWheelRunVoltageLimit = 1.0f;
+// Verified with wheel_diagnostic: positive motor commands drive forward on BOTH.
+// These vehicle signs are independent of SimpleFOC's electrical sensor direction.
+constexpr float kRightForwardSign = 1.0f;
+constexpr float kLeftForwardSign = 1.0f;
+constexpr bool kAttitudeOnlyVerification = true;
+
+void gateWheelOutputsOff() {
+  gpio_set_level(static_cast<gpio_num_t>(motor1EnablePin), LOW);
+  gpio_set_level(static_cast<gpio_num_t>(motor2EnablePin), LOW);
+}
+esp_timer_handle_t wheelAlignTimer = nullptr;
+std::atomic<bool> wheelAlignExpired{false};
+void wheelAlignTimeout(void*) {
+  gateWheelOutputsOff();
+  wheelAlignExpired.store(true);
+}
 constexpr uint8_t kRightLegServoId = 1;
 constexpr uint8_t kLeftLegServoId = 2;
 constexpr int16_t kRightLegHomePosition = 2061;
@@ -233,13 +256,13 @@ uint32_t wifi_status_last_check_ms = 0;
 BLDCMotor motor1(7);
 BLDCDriver3PWM driver1(13, 12, 14, motor1EnablePin);
 TwoWire I2Cone(0);
-MagneticSensorI2C sensor1(AS5600_I2C);
+CheckedWheelSensor sensor1(I2Cone, gateWheelOutputsOff);
 MPU6050 mpu6050(I2Cone);
 
 BLDCMotor motor2(7);
 BLDCDriver3PWM driver2(26, 25, 33, motor2EnablePin);
 TwoWire I2Ctwo(1);
-MagneticSensorI2C sensor2(AS5600_I2C);
+CheckedWheelSensor sensor2(I2Ctwo, gateWheelOutputsOff);
 
 //==================================================
 // Control Variables
@@ -256,8 +279,9 @@ PIDController pid_gyro{0.08, 0, 0, 100000, 8};
 PIDController pid_distance{0.4, 0, 0, 100000, 8};
 PIDController pid_speed{0.5, 0, 0, 100000, 8};
 
-float m1_direction = 0.0f;
-float m2_direction = 0.0f;
+// Half weights form the mean wheel position [rad] and speed [rad/s].
+constexpr float m1_direction = 0.5f * kRightForwardSign;
+constexpr float m2_direction = 0.5f * kLeftForwardSign;
 float angle_zeropoint = 0.0f;
 float distance_zeropoint = 0.0f;
 float LQR_angle = 0.0f;
@@ -545,7 +569,7 @@ enum class LqrTestMode {
   AttitudeDistance,
   AttitudeOnly,
 };
-LqrTestMode lqr_test_mode = LqrTestMode::Full;
+LqrTestMode lqr_test_mode = LqrTestMode::AttitudeOnly;
 
 enum class LqrSpeedSource {
   SimpleFoc,
@@ -601,6 +625,10 @@ uint32_t polarity_diagnostic_last_ms = 0;
 void setBothTargetsToZero();
 void stopBothMotorsAtZero();
 void disableBothDrivers();
+bool wheelSensorsOK();
+bool refreshWheelSensors();
+bool stopOnWheelFault();
+bool initializeWheelFoc(BLDCMotor& motor);
 bool i2cDeviceIsPresent(TwoWire& bus, uint8_t address);
 void calibrateMpu6050();
 
@@ -677,6 +705,9 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 }  // namespace
 
 void setup() {
+  gateWheelOutputsOff();
+  pinMode(motor1EnablePin, OUTPUT);
+  pinMode(motor2EnablePin, OUTPUT);
   Serial.begin(115200);
   Serial2.begin(1000000, SERIAL_8N1, 16, 17);
   sms_sts.pSerial = &Serial2;
@@ -691,13 +722,27 @@ void setup() {
   digitalWrite(motor2EnablePin, LOW);
   setStatusLed(false);
 
-  I2Cone.begin(19, 18, 400000);
+  esp_timer_create_args_t alignArgs = {};
+  alignArgs.callback = wheelAlignTimeout;
+  alignArgs.name = "wheel_align_guard";
+  if (esp_timer_create(&alignArgs, &wheelAlignTimer) != ESP_OK) {
+    disableBothDrivers();
+    Serial.println("ERROR: wheel alignment timer unavailable; reboot required.");
+    return;
+  }
+  // Initialize/check BOTH wheel sensors before any motor can be enabled.
+  sensor1.begin(19, 18);
+  sensor2.begin(23, 5);
+  if (!wheelSensorsOK()) {
+    disableBothDrivers();
+    Serial.println("ERROR: wheel sensor initialization failed; reboot required.");
+    return;
+  }
   if (!i2cDeviceIsPresent(I2Cone, kAs5600Address)) {
     Serial.println("ERROR: right AS5600 not found at 0x36.");
     disableBothDrivers();
     return;
   }
-  sensor1.init(&I2Cone);
   motor1.linkSensor(&sensor1);
 
   if (!i2cDeviceIsPresent(I2Cone, kMpu6050Address)) {
@@ -708,8 +753,8 @@ void setup() {
   mpu6050.begin();
   calibrateMpu6050();
 
-  driver1.voltage_power_supply = 8.0f;
-  driver1.voltage_limit = 2.0f;
+  driver1.voltage_power_supply = kWheelSupplyVoltage;
+  driver1.voltage_limit = kWheelSupplyVoltage;
   if (!driver1.init()) {
     Serial.println("ERROR: Right driver initialization failed.");
     disableBothDrivers();
@@ -719,17 +764,17 @@ void setup() {
   driver1.disable();
 
   motor1.linkDriver(&driver1);
-  motor1.voltage_sensor_align = 2.0f;
-  motor1.voltage_limit = 2.0f;
+  motor1.voltage_sensor_align = kWheelAlignVoltage;
+  motor1.voltage_limit = kWheelAlignVoltage;
   motor1.torque_controller = TorqueControlType::voltage;
   motor1.controller = MotionControlType::torque;
   motor1.useMonitoring(Serial);
-  if (!motor1.init()) {
+  if (!refreshWheelSensors() || !motor1.init() || !refreshWheelSensors()) {
     Serial.println("ERROR: Right motor initialization failed.");
     disableBothDrivers();
     return;
   }
-  const int motor1FocStatus = motor1.initFOC();
+  const int motor1FocStatus = initializeWheelFoc(motor1);
   Serial.printf("Right FOC initialization result: %d\n", motor1FocStatus);
   if (motor1FocStatus == 0) {
     Serial.println("ERROR: Right FOC initialization failed.");
@@ -738,16 +783,14 @@ void setup() {
   }
   driver1.disable();
 
-  I2Ctwo.begin(23, 5, 400000);
   if (!i2cDeviceIsPresent(I2Ctwo, kAs5600Address)) {
     Serial.println("ERROR: left AS5600 not found at 0x36.");
     disableBothDrivers();
     return;
   }
-  sensor2.init(&I2Ctwo);
   motor2.linkSensor(&sensor2);
-  driver2.voltage_power_supply = 8.0f;
-  driver2.voltage_limit = 2.0f;
+  driver2.voltage_power_supply = kWheelSupplyVoltage;
+  driver2.voltage_limit = kWheelSupplyVoltage;
   if (!driver2.init()) {
     Serial.println("ERROR: Left driver initialization failed.");
     disableBothDrivers();
@@ -757,17 +800,17 @@ void setup() {
   driver2.disable();
 
   motor2.linkDriver(&driver2);
-  motor2.voltage_sensor_align = 2.0f;
-  motor2.voltage_limit = 2.0f;
+  motor2.voltage_sensor_align = kWheelAlignVoltage;
+  motor2.voltage_limit = kWheelAlignVoltage;
   motor2.torque_controller = TorqueControlType::voltage;
   motor2.controller = MotionControlType::torque;
   motor2.useMonitoring(Serial);
-  if (!motor2.init()) {
+  if (!refreshWheelSensors() || !motor2.init() || !refreshWheelSensors()) {
     Serial.println("ERROR: Left motor initialization failed.");
     disableBothDrivers();
     return;
   }
-  const int motor2FocStatus = motor2.initFOC();
+  const int motor2FocStatus = initializeWheelFoc(motor2);
   Serial.printf("Left FOC initialization result: %d\n", motor2FocStatus);
   if (motor2FocStatus == 0) {
     Serial.println("ERROR: Left FOC initialization failed.");
@@ -776,8 +819,15 @@ void setup() {
   }
   driver2.disable();
 
-  m1_direction = motor1.sensor_direction == CW ? -0.5f : 0.5f;
-  m2_direction = motor2.sensor_direction == CCW ? -0.5f : 0.5f;
+  motor1.updateVoltageLimit(kWheelRunVoltageLimit);
+  motor2.updateVoltageLimit(kWheelRunVoltageLimit);
+  // Fresh checked samples after blocking initialization, before re-enabling.
+  sensor1.update();
+  sensor2.update();
+  if (!wheelSensorsOK()) {
+    disableBothDrivers();
+    return;
+  }
   Serial.printf("Right sensor_direction=%s m1_direction=%.2f\n",
                 motor1.sensor_direction == CW ? "CW" : "CCW", m1_direction);
   Serial.printf("Left sensor_direction=%s m2_direction=%.2f\n",
@@ -809,11 +859,13 @@ void loop() {
 
   uint32_t section_start_us = micros();
   motor1.loopFOC();
+  if (stopOnWheelFault()) return;
   const uint32_t motor1_loopfoc_us =
       micros() - section_start_us;
 
   section_start_us = micros();
   motor2.loopFOC();
+  if (stopOnWheelFault()) return;
   const uint32_t motor2_loopfoc_us =
       micros() - section_start_us;
 
@@ -1146,11 +1198,56 @@ namespace {
 //==================================================
 // Motor / Sensor Control
 //==================================================
+bool wheelSensorsOK() {
+  return sensor1.ready && sensor2.ready && !sensor1.fault && !sensor2.fault;
+}
+
+bool refreshWheelSensors() {
+  // Setup includes long MPU calibration and motor.init delays. Do not enable
+  // from a health result sampled before those delays or the other alignment.
+  sensor1.update();
+  sensor2.update();
+  return wheelSensorsOK();
+}
+
+bool initializeWheelFoc(BLDCMotor& motor) {
+  if (!wheelSensorsOK() || !wheelAlignTimer) return false;
+  wheelAlignExpired.store(false);
+  if (esp_timer_start_once(wheelAlignTimer, 6000000) != ESP_OK) return false;
+  const bool focOK = motor.initFOC();
+  gateWheelOutputsOff();
+  esp_timer_stop(wheelAlignTimer);
+  return focOK && !wheelAlignExpired.load() && motor.pp_check_result &&
+         wheelSensorsOK();
+}
+
+bool stopOnWheelFault() {
+  if (wheelSensorsOK()) return false;
+  // Gate before PWM cleanup or logging. A latched sensor fault needs a reboot;
+  // Clearing test_system_ready prevents every existing enable/start command,
+  // including u. Do not clear the sensor's fault latch.
+  disableBothDrivers();
+  test_system_ready = false;
+  emergency_stop_active = true;
+  lqr_diagnostic_armed = false;
+  lqr_direction_test_armed = false;
+  polarity_test_active = false;
+  polarity_pulse_active = false;
+  cancelBalanceWait();
+  Serial.printf("WHEEL FAULT: right=%s left=%s; both disabled; reboot required.\n",
+                sensor1.error, sensor2.error);
+  return true;
+}
+
 void setBothTargetsToZero() {
   right_target_voltage = 0.0f;
   left_target_voltage = 0.0f;
   motor1.target = 0.0f;
   motor2.target = 0.0f;
+  // move() stages current_sp for the NEXT loopFOC in SimpleFOC 2.4.0.
+  motor1.current_sp = motor2.current_sp = 0.0f;
+  motor1.voltage.q = motor1.voltage.d = 0.0f;
+  motor2.voltage.q = motor2.voltage.d = 0.0f;
 }
 
 void stopBothMotorsAtZero() {
@@ -1158,10 +1255,15 @@ void stopBothMotorsAtZero() {
   if (test_system_ready && !emergency_stop_active) {
     motor1.move(0.0f);
     motor2.move(0.0f);
+    // move(0) only stages the NEXT FOC cycle. Clear PWM immediately before
+    // existing synchronous diagnostics/calibration or stop logging can block.
+    driver1.setPwm(0.0f, 0.0f, 0.0f);
+    driver2.setPwm(0.0f, 0.0f, 0.0f);
   }
 }
 
 void disableBothDrivers() {
+  gateWheelOutputsOff();
   setBothTargetsToZero();
   if (driver1_initialized) {
     driver1.disable();
@@ -1195,6 +1297,13 @@ void updateLqrState() {
   }
   last_control_update_us = now_us;
 
+  // loopFOC updated each checked sensor once. Refresh the public shaft snapshot
+  // now: in 2.4.0 move() normally refreshes it only AFTER our balance calculation.
+  // shaftAngle/shaftVelocity use cached sensor data and perform no I2C update.
+  motor1.shaft_angle = motor1.shaftAngle();
+  motor1.shaft_velocity = motor1.shaftVelocity();
+  motor2.shaft_angle = motor2.shaftAngle();
+  motor2.shaft_velocity = motor2.shaftVelocity();
   LQR_angle = mpu6050.getAngleY();
   LQR_gyro = mpu6050.getGyroY();
   LQR_distance = motor1.shaft_angle * m1_direction +
@@ -1764,6 +1873,10 @@ void printLqrStopTrace(const char* reason) {
 }
 
 bool requestLqrDrive(float target_speed, char command) {
+  if (kAttitudeOnlyVerification) {
+    Serial.println("IGNORED: attitude-only verification; drive requests disabled.");
+    return false;
+  }
   if (!test_system_ready || emergency_stop_active ||
       !lqr_direction_test_armed || lqr_auto_drive_active ||
       lqr_soft_stop_active || lqr_drive_start_pending) {
@@ -1984,6 +2097,16 @@ void updateLqrDiagnostic() {
     LQR_u = 0.0f;
     updateTestLqrOutput(angle_control, gyro_control, distance_control,
                         speed_control);
+    return;
+  }
+
+  if (kAttitudeOnlyVerification) {
+    // No position/speed PID or drive-induced tilt in this first hardware test.
+    angle_control = pid_angle(LQR_angle - angle_zeropoint);
+    gyro_control = pid_gyro(LQR_gyro);
+    distance_control = speed_control = 0.0f;
+    LQR_u = angle_control + gyro_control;
+    updateTestLqrOutput(angle_control, gyro_control, 0.0f, 0.0f);
     return;
   }
 
@@ -3323,7 +3446,7 @@ void updateBalanceWait() {
     return;
   }
 
-  if (balance_brake_enabled) {
+  if (balance_brake_enabled && !kAttitudeOnlyVerification) {
     balance_brake_right = constrain(speed_control * m1_direction,
                                     -kBalanceBrakeVoltageLimit,
                                     kBalanceBrakeVoltageLimit);
@@ -3640,6 +3763,10 @@ void printLoopTimingTrace() {
 }
 
 bool cycleLqrTestMode() {
+  if (kAttitudeOnlyVerification) {
+    Serial.println("LQR TEST MODE: ATTITUDE ONLY (locked for hardware verification)");
+    return false;
+  }
   if (lqr_direction_test_armed || balance_wait_active ||
       polarity_test_active) {
     Serial.println(
@@ -3704,6 +3831,7 @@ bool startBalanceTest() {
     return false;
   }
 
+  if (kAttitudeOnlyVerification) lqr_test_mode = LqrTestMode::AttitudeOnly;
   Serial.printf("LQR TEST MODE: %s\n", lqrTestModeDisplayName());
   Serial.printf("LQR SPEED SOURCE: %s\n", lqrSpeedSourceName());
   stopBothMotorsAtZero();
@@ -3724,7 +3852,7 @@ bool startBalanceTest() {
   balance_sample_count = 0;
   balance_stable_message_shown = false;
   balance_timer_reset = false;
-  balance_brake_enabled = true;
+  balance_brake_enabled = !kAttitudeOnlyVerification;
   balance_brake_right = 0.0f;
   balance_brake_left = 0.0f;
   status_led_last_toggle_ms = millis();
@@ -4448,6 +4576,8 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 void printHelp() {
   Serial.println();
   Serial.println("SimpleFOC two-wheel + MPU6050 integration test");
+  Serial.println("ATTITUDE ONLY verification: g locked; drive requests and wait brake disabled.");
+  Serial.println("Use t, wait for AUTO START; d disarms and disables both wheel drivers.");
   Serial.println("  1 : right +0.50 V, left 0 V");
   Serial.println("  2 : right -0.50 V, left 0 V");
   Serial.println("  3 : right 0 V, left +0.50 V");
@@ -5463,7 +5593,9 @@ void handleSerialCommand() {
       break;
     case 'b':
     case 'B':
-      if (!balance_wait_active) {
+      if (kAttitudeOnlyVerification) {
+        Serial.println("IGNORED: attitude-only verification; speed brake disabled.");
+      } else if (!balance_wait_active) {
         Serial.println("Balance brake toggle is available only during Balance Wait.");
       } else {
         balance_brake_enabled = !balance_brake_enabled;
