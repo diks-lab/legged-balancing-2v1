@@ -19,7 +19,7 @@ constexpr uint32_t kStreamMs = 200;
 constexpr uint16_t kI2cTimeoutMs = 5;
 constexpr uint8_t kRightEnable = 27, kLeftEnable = 32;
 constexpr float kTau = 6.283185307179586f;
-constexpr float kTargetVelocity = 3.0f;  // Signed velocity commands use rad/s.
+constexpr float kTargetVelocity = 6.0f;
 
 void gateOff() {
   // Arduino-ESP32 3.x digitalWrite() ignores pins not yet registered by
