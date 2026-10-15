@@ -16,13 +16,14 @@ harness = r'''
 #include <cassert>
 struct Motor { float shaft_angle=8, shaft_velocity=12; } motor1, motor2;
 struct Imu { float getAngleY(){return 99;} float getGyroY(){return 88;} } mpu6050;
-enum class LqrTestMode { AttitudeOnly, Full };
+enum class LqrTestMode { AttitudeOnly, Full, AttitudeSpeed, AttitudeDistance };
 enum class LqrSpeedSource { SimpleFoc, Diagnostic10ms };
 LqrTestMode lqr_test_mode=LqrTestMode::AttitudeOnly;
 LqrSpeedSource lqr_speed_source=LqrSpeedSource::SimpleFoc;
 float m1_direction=.5f,m2_direction=.5f,diag_LQR_speed_10ms=12;
 float diag_right_velocity_10ms=12,diag_left_velocity_10ms=12;
 float angle_control=.2f,gyro_control=.05f,distance_control=7,speed_control=8;
+float speed_direct_control=0, lqr_speed_for_control=12, lqr_drive_angle_bias=0, lqr_ps4_target_tilt_deg=0;
 float LQR_u=.25f,test_LQR_u=.25f,angle_zeropoint=1,distance_zeropoint=2,control_dt_ms=1;
 bool lqr_zero_set=true,lqr_diagnostic_armed=true,lqr_direction_test_armed=true;
 constexpr float kLqrTestVoltageLimit=1;
@@ -52,6 +53,14 @@ int main() {
   printLqrStatus();
   assert(Serial.output.find("right_output[V]=-1.000000 left_output[V]=-1.000000")!=std::string::npos);
   assert(test_LQR_u==-9.87f);
+  Serial.output.clear();
+  lqr_test_mode=LqrTestMode::Full;
+  distance_control=.1f;speed_control=99;speed_direct_control=-.05f;
+  LQR_u=test_LQR_u=.3f;
+  printLqrStatus();
+  assert(Serial.output.find("distance_control=0.100000 speed_control=-0.050000")!=std::string::npos);
+  assert(Serial.output.find("speed_pid_raw=99.000000 speed_direct_term=-0.050000")!=std::string::npos);
+  assert(Serial.output.find("LQR_u=0.300000 diagnostic=")!=std::string::npos);
   std::puts("PASS: production status zero terms, cached control sum, polarity, no mutation");
 }
 '''
