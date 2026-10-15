@@ -12,15 +12,14 @@ namespace {
 constexpr int kPolePairs = 7;
 constexpr float kSupplyVoltage = 8.3f;  // Match actual supply before powering.
 constexpr float kAlignVoltage = 2.0f;   // Alignment voltage verified on this robot.
-constexpr float kDriveVoltage = 1.0f;  // 0.9fから変更
+constexpr float kDriveVoltage = 1.0f;   // Velocity PID output voltage limit.
 constexpr uint32_t kRunMs = 1500;       // Below 2 s, allowing loop/I2C overhead.
 constexpr uint32_t kAlignMs = 6000;     // Guard for blocking initFOC, not motor.init.
 constexpr uint32_t kStreamMs = 200;
 constexpr uint16_t kI2cTimeoutMs = 5;
 constexpr uint8_t kRightEnable = 27, kLeftEnable = 32;
 constexpr float kTau = 6.283185307179586f;
-constexpr float kTargetVelocity = 3.0f;  // Existing velocity limit; drive remains voltage torque.
-constexpr float kCommandVoltage = 0.70f;
+constexpr float kTargetVelocity = 3.0f;  // Signed velocity commands use rad/s.
 
 void gateOff() {
   // Arduino-ESP32 3.x digitalWrite() ignores pins not yet registered by
@@ -93,6 +92,18 @@ class CheckedAS5600 : public Sensor {
     Sensor::init();
     ready = !fault;
   }
+  float getVelocity() override {
+    // SimpleFOC 2.4.0 retains the last nonzero velocity when delta_angle is
+    // zero, indefinitely. Clear only that stale result after its minimum
+    // sample interval; preserve the standard timestamps, wrap handling and
+    // moving-sample calculation (including elapsed time between count changes).
+    const float elapsed = (angle_prev_ts - vel_angle_prev_ts) * 1e-6f;
+    if (elapsed >= min_elapsed_time && full_rotations == vel_full_rotations &&
+        fabsf(angle_prev - vel_angle_prev) <= 1e-8f) {
+      velocity = 0.0f;
+    }
+    return Sensor::getVelocity();
+  }
  protected:
   float getSensorAngle() override {
     if (fault) return -1.0f;
@@ -151,7 +162,7 @@ Wheel left{"left", leftSensor, leftMotor, leftDriver, kLeftEnable};
 Wheel* running = nullptr;
 bool streaming = false;
 uint32_t runStarted = 0, streamAt = 0;
-float commandVoltage = 0;
+float commandVelocity = 0;
 char command[64];
 size_t commandLength = 0;
 bool discardLine = false;
@@ -165,7 +176,7 @@ void stopAll(const char* reason) {
     if (w->driverReady) w->motor.disable();
   }
   running = nullptr;
-  commandVoltage = 0;
+  commandVelocity = 0;
   logLine("STOP: %s; both outputs=0, drivers=DISABLED\n", reason);
 }
 
@@ -186,9 +197,9 @@ void reportSensor(Wheel& w) {
           static_cast<unsigned long>(millis() - w.sensor.lastGoodMs));
 }
 void reportStatus() {
-  logLine("state=%s selected=%s command=%+.2f V stream=%s dropped_logs=%lu\n",
+  logLine("state=%s selected=%s command=%+.2f rad/s stream=%s dropped_logs=%lu\n",
           running ? "RUNNING" : "IDLE", running ? running->name : "none",
-          commandVoltage, streaming ? "on" : "off",
+          commandVelocity, streaming ? "on" : "off",
           static_cast<unsigned long>(droppedLogs));
   logLine("pp=%d (provisional) supply=%.2f V align=%.2f V drive=%.2f V run=%lu ms I2C_timeout=%u ms\n",
           kPolePairs, kSupplyVoltage, kAlignVoltage, kDriveVoltage,
@@ -205,7 +216,7 @@ void reportStatus() {
 void help() {
   logLine("help | status | read left | read right | read both | stream on | stream off | stop\n");
   logLine("motor left + | motor left - | motor right + | motor right -\n");
-  logLine("First motor command aligns/moves that wheel. +/- commands +0.70/-0.70 V, not vehicle direction.\n");
+  logLine("First motor command aligns/moves that wheel. +/- commands +3.0/-3.0 rad/s, not vehicle direction.\n");
   logLine("Blocking init/initFOC: serial stop unavailable; FOC guard=6000ms, run timer=1500ms. Use power cut.\n");
 }
 
@@ -241,12 +252,12 @@ void startWheel(Wheel& w, float sign) {
     w.motor.linkSensor(&w.sensor);
     w.motor.voltage_limit = kAlignVoltage;
     w.motor.voltage_sensor_align = kAlignVoltage;
-    w.motor.controller = MotionControlType::torque;
-    w.motor.PID_velocity.P = 0.1f;
+    w.motor.controller = MotionControlType::velocity;
+    w.motor.PID_velocity.P = 0.075f;  // 変更前は0.05f
     w.motor.PID_velocity.I = 0.4f;
     w.motor.PID_velocity.D = 0.0f;
     w.motor.PID_velocity.output_ramp = 5.0f;
-    w.motor.LPF_velocity.Tf = 0.02f;  // 0.05fから変更
+    w.motor.LPF_velocity.Tf = 0.05f;
     w.motor.velocity_limit = kTargetVelocity;
     w.motor.torque_controller = TorqueControlType::voltage;
     // motor.init() enables after a 500ms delay. An error BEFORE that enable
@@ -300,6 +311,7 @@ void startWheel(Wheel& w, float sign) {
   leftSensor.update();
   if (!sensorsOK()) { stopAll("sensor fault before drive"); return; }
   w.motor.updateVoltageLimit(kDriveVoltage);
+  w.motor.PID_velocity.reset();  // Clear integral, previous error and ramp output for each run.
   w.motor.target = 0;
   w.motor.current_sp = 0;
   w.motor.voltage.q = 0;
@@ -308,9 +320,9 @@ void startWheel(Wheel& w, float sign) {
   runStarted = millis();
   w.motor.enable();
   running = &w;
-  commandVoltage = sign * kCommandVoltage;
-  logLine("RUN %s command=%+.2f V for %lu ms; other driver=DISABLED\n",
-        w.name, commandVoltage, static_cast<unsigned long>(kRunMs));
+  commandVelocity = sign * kTargetVelocity;
+  logLine("RUN %s command=%+.2f rad/s for %lu ms; other driver=DISABLED\n",
+        w.name, commandVelocity, static_cast<unsigned long>(kRunMs));
 }
 
 void dispatch(const char* s) {
@@ -376,6 +388,8 @@ void setup() {
   timerArgs.callback = outputTimeout;
   timerArgs.name = "wheel_gate_off";
   timerReady = (esp_timer_create(&timerArgs, &outputTimer) == ESP_OK);
+  rightMotor.PID_velocity.reset();
+  leftMotor.PID_velocity.reset();
   rightSensor.begin(19, 18);
   leftSensor.begin(23, 5);
   logLine("Wheel diagnostic: drivers DISABLED; sensors only; no startup alignment.\n");
@@ -385,16 +399,18 @@ void setup() {
 
 void loop() {
   checkStop();
-  rightSensor.update();
+  // loopFOC() updates the running wheel before move() reads its velocity.
+  // Poll only idle wheels here, keeping both fault checks without duplicate I2C.
+  if (running != &right) rightSensor.update();
   checkStop();
-  leftSensor.update();
+  if (running != &left) leftSensor.update();
   checkStop();
   receiveCommands();
   checkStop();
   if (running) {
     running->motor.loopFOC();  // Checked sensor callback can gate off here too.
     checkStop();
-    if (running) running->motor.move(commandVoltage);
+    if (running) running->motor.move(commandVelocity);
   }
   static uint32_t focLogAt = 0;
   if (running && uint32_t(millis() - focLogAt) >= 50) {
@@ -402,9 +418,9 @@ void loop() {
     auto& m = running->motor;
     const auto& sensor = running->sensor;
     const uint32_t loggedAt = millis();
-    logLine("DRIVE: elapsed=%lu ms command=%.3f V velocity=%.3f rad/s Uq=%.3f V raw=%u raw_angle=%.3f deg sensor_angle=%.3f deg age=%lu ms\n",
+    logLine("DRIVE: elapsed=%lu ms command=%.3f rad/s velocity=%.3f rad/s Uq=%.3f V raw=%u raw_angle=%.3f deg sensor_angle=%.3f deg age=%lu ms\n",
         static_cast<unsigned long>(loggedAt - runStarted),
-        commandVoltage, m.shaft_velocity, m.voltage.q,
+        commandVelocity, m.shaft_velocity, m.voltage.q,
         static_cast<unsigned int>(sensor.lastRawCount),
         sensor.lastRawCount * 360.0f / 4096.0f,
         running->sensor.getMechanicalAngle() * 360.0f / kTau,
