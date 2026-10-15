@@ -69,6 +69,7 @@ struct WebServer {
 struct DriveTestMotor {
   explicit DriveTestMotor(int) {}
   float shaft_angle=0,shaft_velocity=0,target=0,current_sp=0;
+  int enabled=0,motor_status=0;
   struct {float q=0,d=0;} voltage;
   void move(float v){target=current_sp=v;}
 };
@@ -91,7 +92,7 @@ names = [
     'confirmActualFall','detectDriveSafetyFault','wheelSensorsOK','stopOnWheelFault',
     'setBothTargetsToZero','stopBothMotorsAtZero','disableBothDrivers',
     'clearVelocityTrace','clearLoopTimingTrace','clearLqrControlTrace',
-    'updateLqrControlTrace','captureLqrDriveSignTrace','captureLqrStopTrace',
+    'captureFocOutputSnapshot','updateLqrControlTrace','captureLqrDriveSignTrace','captureLqrStopTrace',
     'resetLqrDriveSignTrace','resetLqrStopTrace','startLqrStopTrace','setStatusLed','printLqrStatus',
     'stopForActualFall','traceDownloadBlocked','beginCsvResponse','sendTraceBusyResponse',
     'handleVelocityTraceDownload','handleLoopTimingTraceDownload','handleLqrControlTraceDownload',
@@ -119,6 +120,7 @@ void setupCase(LqrTestMode mode=LqrTestMode::Full){
   resetLqrTestState(); cancelBalanceWait();
   lqr_test_mode=mode;
   test_system_ready=true; emergency_stop_active=false;
+  motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=4;
   lqr_diagnostic_armed=true; lqr_direction_test_armed=true;
   LQR_angle=LQR_gyro=LQR_speed=LQR_distance=0;
   angle_zeropoint=distance_zeropoint=0;
@@ -224,6 +226,36 @@ int main(){
   for(int i=0;i<12;++i){delay(10);fell=confirmActualFall()||fell;}
   assert(fell);
 
+  // Normal trace observes last FOC values before this loop's move stages
+  // a different command. Merely recording must not alter cached motor state.
+  setupCase();clearLqrControlTrace();
+  motor1.voltage.q=.125f;motor2.voltage.q=-.25f;
+  motor1.current_sp=.125f;motor2.current_sp=-.25f;
+  captureFocOutputSnapshot();
+  motor1.current_sp=motor1.voltage.q=0; // control code can clear live fields
+  updateLqrControlTrace(.75f,-.5f,true);
+  const auto observed=lqr_control_trace[0];
+  near(observed.right_output,.75f);near(observed.left_output,-.5f);
+  near(observed.right_voltage_q,.125f);near(observed.left_voltage_q,-.25f);
+  near(observed.right_current_sp,.125f);near(observed.left_current_sp,-.25f);
+  assert(observed.right_motor_enabled && observed.left_motor_enabled);
+  assert(observed.right_driver_en && observed.left_driver_en && !observed.after_disable);
+  motor1.move(.75f);near(motor1.current_sp,.75f);near(motor1.voltage.q,0);
+  near(lqr_control_trace[0].right_current_sp,.125f); // immutable before-move snapshot
+  lqr_direction_test_armed=false;
+  handleLqrControlTraceDownload();
+  assert(wifi_log_server.body.find("right_voltage_q_V,left_voltage_q_V,right_current_sp_V")!=String::npos);
+  assert(wifi_log_server.body.find("0.750000,-0.500000,0.125000,-0.250000,0.125000,-0.250000,1,1,1,1,BEFORE_MOVE")!=String::npos);
+  // CSV has 24 columns (existing 14 plus 10 appended), with no truncated row.
+  const auto newline=wifi_log_server.body.find('\n');
+  assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.begin()+newline,',')==23);
+  assert(std::count(wifi_log_server.body.begin()+newline+1,wifi_log_server.body.end(),',')==23);
+  LQR_angle=5.93f;angle_zeropoint=1;handleWifiStatusPage();
+  assert(wifi_log_server.body.find("Cached AngleY: 5.930000 deg")!=String::npos);
+  assert(wifi_log_server.body.find("Reference: 1.000000 deg")!=String::npos);
+  assert(wifi_log_server.body.find("Delta: 4.930000 deg")!=String::npos);
+  assert(wifi_log_server.body.find("driver_init=1")!=String::npos);
+  assert(wifi_log_server.body.find("motor_status=4 motor_enabled=1 EN=1")!=String::npos);
   // No USB: gating must already be complete whenever any stop-path Serial
   // output occurs, including the startup diagnostic before the trace dumps.
   setupCase();
@@ -248,6 +280,9 @@ int main(){
   assert(std::string(last_stop_reason)=="TILT_STOP" && !traceDownloadBlocked());
   assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
   assert(lqr_control_trace[1].right_output==0 && lqr_control_trace[1].left_output==0);
+  assert(lqr_control_trace[1].after_disable);
+  assert(lqr_control_trace[1].right_voltage_q==0 && lqr_control_trace[1].right_current_sp==0);
+  assert(lqr_control_trace[1].right_motor_enabled && !lqr_control_trace[1].right_driver_en);
   for(int i=0;i<20;++i){delay(20);updateWheelVelocityDiagnostic();updateLqrControlTrace(0,0,false);}
   assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
   handleWifiStatusPage();
@@ -263,6 +298,7 @@ int main(){
   assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.end(),'\n')==2);
   handleLqrControlTraceDownload();assert(wifi_log_server.status==200);
   assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.end(),'\n')==3);
+  assert(wifi_log_server.body.find("AFTER_DISABLE")!=String::npos);
   handleStopBalanceTest(); // a redundant Web STOP must preserve the fall
   assert(std::string(last_stop_reason)=="TILT_STOP" && velocity_trace_count==1);
   handleStartBalanceTest(); // rejected while disabled: no erase
@@ -279,6 +315,9 @@ int main(){
   setupCase();sensor2.fault=true;gateWheelOutputsOff();assert(stopOnWheelFault());
   assert(!pins[27] && !pins[32] && !test_system_ready && !lqr_direction_test_armed);
   assert(!startBalanceTest());
+  handleWifiStatusPage();
+  assert(wifi_log_server.body.find("System initialized: no")!=String::npos);
+  assert(wifi_log_server.body.find("fault=1")!=String::npos);
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);
   updateLqrControlTrace(0,0,true);

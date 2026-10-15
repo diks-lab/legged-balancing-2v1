@@ -519,6 +519,15 @@ struct LoopTimingSample {
   uint32_t motor_move_us;
 };
 
+struct FocOutputSnapshot {
+  float right_voltage_q, left_voltage_q;
+  float right_current_sp, left_current_sp;
+  bool right_motor_enabled, left_motor_enabled;
+  bool right_driver_en, left_driver_en;
+  uint32_t capture_us;
+};
+FocOutputSnapshot last_foc_output = {};
+
 struct LqrControlTraceSample {
   uint32_t elapsed_ms;
   float angle;
@@ -536,6 +545,17 @@ struct LqrControlTraceSample {
   float lqr_u;
   float right_output;
   float left_output;
+  // Normal row: after loopFOC, BEFORE this cycle's move(). Stop row: after gate-off.
+  float right_voltage_q;
+  float left_voltage_q;
+  float right_current_sp;
+  float left_current_sp;
+  bool right_motor_enabled;
+  bool left_motor_enabled;
+  bool right_driver_en;
+  bool left_driver_en;
+  bool after_disable;
+  uint32_t foc_capture_us;
 };
 
 LoopTimingSample loop_timing_trace[kLoopTimingTraceSize];
@@ -628,6 +648,7 @@ uint32_t polarity_diagnostic_last_ms = 0;
 void setBothTargetsToZero();
 void stopBothMotorsAtZero();
 void disableBothDrivers();
+void captureFocOutputSnapshot();
 void stopForActualFall(float& right_output, float& left_output);
 bool wheelSensorsOK();
 bool refreshWheelSensors();
@@ -872,6 +893,9 @@ void loop() {
   if (stopOnWheelFault()) return;
   const uint32_t motor2_loopfoc_us =
       micros() - section_start_us;
+  // Preserve the values actually used by FOC before control/stop code can
+  // clear current_sp or voltage.q. Observation only, no additional I2C.
+  captureFocOutputSnapshot();
 
   section_start_us = micros();
   mpu6050.update();
@@ -1450,6 +1474,15 @@ const char* lqrSpeedSourceName() {
   return lqr_speed_source == LqrSpeedSource::SimpleFoc ? "SIMPLEFOC"
                                                        : "10MS";
 }
+void captureFocOutputSnapshot() {
+  last_foc_output = {
+      motor1.voltage.q, motor2.voltage.q,
+      motor1.current_sp, motor2.current_sp,
+      static_cast<bool>(motor1.enabled), static_cast<bool>(motor2.enabled),
+      digitalRead(motor1EnablePin) == HIGH, digitalRead(motor2EnablePin) == HIGH,
+      micros()};
+}
+
 void updateLqrControlTrace(float right_output, float left_output,
                            bool force_sample) {
   if (!force_sample && !lqr_direction_test_armed) {
@@ -1490,6 +1523,17 @@ void updateLqrControlTrace(float right_output, float left_output,
   sample.lqr_u = test_LQR_u;
   sample.right_output = right_output;
   sample.left_output = left_output;
+  sample.after_disable = force_sample && emergency_stop_active;
+  if (sample.after_disable) captureFocOutputSnapshot();
+  sample.right_voltage_q = last_foc_output.right_voltage_q;
+  sample.left_voltage_q = last_foc_output.left_voltage_q;
+  sample.right_current_sp = last_foc_output.right_current_sp;
+  sample.left_current_sp = last_foc_output.left_current_sp;
+  sample.right_motor_enabled = last_foc_output.right_motor_enabled;
+  sample.left_motor_enabled = last_foc_output.left_motor_enabled;
+  sample.right_driver_en = last_foc_output.right_driver_en;
+  sample.left_driver_en = last_foc_output.left_driver_en;
+  sample.foc_capture_us = last_foc_output.capture_us;
 
   lqr_control_trace_write_index =
       (lqr_control_trace_write_index + 1) %
@@ -1520,7 +1564,8 @@ void printLqrControlTrace() {
       "elapsed_ms,angle,angle_zeropoint,angle_error,gyro,"
       "lqr_speed,speed_for_control,"
       "angle_control,gyro_control,distance_control,speed_control,"
-      "lqr_u,right_output,left_output");
+      "lqr_u,right_output,left_output,"
+      "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us");
 
   const size_t first_index =
       (lqr_control_trace_write_index +
@@ -1536,7 +1581,7 @@ void printLqrControlTrace() {
     Serial.printf(
         "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
         "%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f\n",
+        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%s,%lu\n",
         static_cast<unsigned long>(sample.elapsed_ms),
           sample.angle,
           sample.angle_zeropoint,
@@ -1550,7 +1595,15 @@ void printLqrControlTrace() {
           sample.speed_control,
           sample.lqr_u,
           sample.right_output,
-          sample.left_output);
+          sample.left_output,
+        sample.right_voltage_q, sample.left_voltage_q,
+        sample.right_current_sp, sample.left_current_sp,
+        static_cast<int>(sample.right_motor_enabled),
+        static_cast<int>(sample.left_motor_enabled),
+        static_cast<int>(sample.right_driver_en),
+        static_cast<int>(sample.left_driver_en),
+        sample.after_disable ? "AFTER_DISABLE" : "BEFORE_MOVE",
+        static_cast<unsigned long>(sample.foc_capture_us));
   }
 
   Serial.println("LQR CONTROL TRACE END");
@@ -4297,13 +4350,14 @@ void handleLqrControlTraceDownload() {
       "elapsed_ms,angle,angle_zeropoint,angle_error,gyro,"
       "lqr_speed,speed_for_control,"
       "angle_control,gyro_control,distance_control,speed_control,"
-      "lqr_u,right_output,left_output\n");
+      "lqr_u,right_output,left_output,"
+      "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us\n");
 
   const size_t first_index =
       (lqr_control_trace_write_index + kLqrControlTraceSize -
        lqr_control_trace_count) %
       kLqrControlTraceSize;
-  char line[256];
+  char line[512];
   for (size_t i = 0; i < lqr_control_trace_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
@@ -4313,13 +4367,22 @@ void handleLqrControlTraceDownload() {
     snprintf(
         line, sizeof(line),
         "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+        "%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%s,%lu\n",
         static_cast<unsigned long>(sample.elapsed_ms), sample.angle,
         sample.angle_zeropoint, sample.angle_error, sample.gyro,
         sample.lqr_speed, sample.speed_for_control,
         sample.angle_control, sample.gyro_control,
         sample.distance_control, sample.speed_control, sample.lqr_u,
-        sample.right_output, sample.left_output);
+        sample.right_output, sample.left_output,
+        sample.right_voltage_q, sample.left_voltage_q,
+        sample.right_current_sp, sample.left_current_sp,
+        static_cast<int>(sample.right_motor_enabled),
+        static_cast<int>(sample.left_motor_enabled),
+        static_cast<int>(sample.right_driver_en),
+        static_cast<int>(sample.left_driver_en),
+        sample.after_disable ? "AFTER_DISABLE" : "BEFORE_MOVE",
+        static_cast<unsigned long>(sample.foc_capture_us));
     wifi_log_server.sendContent(line);
   }
   wifi_log_server.sendContent("");
@@ -4355,7 +4418,7 @@ void handleStopBalanceTest() {
 }
 
 void handleWifiStatusPage() {
-  char page[2600];
+  char page[3072];
   const String ip_address = WiFi.localIP().toString();
   const bool test_active =
       lqr_direction_test_armed || balance_wait_active || polarity_test_active;
@@ -4375,6 +4438,11 @@ void handleWifiStatusPage() {
       "<p>WiFi: %s<br>IP: %s</p>"
       "<p>State: <strong>%s</strong></p>"
       "<p>Last stop reason: <strong>%s</strong></p>"
+      "<p>Cached AngleY: %.6f deg<br>Reference: %.6f deg<br>Delta: %.6f deg</p>"
+      "<p>System initialized: %s<br>Right: driver_init=%d sensor_ready=%d "
+      "fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d<br>"
+      "Left: driver_init=%d sensor_ready=%d fault=%d (%s) "
+      "motor_status=%u motor_enabled=%d EN=%d</p>"
       "<p>LQR Test Mode: <strong>%s</strong></p>"
       "<form method=\"POST\" action=\"/control/mode\">"
       "<button type=\"submit\"%s>Change Mode</button></form>"
@@ -4394,7 +4462,17 @@ void handleWifiStatusPage() {
       "<a href=\"/trace/lqr.csv\">LQR Control Trace</a></p>"
       "</body></html>",
       WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
-      ip_address.c_str(), state, last_stop_reason, lqrTestModeDisplayName(),
+      ip_address.c_str(), state, last_stop_reason,
+      LQR_angle, angle_zeropoint, LQR_angle - angle_zeropoint,
+      test_system_ready ? "yes" : "no",
+      static_cast<int>(driver1_initialized), static_cast<int>(sensor1.ready),
+      static_cast<int>(sensor1.fault), sensor1.error,
+      static_cast<unsigned>(motor1.motor_status), static_cast<int>(motor1.enabled),
+      digitalRead(motor1EnablePin),
+      static_cast<int>(driver2_initialized), static_cast<int>(sensor2.ready),
+      static_cast<int>(sensor2.fault), sensor2.error,
+      static_cast<unsigned>(motor2.motor_status), static_cast<int>(motor2.enabled),
+      digitalRead(motor2EnablePin), lqrTestModeDisplayName(),
       test_active ? " disabled" : "", lqrSpeedSourceName(),
       test_active ? " disabled" : "", start_allowed ? "" : " disabled",
       static_cast<unsigned>(velocity_trace_count),
