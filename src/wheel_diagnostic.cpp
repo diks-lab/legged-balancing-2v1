@@ -253,7 +253,7 @@ void startWheel(Wheel& w, float sign) {
     w.motor.voltage_limit = kAlignVoltage;
     w.motor.voltage_sensor_align = kAlignVoltage;
     w.motor.controller = MotionControlType::velocity;
-    w.motor.PID_velocity.P = 0.05f;
+    w.motor.PID_velocity.P = 0.075f;  // 変更前は0.05f
     w.motor.PID_velocity.I = 0.4f;
     w.motor.PID_velocity.D = 0.0f;
     w.motor.PID_velocity.output_ramp = 5.0f;
