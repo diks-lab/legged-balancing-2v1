@@ -272,6 +272,7 @@ float right_target_voltage = 0.0f;
 float left_target_voltage = 0.0f;
 bool test_system_ready = false;
 bool emergency_stop_active = false;
+const char* last_stop_reason = "NONE";
 bool driver1_initialized = false;
 bool driver2_initialized = false;
 
@@ -627,6 +628,7 @@ uint32_t polarity_diagnostic_last_ms = 0;
 void setBothTargetsToZero();
 void stopBothMotorsAtZero();
 void disableBothDrivers();
+void stopForActualFall(float& right_output, float& left_output);
 bool wheelSensorsOK();
 bool refreshWheelSensors();
 bool stopOnWheelFault();
@@ -1093,59 +1095,7 @@ const float left_angle_delta =
   }
 
   if (lqr_direction_test_armed && confirmActualFall()) {
-    if (lqr_startup_diagnostic_active) {
-      const uint32_t elapsed_ms =
-          millis() - lqr_startup_diagnostic_start_ms;
-      Serial.println("LQR STARTUP STOP:");
-      Serial.printf("elapsed_ms=%lu\n",
-                    static_cast<unsigned long>(elapsed_ms));
-      Serial.printf("angle_error=%.6f\n",
-                    LQR_angle - angle_zeropoint);
-      Serial.printf("gyro=%.6f\n", LQR_gyro);
-      Serial.printf("test_LQR_u=%.6f\n", test_LQR_u);
-      Serial.printf("right_output=%.6f\n", right_output);
-      Serial.printf("left_output=%.6f\n", left_output);
-    }
-    lqr_startup_diagnostic_active = false;
-    lqr_direction_test_armed = false;
-    setStatusLed(false);
-    setBothTargetsToZero();
-    right_output = 0.0f;
-    left_output = 0.0f;
-    motor1.move(0.0f);
-    motor2.move(0.0f);
-
-    updateLqrControlTrace(right_output, left_output, true);
-
-    Serial.println("LQR direction test stopped: actual fall angle exceeded.");
-
-    lqr_stop_trace_active = false;
-
-    if (lqr_drive_sign_trace_count > 0) {
-      printLqrDriveSignTrace("TILT_STOP");
-      resetLqrDriveSignTrace();
-    }
-
-    if (lqr_stop_trace_count > 0) {
-      printLqrStopTrace("TILT_STOP");
-      resetLqrStopTrace();
-    }
-
-    printAndResetLqrRunTime();
-
-    printVelocityTrace();
-    printLoopTimingTrace();
-    printLqrControlTrace();
-    clearVelocityTrace();
-    clearLoopTimingTrace();
-    clearLqrControlTrace();
-
-    terminateLqrDriveSession("TILT_STOP", true);
-    emergency_stop_active = true;
-    disableBothDrivers();
-    Serial.println(
-        "SAFETY STOP: mode=FULL_STOP reason=TILT_STOP drivers=DISABLED balance=OFF");
-    disableLegServoTorqueForTestEnd("TILT_STOP");
+    stopForActualFall(right_output, left_output);
   }
 
   updateLqrControlTrace(right_output, left_output);
@@ -1198,6 +1148,57 @@ namespace {
 //==================================================
 // Motor / Sensor Control
 //==================================================
+void stopForActualFall(float& right_output, float& left_output) {
+  // Gate first: Serial/CSV dumps can block for seconds without USB attached.
+  // Keep the pre-stop command for the existing startup diagnostic only.
+  const float commanded_right_output = right_output;
+  const float commanded_left_output = left_output;
+  const bool startup_diagnostic_was_active = lqr_startup_diagnostic_active;
+  emergency_stop_active = true;
+  disableBothDrivers();
+  right_output = left_output = 0.0f;
+  last_stop_reason = "TILT_STOP";
+  lqr_startup_diagnostic_active = false;
+  lqr_direction_test_armed = false;
+  setStatusLed(false);
+  updateLqrControlTrace(right_output, left_output, true);
+  lqr_stop_trace_active = false;
+  if (startup_diagnostic_was_active) {
+    const uint32_t elapsed_ms =
+        millis() - lqr_startup_diagnostic_start_ms;
+    Serial.println("LQR STARTUP STOP:");
+    Serial.printf("elapsed_ms=%lu\n",
+                  static_cast<unsigned long>(elapsed_ms));
+    Serial.printf("angle_error=%.6f\n",
+                  LQR_angle - angle_zeropoint);
+    Serial.printf("gyro=%.6f\n", LQR_gyro);
+    Serial.printf("test_LQR_u=%.6f\n", test_LQR_u);
+    Serial.printf("right_output=%.6f\n", commanded_right_output);
+    Serial.printf("left_output=%.6f\n", commanded_left_output);
+  }
+
+  Serial.println("LQR direction test stopped: actual fall angle exceeded.");
+
+  if (lqr_drive_sign_trace_count > 0) {
+    printLqrDriveSignTrace("TILT_STOP");
+  }
+
+  if (lqr_stop_trace_count > 0) {
+    printLqrStopTrace("TILT_STOP");
+  }
+
+  printAndResetLqrRunTime();
+
+  printVelocityTrace();
+  printLoopTimingTrace();
+  printLqrControlTrace();
+
+  terminateLqrDriveSession("TILT_STOP", true);
+  Serial.println(
+      "SAFETY STOP: mode=FULL_STOP reason=TILT_STOP drivers=DISABLED balance=OFF");
+  disableLegServoTorqueForTestEnd("TILT_STOP");
+}
+
 bool wheelSensorsOK() {
   return sensor1.ready && sensor2.ready && !sensor1.fault && !sensor2.fault;
 }
@@ -1229,6 +1230,7 @@ bool stopOnWheelFault() {
   disableBothDrivers();
   test_system_ready = false;
   emergency_stop_active = true;
+  last_stop_reason = "WHEEL_FAULT";
   lqr_diagnostic_armed = false;
   lqr_direction_test_armed = false;
   polarity_test_active = false;
@@ -3613,9 +3615,6 @@ void updateBalanceWait() {
     lqr_auto_drive_active = false;
 
     lqr_direction_test_start_ms = millis();
-    clearVelocityTrace();
-    clearLoopTimingTrace();
-    clearLqrControlTrace();
     lqr_direction_test_armed = true;
     lqr_startup_diagnostic_active = true;
     lqr_startup_diagnostic_start_ms = millis();
@@ -3826,6 +3825,10 @@ bool startBalanceTest() {
   Serial.printf("LQR TEST MODE: %s\n", lqrTestModeDisplayName());
   Serial.printf("LQR SPEED SOURCE: %s\n", lqrSpeedSourceName());
   stopBothMotorsAtZero();
+  clearVelocityTrace();
+  clearLoopTimingTrace();
+  clearLqrControlTrace();
+  last_stop_reason = "NONE";
   resetLqrTestState();
   lqr_diagnostic_armed = true;
   printAndResetLqrRunTime();
@@ -4011,6 +4014,11 @@ const char* detectDriveSafetyFault(float right_output, float left_output) {
 }
 
 void stopLqrDriveOnly(const char* reason, bool require_recenter) {
+  if (reason != nullptr &&
+      (lqr_direction_test_armed || balance_wait_active ||
+       lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
+    last_stop_reason = reason;
+  }
   lqr_target_speed = 0.0f;
   lqr_drive_angle_bias = 0.0f;
   lqr_ps4_target_tilt_limit_deg =
@@ -4105,6 +4113,10 @@ void terminateLqrDriveSession(const char* reason, bool require_recenter) {
 }
 
 bool stopBalanceTest() {
+  // A redundant STOP after a fall must not overwrite its diagnostic reason.
+  if (lqr_direction_test_armed || balance_wait_active || polarity_test_active) {
+    last_stop_reason = "MANUAL_STOP";
+  }
   lqr_stop_trace_active = false;
 
   polarity_test_active = false;
@@ -4362,6 +4374,7 @@ void handleWifiStatusPage() {
       "<h1>ESP32 LQR Logger</h1>"
       "<p>WiFi: %s<br>IP: %s</p>"
       "<p>State: <strong>%s</strong></p>"
+      "<p>Last stop reason: <strong>%s</strong></p>"
       "<p>LQR Test Mode: <strong>%s</strong></p>"
       "<form method=\"POST\" action=\"/control/mode\">"
       "<button type=\"submit\"%s>Change Mode</button></form>"
@@ -4381,7 +4394,7 @@ void handleWifiStatusPage() {
       "<a href=\"/trace/lqr.csv\">LQR Control Trace</a></p>"
       "</body></html>",
       WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
-      ip_address.c_str(), state, lqrTestModeDisplayName(),
+      ip_address.c_str(), state, last_stop_reason, lqrTestModeDisplayName(),
       test_active ? " disabled" : "", lqrSpeedSourceName(),
       test_active ? " disabled" : "", start_allowed ? "" : " disabled",
       static_cast<unsigned>(velocity_trace_count),

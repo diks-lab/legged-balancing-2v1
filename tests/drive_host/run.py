@@ -37,12 +37,35 @@ using std::min; using std::max; using std::abs;
 template<class T, class L, class H> T constrain(T x,L lo,H hi) {
   return x < lo ? T(lo) : (x > hi ? T(hi) : x);
 }
+std::function<void()> onSerialOutput;
 struct DriveSerial : FakeSerial {
-  void println(const char* s="") { output += std::string(s)+"\n"; }
+  void println(const char* s="") {
+    if(onSerialOutput) onSerialOutput();
+    output += std::string(s)+"\n";
+  }
+  template<class... A> void printf(const char* s,A... args) {
+    if(onSerialOutput) onSerialOutput();
+    FakeSerial::printf(s,args...);
+  }
   template<class T> void print(T) {}
 } driveSerial;
 #define Serial driveSerial
-struct WebServer { explicit WebServer(int) {} };
+using String=std::string;
+constexpr int WL_CONNECTED=1, CONTENT_LENGTH_UNKNOWN=-1;
+struct { int status(){return WL_CONNECTED;}
+  struct IP { String toString(){return "127.0.0.1";} };
+  IP localIP(){return {};}
+} WiFi;
+struct WebServer {
+  explicit WebServer(int) {}
+  int status=0;std::string body;
+  struct Client {bool connected(){return true;}};
+  Client client(){return {};}
+  void sendHeader(const char*,const String&){}
+  void setContentLength(int){}
+  void send(int code,const char*,const char* data){status=code;body=data;}
+  void sendContent(const char* data){body+=data;}
+};
 struct DriveTestMotor {
   explicit DriveTestMotor(int) {}
   float shaft_angle=0,shaft_velocity=0,target=0,current_sp=0;
@@ -70,6 +93,10 @@ names = [
     'clearVelocityTrace','clearLoopTimingTrace','clearLqrControlTrace',
     'updateLqrControlTrace','captureLqrDriveSignTrace','captureLqrStopTrace',
     'resetLqrDriveSignTrace','resetLqrStopTrace','startLqrStopTrace','setStatusLed','printLqrStatus',
+    'stopForActualFall','traceDownloadBlocked','beginCsvResponse','sendTraceBusyResponse',
+    'handleVelocityTraceDownload','handleLoopTimingTraceDownload','handleLqrControlTraceDownload',
+    'handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','sendControlResult',
+    'updateWheelVelocityDiagnostic',
 ]
 # No control behavior is stubbed: these functions only print or store logs.
 stubs = r'''
@@ -77,6 +104,7 @@ void printLqrDriveSnapshot(const char*){}
 void printLqrDriveSignTrace(const char*){}
 void printLqrStopTrace(const char*){}
 void printAndResetLqrRunTime(){}
+void disableLegServoTorqueForTestEnd(const char*){}
 void printVelocityTrace(){}
 void printLoopTimingTrace(){}
 void printLqrControlTrace(){}
@@ -195,6 +223,57 @@ int main(){
   setupCase();LQR_angle=21;bool fell=false;
   for(int i=0;i<12;++i){delay(10);fell=confirmActualFall()||fell;}
   assert(fell);
+
+  // No USB: gating must already be complete whenever any stop-path Serial
+  // output occurs, including the startup diagnostic before the trace dumps.
+  setupCase();
+  velocity_trace_count=velocity_trace_write_index=1;velocity_trace[0].elapsed_ms=42;
+  loop_timing_count=loop_timing_write_index=1;loop_timing_trace[0].elapsed_ms=43;
+  lqr_control_trace_count=lqr_control_trace_write_index=1;
+  lqr_control_trace[0].elapsed_ms=44;
+  handleVelocityTraceDownload();assert(wifi_log_server.status==409);
+  motor1.current_sp=motor2.current_sp=.8f;
+  lqr_startup_diagnostic_active=true;
+  int serialChecks=0;
+  onSerialOutput=[&]{
+    ++serialChecks;
+    assert(!pins[27] && !pins[32] && emergency_stop_active);
+    assert(motor1.current_sp==0 && motor2.current_sp==0);
+    assert(!lqr_direction_test_armed);
+  };
+  float right=.8f,left=.8f;
+  stopForActualFall(right,left);
+  onSerialOutput={};
+  assert(serialChecks>0 && right==0 && left==0);
+  assert(std::string(last_stop_reason)=="TILT_STOP" && !traceDownloadBlocked());
+  assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
+  assert(lqr_control_trace[1].right_output==0 && lqr_control_trace[1].left_output==0);
+  for(int i=0;i<20;++i){delay(20);updateWheelVelocityDiagnostic();updateLqrControlTrace(0,0,false);}
+  assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
+  handleWifiStatusPage();
+  assert(wifi_log_server.status==200);
+  assert(wifi_log_server.body.find("TILT_STOP")!=String::npos);
+  assert(wifi_log_server.body.find("Velocity: 1")!=String::npos);
+  handleVelocityTraceDownload();assert(wifi_log_server.status==200);
+  const String csv=wifi_log_server.body;
+  assert(std::count(csv.begin(),csv.end(),'\n')==2);
+  assert(csv.find("42,")!=String::npos);
+  handleVelocityTraceDownload();assert(csv==wifi_log_server.body);
+  handleLoopTimingTraceDownload();assert(wifi_log_server.status==200);
+  assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.end(),'\n')==2);
+  handleLqrControlTraceDownload();assert(wifi_log_server.status==200);
+  assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.end(),'\n')==3);
+  handleStopBalanceTest(); // a redundant Web STOP must preserve the fall
+  assert(std::string(last_stop_reason)=="TILT_STOP" && velocity_trace_count==1);
+  handleStartBalanceTest(); // rejected while disabled: no erase
+  assert(wifi_log_server.status==409 && lqr_control_trace_count==2);
+  assert(std::string(last_stop_reason)=="TILT_STOP");
+  emergency_stop_active=false; // same zero-output re-enable state as u
+  assert(startBalanceTest());
+  assert(velocity_trace_count==0 && loop_timing_count==0 && lqr_control_trace_count==0);
+  assert(std::string(last_stop_reason)=="NONE" && balance_wait_active);
+  assert(stopBalanceTest());assert(std::string(last_stop_reason)=="MANUAL_STOP");
+
   // A fault on either checked sensor still latches a full stop and blocks t.
   sensor1.begin(19,18);sensor2.begin(23,5);
   setupCase();sensor2.fault=true;gateWheelOutputsOff();assert(stopOnWheelFault());
@@ -207,7 +286,7 @@ int main(){
   near(sample.angle_control+sample.gyro_control+sample.distance_control+sample.speed_control,sample.lqr_u);
   Serial.output.clear();printLqrStatus();
   assert(Serial.output.find("speed_control=0.000000")!=std::string::npos);
-  std::cout<<"PASS: production start/gates, terms/signs, both drive directions, deceleration, cancel/recovery, faults/fall, mode return, logs\n";
+  std::cout<<"PASS: production start/gates, terms/signs, both drive directions, deceleration, cancel/recovery, faults/fall, mode return, logs, fall CSV retention/Web reason/early gating\n";
 }
 '''
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
