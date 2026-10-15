@@ -77,6 +77,7 @@ void pumpLog() {
 // explicit communication/data checks because the standard reader does not
 // validate requestFrom() length. Faults latch and immediately gate both wheels.
 bool traceAlignment = false;
+const char* alignmentWheel = "none";
 class CheckedAS5600 : public Sensor {
  public:
   explicit CheckedAS5600(TwoWire& bus) : bus_(bus) {}
@@ -125,7 +126,7 @@ class CheckedAS5600 : public Sensor {
     static uint32_t traceAt = 0;
     if (traceAlignment && uint32_t(millis() - traceAt) >= 200) {
       traceAt = millis();
-      logLine("ALIGN: ms=%lu angle=%.3f deg\n",
+      logLine("ALIGN %s: ms=%lu angle=%.3f deg\n", alignmentWheel,
               static_cast<unsigned long>(millis()),
               a * 360.0f / kTau);
     }
@@ -160,6 +161,8 @@ struct Wheel {
 Wheel right{"right", rightSensor, rightMotor, rightDriver, kRightEnable};
 Wheel left{"left", leftSensor, leftMotor, leftDriver, kLeftEnable};
 Wheel* running = nullptr;
+bool runningBoth = false;
+bool isRunning(const Wheel& w) { return runningBoth || running == &w; }
 bool streaming = false;
 uint32_t runStarted = 0, streamAt = 0;
 float commandVelocity = 0;
@@ -176,6 +179,7 @@ void stopAll(const char* reason) {
     if (w->driverReady) w->motor.disable();
   }
   running = nullptr;
+  runningBoth = false;
   commandVelocity = 0;
   logLine("STOP: %s; both outputs=0, drivers=DISABLED\n", reason);
 }
@@ -198,7 +202,7 @@ void reportSensor(Wheel& w) {
 }
 void reportStatus() {
   logLine("state=%s selected=%s command=%+.2f rad/s stream=%s dropped_logs=%lu\n",
-          running ? "RUNNING" : "IDLE", running ? running->name : "none",
+          running ? "RUNNING" : "IDLE", runningBoth ? "both" : (running ? running->name : "none"),
           commandVelocity, streaming ? "on" : "off",
           static_cast<unsigned long>(droppedLogs));
   logLine("pp=%d (provisional) supply=%.2f V align=%.2f V drive=%.2f V run=%lu ms I2C_timeout=%u ms\n",
@@ -215,19 +219,12 @@ void reportStatus() {
 }
 void help() {
   logLine("help | status | read left | read right | read both | stream on | stream off | stop\n");
-  logLine("motor left + | motor left - | motor right + | motor right -\n");
-  logLine("First motor command aligns/moves that wheel. +/- commands +3.0/-3.0 rad/s, not vehicle direction.\n");
+  logLine("motor left + | motor left - | motor right + | motor right - | motor both + | motor both -\n");
+  logLine("First motor command aligns selected wheels. +/- commands +6.0/-6.0 rad/s; + is forward on both.\n");
   logLine("Blocking init/initFOC: serial stop unavailable; FOC guard=6000ms, run timer=1500ms. Use power cut.\n");
 }
 
-void startWheel(Wheel& w, float sign) {
-  if (running) { logLine("REJECT: already running; stop first, no queued drive\n"); return; }
-  rightSensor.update();
-  leftSensor.update();
-  if (!sensorsOK() || w.initFault || !timerReady) {
-    stopAll("sensor/init fault; reboot after correcting cause");
-    return;
-  }
+bool initializeWheel(Wheel& w) {
   gateOff();
   if (!w.calibrated) {
     // Warning is sent before enabling any motor. Blocking output is allowed
@@ -244,7 +241,7 @@ void startWheel(Wheel& w, float sign) {
     if (!w.driver.init()) {
       w.initFault = true;
       stopAll("driver init failed");
-      return;
+      return false;
     }
     w.driverReady = true;
     w.driver.disable();
@@ -265,10 +262,11 @@ void startWheel(Wheel& w, float sign) {
     // CheckedAS5600. This synchronous path performs no subsequent enable.
     const bool initOK = w.motor.init();
     const bool guardOK = initOK && armTimer(kAlignMs);
+    alignmentWheel = w.name;
     traceAlignment = true;
     const bool focOK = guardOK && w.motor.initFOC();
     traceAlignment = false;
-    logLine("INIT ENTRY: initOK=%d guardOK=%d\n",
+    logLine("INIT %s ENTRY: initOK=%d guardOK=%d\n", w.name,
         static_cast<int>(initOK),
         static_cast<int>(guardOK));
     gateOff();
@@ -287,14 +285,14 @@ void startWheel(Wheel& w, float sign) {
     // SimpleFOC treats pole-pair mismatch as a warning, not failure. For this
     // diagnostic reject it; do not silently accept an estimated pole count.
     if (!focOK || timerExpired.load() || !w.motor.pp_check_result || !sensorsOK()) {
-      logLine("INIT CHECK: focOK=%d timeout=%d ppOK=%d sensorsOK=%d\n",
+      logLine("INIT %s CHECK: focOK=%d timeout=%d ppOK=%d sensorsOK=%d\n", w.name,
               static_cast<int>(focOK),
               static_cast<int>(timerExpired.load()),
               static_cast<int>(w.motor.pp_check_result),
               static_cast<int>(sensorsOK()));
       w.initFault = true;
       stopAll("FOC/sensor/pole-pair check failed (no voltage increase/retry)");
-      return;
+      return false;
     }
     w.calibrated = true;
     logLine("%s FOC OK direction=%d zero=%.5f rad pp_check=OK\n",
@@ -303,27 +301,62 @@ void startWheel(Wheel& w, float sign) {
     // the pulse (including queued stop). Discard partial input through newline.
     if (inputDuringInit) {
       stopAll("input during initialization; pulse cancelled, commands discarded");
-      return;
+      return false;
     }
+  }
+  return true;
+}
+
+void checkStop();
+
+void startWheels(Wheel& first, Wheel* second, float sign) {
+  if (running) { logLine("REJECT: already running; stop first, no queued drive\n"); return; }
+  rightSensor.update();
+  leftSensor.update();
+  if (!sensorsOK() || first.initFault || (second && second->initFault) || !timerReady) {
+    stopAll("sensor/init fault; reboot after correcting cause");
+    return;
+  }
+  // Each initialization gates both outputs off and disables its motor before
+  // the next begins. Failure or input cancels the entire requested run.
+  if (!initializeWheel(first)) return;
+  if (second) {
+    rightSensor.update();
+    leftSensor.update();
+    if (!sensorsOK()) { stopAll("sensor fault between initializations"); return; }
+    if (!initializeWheel(*second)) return;
   }
   // Fresh communication check after all blocking library delays, before enable.
   rightSensor.update();
   leftSensor.update();
   if (!sensorsOK()) { stopAll("sensor fault before drive"); return; }
-  w.motor.updateVoltageLimit(kDriveVoltage);
-  w.motor.PID_velocity.reset();  // Clear integral, previous error and ramp output for each run.
-  w.motor.target = 0;
-  w.motor.current_sp = 0;
-  w.motor.voltage.q = 0;
-  w.motor.voltage.d = 0;
+  for (Wheel* w : {&first, second}) {
+    if (!w) continue;
+    w->motor.updateVoltageLimit(kDriveVoltage);
+    w->motor.PID_velocity.reset();
+    w->motor.target = 0;
+    w->motor.current_sp = 0;
+    w->motor.voltage.q = w->motor.voltage.d = 0;
+  }
   if (!armTimer(kRunMs)) { stopAll("output timer failed"); return; }
   runStarted = millis();
-  w.motor.enable();
-  running = &w;
+  running = &first;
+  runningBoth = (second != nullptr);
   commandVelocity = sign * kTargetVelocity;
-  logLine("RUN %s command=%+.2f rad/s for %lu ms; other driver=DISABLED\n",
-        w.name, commandVelocity, static_cast<unsigned long>(kRunMs));
+  for (Wheel* w : {&first, second}) {
+    if (!w) continue;
+    checkStop();
+    if (!running) return;
+    w->motor.enable();
+    // Do not re-enable the second wheel after a timeout during the first enable.
+    checkStop();
+    if (!running) return;
+    logLine("RUN %s command=%+.2f rad/s for %lu ms\n",
+            w->name, commandVelocity, static_cast<unsigned long>(kRunMs));
+  }
 }
+
+void startWheel(Wheel& w, float sign) { startWheels(w, nullptr, sign); }
 
 void dispatch(const char* s) {
   if (!strcmp(s, "stop")) stopAll("command");
@@ -338,6 +371,8 @@ void dispatch(const char* s) {
   else if (!strcmp(s, "motor left -")) startWheel(left, -1);
   else if (!strcmp(s, "motor right +")) startWheel(right, 1);
   else if (!strcmp(s, "motor right -")) startWheel(right, -1);
+  else if (!strcmp(s, "motor both +")) startWheels(left, &right, 1);
+  else if (!strcmp(s, "motor both -")) startWheels(left, &right, -1);
   else logLine("REJECT: unknown/invalid command; no motor action\n");
 }
 
@@ -401,30 +436,35 @@ void loop() {
   checkStop();
   // loopFOC() updates the running wheel before move() reads its velocity.
   // Poll only idle wheels here, keeping both fault checks without duplicate I2C.
-  if (running != &right) rightSensor.update();
+  if (!isRunning(right)) rightSensor.update();
   checkStop();
-  if (running != &left) leftSensor.update();
+  if (!isRunning(left)) leftSensor.update();
   checkStop();
   receiveCommands();
   checkStop();
-  if (running) {
-    running->motor.loopFOC();  // Checked sensor callback can gate off here too.
+  for (Wheel* w : {&left, &right}) {
+    if (!isRunning(*w)) continue;
+    w->motor.loopFOC();  // Exactly one sensor update per active wheel.
     checkStop();
-    if (running) running->motor.move(commandVelocity);
+    if (isRunning(*w)) w->motor.move(commandVelocity);
+    checkStop();
   }
   static uint32_t focLogAt = 0;
   if (running && uint32_t(millis() - focLogAt) >= 50) {
     focLogAt = millis();
-    auto& m = running->motor;
-    const auto& sensor = running->sensor;
-    const uint32_t loggedAt = millis();
-    logLine("DRIVE: elapsed=%lu ms command=%.3f rad/s velocity=%.3f rad/s Uq=%.3f V raw=%u raw_angle=%.3f deg sensor_angle=%.3f deg age=%lu ms\n",
-        static_cast<unsigned long>(loggedAt - runStarted),
-        commandVelocity, m.shaft_velocity, m.voltage.q,
-        static_cast<unsigned int>(sensor.lastRawCount),
-        sensor.lastRawCount * 360.0f / 4096.0f,
-        running->sensor.getMechanicalAngle() * 360.0f / kTau,
-        static_cast<unsigned long>(loggedAt - sensor.lastGoodMs));
+    for (Wheel* w : {&left, &right}) {
+      if (!isRunning(*w)) continue;
+      auto& m = w->motor;
+      auto& sensor = w->sensor;
+      const uint32_t loggedAt = millis();
+      logLine("DRIVE %s: elapsed=%lu ms command=%.3f rad/s velocity=%.3f rad/s Uq=%.3f V raw=%u raw_angle=%.3f deg sensor_angle=%.3f deg age=%lu ms\n",
+          w->name, static_cast<unsigned long>(loggedAt - runStarted),
+          commandVelocity, m.shaft_velocity, m.voltage.q,
+          static_cast<unsigned int>(sensor.lastRawCount),
+          sensor.lastRawCount * 360.0f / 4096.0f,
+          sensor.getMechanicalAngle() * 360.0f / kTau,
+          static_cast<unsigned long>(loggedAt - sensor.lastGoodMs));
+    }
   }
   if (streaming && static_cast<uint32_t>(millis() - streamAt) >= kStreamMs) {
     streamAt = millis();
