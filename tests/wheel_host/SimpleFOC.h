@@ -3,7 +3,7 @@
 // Hardware/FOC doubles: tests exercise the actual diagnostic source, not
 // electrical calibration. Real Sensor base is included via the runner's -I.
 #include "common/base_classes/Sensor.h"
-enum class MotionControlType { torque };
+enum class MotionControlType { torque, velocity };
 enum class TorqueControlType { voltage };
 inline bool driverInitOK = true, motorInitOK = true, focInitOK = true, ppOK = true;
 inline std::function<void()> duringFOC;
@@ -22,7 +22,12 @@ class BLDCMotor {
   explicit BLDCMotor(int) {}
   BLDCDriver3PWM* driver = nullptr;
   Sensor* sensor = nullptr;
-  int initCalls = 0, focCalls = 0;
+  int initCalls = 0, focCalls = 0, loopCalls = 0, moveCalls = 0;
+  float current_sp = 0, shaft_velocity = 0, velocity_limit = 0;
+  struct { float P=0, I=0, D=0, output_ramp=0, limit=0; int resets=0; void reset() { ++resets; } } PID_velocity;
+  struct { float Tf=0; } LPF_velocity;
+  void useMonitoring(FakeSerial&) {}
+  void updateVoltageLimit(float v) { voltage_limit = PID_velocity.limit = v; }
   float target = 0, voltage_limit = 0, voltage_sensor_align = 0, zero_electric_angle = 0.1f;
   struct { float q = 0, d = 0; } voltage;
   bool pp_check_result = false;
@@ -38,6 +43,6 @@ class BLDCMotor {
   }
   void enable() { driver->enable(); }
   void disable() { driver->disable(); }
-  void loopFOC() { sensor->update(); }
-  void move(float v) { target = v; voltage.q = v; driver->pwm = v; }
+  void loopFOC() { ++loopCalls; sensor->update(); shaft_velocity = sensor->getVelocity(); }
+  void move(float v) { ++moveCalls; target = v; voltage.q = std::fmax(-voltage_limit, std::fmin(v, voltage_limit)); driver->pwm = voltage.q; }
 };

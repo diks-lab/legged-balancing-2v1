@@ -20,6 +20,7 @@ inline void pinMode(int pin, int mode) { gpioEvents.emplace_back(pin, mode + 10)
 inline int digitalRead(int pin) { return pins[pin]; }
 inline uint32_t millis() { return nowMs; }
 inline uint32_t micros() { return nowMs * 1000; }
+inline void delayMicroseconds(uint32_t us) { nowMs += us / 1000; }
 inline void delay(uint32_t ms) { nowMs += ms; if (tickTimer) tickTimer(); }
 struct FakeSerial {
   std::deque<unsigned char> rx;
