@@ -278,8 +278,8 @@ bool driver2_initialized = false;
 
 PIDController pid_angle{1, 0, 0, 100000, 8};
 PIDController pid_gyro{0.08, 0, 0, 100000, 8};
-PIDController pid_distance{0.4, 0, 0, 100000, 8};
-PIDController pid_speed{0.5, 0, 0, 100000, 8};
+PIDController pid_distance{0.1, 0, 0, 100000, 8};
+PIDController pid_speed{0.25, 0, 0, 100000, 8};
 
 // Half weights form the mean wheel position [rad] and speed [rad/s].
 constexpr float m1_direction = 0.5f * kRightForwardSign;
@@ -3113,7 +3113,11 @@ void updateLqrDiagnostic() {
     }
   }
 
-  float lqr_speed_direct_term = speed_control;
+  float lqr_speed_direct_term =
+    (lqr_test_mode == LqrTestMode::AttitudeSpeed ||
+     lqr_test_mode == LqrTestMode::Full)
+        ? -speed_control
+        : speed_control;
 
   if (lqr_auto_drive_active) {
     if (ps4_target_tilt_active) {
@@ -3173,6 +3177,10 @@ void updateLqrDiagnostic() {
   // Update the actual test-control output before capturing traces
   // so LQR_u, test_LQR_u and reconstructed motor outputs belong
   // to the same control cycle.
+  if (lqr_test_mode == LqrTestMode::Full) {
+    distance_control = -distance_control;
+  }
+
   updateTestLqrOutput(
       angle_control,
       gyro_control,
