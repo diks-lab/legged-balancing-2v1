@@ -12,6 +12,7 @@
 #include <ESPmDNS.h>
 #include <driver/gpio.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include <atomic>
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
@@ -4268,19 +4269,36 @@ bool stopBalanceTest() {
 
 // HTTP bridge: only serviceHttpRequests (the control loop) reads live state.
 // The HTTP task owns sockets/files and consumes copies, never controller objects.
+// ESP-IDF task stack depth is in bytes. Reserve the unchanged 8 KiB stack
+// and TCB at link time, rather than requesting a contiguous heap block after
+// Bluetooth/Wi-Fi initialization. This does not eliminate Wi-Fi heap needs.
+constexpr uint32_t kHttpTaskStackBytes = 8192;
+alignas(portBYTE_ALIGNMENT) StackType_t
+    http_task_stack[kHttpTaskStackBytes / sizeof(StackType_t)];
+static_assert(sizeof(http_task_stack) == kHttpTaskStackBytes, "HTTP stack size");
+StaticTask_t http_task_tcb;
+TaskHandle_t http_task_handle = nullptr;
+std::atomic<bool> http_task_ready{false};
+
 struct HttpStatus { char text[1536]; };
 QueueHandle_t http_status_queue = nullptr;
 QueueHandle_t http_command_queue = nullptr;
 bool http_filesystem_ready = false;
 std::atomic<int> http_trace_request{0}; // 0 idle, 1 requested, 2 ready, -1 busy
+int http_trace_kind = 1; // Published by request.store; one HTTP handler at a time.
 struct HttpTraceSnapshot {
-  VelocityTraceSample velocity[kVelocityTraceSize];
-  LoopTimingSample timing[kLoopTimingTraceSize];
-  LqrControlTraceSample control[kLqrControlTraceSize];
+  // WebServer handles one download at a time. Only copy the requested CSV;
+  // sharing storage avoids retaining three simultaneous full trace copies.
+  union {
+    VelocityTraceSample velocity[kVelocityTraceSize];
+    LoopTimingSample timing[kLoopTimingTraceSize];
+    LqrControlTraceSample control[kLqrControlTraceSize];
+  };
   size_t velocity_index, velocity_count, timing_index, timing_count;
   size_t control_index, control_count;
 } http_trace_snapshot{};
 void captureHttpStatus();
+void formatHttpResources(char* text, size_t capacity);
 
 void serviceHttpRequests() {
   if (!http_status_queue) return;
@@ -4299,9 +4317,13 @@ void serviceHttpRequests() {
         right_target_voltage != 0.0f || left_target_voltage != 0.0f) {
       http_trace_request.store(-1);
     } else {
-      memcpy(http_trace_snapshot.velocity, velocity_trace, sizeof(velocity_trace));
-      memcpy(http_trace_snapshot.timing, loop_timing_trace, sizeof(loop_timing_trace));
-      memcpy(http_trace_snapshot.control, lqr_control_trace, sizeof(lqr_control_trace));
+      if (http_trace_kind == 1) {
+        memcpy(http_trace_snapshot.velocity, velocity_trace, sizeof(velocity_trace));
+      } else if (http_trace_kind == 2) {
+        memcpy(http_trace_snapshot.timing, loop_timing_trace, sizeof(loop_timing_trace));
+      } else {
+        memcpy(http_trace_snapshot.control, lqr_control_trace, sizeof(lqr_control_trace));
+      }
       http_trace_snapshot.velocity_index = velocity_trace_write_index;
       http_trace_snapshot.velocity_count = velocity_trace_count;
       http_trace_snapshot.timing_index = loop_timing_write_index;
@@ -4321,7 +4343,10 @@ void serviceHttpRequests() {
 //==================================================
 // Wi-Fi Trace Logger
 //==================================================
-bool traceDownloadBlocked() {
+bool traceDownloadBlocked(int kind) {
+  // Finish an earlier timed-out request before changing its payload kind.
+  if (http_trace_request.load() == 1) return true;
+  http_trace_kind = kind;
   http_trace_request.store(1);
   const uint32_t start = millis();
   while (http_trace_request.load() == 1 && millis() - start < 500) {
@@ -4346,7 +4371,7 @@ void beginCsvResponse(const char* filename) {
 }
 
 void handleVelocityTraceDownload() {
-  if (traceDownloadBlocked()) {
+  if (traceDownloadBlocked(1)) {
     sendTraceBusyResponse();
     return;
   }
@@ -4392,7 +4417,7 @@ void handleVelocityTraceDownload() {
 }
 
 void handleLoopTimingTraceDownload() {
-  if (traceDownloadBlocked()) {
+  if (traceDownloadBlocked(2)) {
     sendTraceBusyResponse();
     return;
   }
@@ -4426,7 +4451,7 @@ void handleLoopTimingTraceDownload() {
 }
 
 void handleLqrControlTraceDownload() {
-  if (traceDownloadBlocked()) {
+  if (traceDownloadBlocked(3)) {
     sendTraceBusyResponse();
     return;
   }
@@ -4527,8 +4552,10 @@ void handleWifiStatusPage() {
     return;
   }
   wifi_log_server.sendHeader("Cache-Control", "no-store");
+  char resources[280];
+  formatHttpResources(resources, sizeof(resources));
   const String network_status = String("WiFi: connected\nIP: ") +
-      WiFi.localIP().toString() + "\n" + status.text;
+      WiFi.localIP().toString() + "\n" + status.text + resources;
   wifi_log_server.send(200, "text/plain; charset=utf-8", network_status.c_str());
 }
 
@@ -4546,6 +4573,11 @@ void serveWebFile(const char* path, const char* mime) {
 }
 
 void httpTask(void*) {
+  // Creation may schedule us immediately, before filesystem/Wi-Fi setup ends.
+  while (!http_task_ready.load()) vTaskDelay(pdMS_TO_TICKS(2));
+  Serial.printf("HTTP task running: stack_bytes=%lu stack_free_min_bytes=%lu\n",
+                static_cast<unsigned long>(kHttpTaskStackBytes),
+                static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
   for (;;) {
     updateWifiLogServer();
     vTaskDelay(pdMS_TO_TICKS(2));
@@ -4597,28 +4629,74 @@ void startMdns() {
   }
 }
 
-void setupWifiLogServer() {
-  if (!kEnableWifiLogServer) {
-    return;
-  }
+void formatHttpResources(char* text, size_t capacity) {
+  constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  // ESP-IDF reports the minimum remaining stack in bytes, including CSV/file
+  // operations performed since boot. Request this status again after testing.
+  snprintf(text, capacity,
+      "\nHTTP resources: stack_bytes=%lu stack_free_min_bytes=%lu "
+      "heap_free=%lu internal_free=%lu internal_largest=%lu\n",
+      static_cast<unsigned long>(kHttpTaskStackBytes),
+      static_cast<unsigned long>(http_task_handle
+          ? uxTaskGetStackHighWaterMark(http_task_handle) : 0),
+      static_cast<unsigned long>(ESP.getFreeHeap()),
+      static_cast<unsigned long>(heap_caps_get_free_size(caps)),
+      static_cast<unsigned long>(heap_caps_get_largest_free_block(caps)));
+}
 
+void printHttpStartupMemory(const char* stage) {
+  constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  Serial.printf(
+      "HTTP memory stage=%s heap_free=%lu internal_free=%lu internal_largest=%lu "
+      "stack_bytes=%lu tcb_bytes=%u status_bytes=%u trace_copy_bytes=%u\n",
+      stage, static_cast<unsigned long>(ESP.getFreeHeap()),
+      static_cast<unsigned long>(heap_caps_get_free_size(caps)),
+      static_cast<unsigned long>(heap_caps_get_largest_free_block(caps)),
+      static_cast<unsigned long>(kHttpTaskStackBytes),
+      static_cast<unsigned>(sizeof(http_task_tcb)),
+      static_cast<unsigned>(sizeof(HttpStatus)),
+      static_cast<unsigned>(sizeof(http_trace_snapshot)));
+}
+
+void setupWifiLogServer() {
+  if (!kEnableWifiLogServer || http_task_handle) return;
+
+  printHttpStartupMemory("before_queues");
   http_status_queue = xQueueCreate(1, sizeof(HttpStatus));
   http_command_queue = xQueueCreate(1, sizeof(char));
   if (!http_status_queue || !http_command_queue) {
+    if (http_status_queue) vQueueDelete(http_status_queue);
+    if (http_command_queue) vQueueDelete(http_command_queue);
+    http_status_queue = http_command_queue = nullptr;
+    printHttpStartupMemory("queues_failed");
     Serial.println("HTTP queues unavailable; robot control continues without Web.");
+    return;
+  }
+  // Keep task storage independent of the fragmented runtime heap. Start it
+  // waiting; only publish readiness after LittleFS and Wi-Fi are configured.
+  printHttpStartupMemory("before_task");
+  http_task_handle = xTaskCreateStaticPinnedToCore(
+      httpTask, "http", kHttpTaskStackBytes, nullptr, 1,
+      http_task_stack, &http_task_tcb, 0);
+  Serial.printf("HTTP task create: api=static result=%s\n",
+                http_task_handle ? "OK" : "NULL");
+  printHttpStartupMemory("after_task");
+  if (!http_task_handle) {
+    vQueueDelete(http_status_queue);
+    vQueueDelete(http_command_queue);
+    http_status_queue = http_command_queue = nullptr;
+    Serial.println("HTTP task unavailable; robot control continues without Web.");
     return;
   }
   http_filesystem_ready = LittleFS.begin(false); // Never format on mount failure.
   if (!http_filesystem_ready) Serial.println("LittleFS mount failed; no formatting performed.");
+  printHttpStartupMemory("after_filesystem");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(SSID_NAME, SSID_KEY);
-  Serial.printf("WiFi: connecting to SSID %s", SSID_NAME);
-  // Connection and all socket/file work run outside the FOC loop.
-  if (xTaskCreatePinnedToCore(httpTask, "http", 8192, nullptr, 1, nullptr, 0) != pdPASS) {
-    Serial.println("HTTP task unavailable; robot control continues without Web.");
-  }
-
+  Serial.printf("WiFi: connecting to SSID %s\n", SSID_NAME);
+  printHttpStartupMemory("after_wifi");
+  http_task_ready.store(true);
 }
 
 void updateWifiLogServer() {

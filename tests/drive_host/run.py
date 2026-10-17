@@ -134,6 +134,8 @@ names = [
 ]
 # No control behavior is stubbed: these functions only print or store logs.
 stubs = r'''
+void formatHttpResources(char* text,size_t capacity){snprintf(text,capacity,"\nHTTP resources: host stub\n");}
+
 float legCommand=-1;int legWrites=0;
 void moveBothLegsToPercent(float x){legCommand=x;++legWrites;}
 void printPs4InputDiagnostic(const Ps4InputState&){}
@@ -318,7 +320,7 @@ int main(){
   stopForActualFall(right,left);
   onSerialOutput={};
   assert(serialChecks>0 && right==0 && left==0);
-  assert(std::string(last_stop_reason)=="TILT_STOP" && !traceDownloadBlocked());
+  assert(std::string(last_stop_reason)=="TILT_STOP" && !traceDownloadBlocked(1));
   assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
   assert(lqr_control_trace[1].right_output==0 && lqr_control_trace[1].left_output==0);
   assert(lqr_control_trace[1].after_disable);
@@ -489,8 +491,17 @@ int main(){
   packet.dpad_down=true;processPs4Input(packet,nowMs+=50);assert(legCommand==20);
   // Stable CSV copies remain independent if the robot starts after capture.
   setupCase();stopBalanceTest();velocity_trace_count=1;velocity_trace[0].elapsed_ms=876;
-  assert(!traceDownloadBlocked());velocity_trace[0].elapsed_ms=999;
+  assert(!traceDownloadBlocked(1));velocity_trace[0].elapsed_ms=999;
   assert(http_trace_snapshot.velocity[0].elapsed_ms==876);
+  loop_timing_trace[0].elapsed_ms=432;loop_timing_count=1;
+  assert(!traceDownloadBlocked(2));loop_timing_trace[0].elapsed_ms=999;
+  assert(http_trace_snapshot.timing[0].elapsed_ms==432);
+  lqr_control_trace[0].elapsed_ms=654;lqr_control_trace_count=1;
+  assert(!traceDownloadBlocked(3));lqr_control_trace[0].elapsed_ms=999;
+  assert(http_trace_snapshot.control[0].elapsed_ms==654);
+  http_trace_request.store(1);http_trace_kind=2;
+  assert(traceDownloadBlocked(3));assert(http_trace_kind==2);
+  http_trace_request.store(0);
 
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);
