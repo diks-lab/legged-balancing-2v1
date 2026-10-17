@@ -9,7 +9,7 @@ import tempfile
 sys.dont_write_bytecode=True
 spec=importlib.util.spec_from_file_location('foc_patch','scripts/patch_foc_observation.py')
 patch=importlib.util.module_from_spec(spec);spec.loader.exec_module(patch)
-lib=Path('.pio/libdeps/esp32dev/Arduino-FOC/src/common/base_classes/FOCMotor.cpp').read_text()
+lib=Path('.pio/libdeps/esp32dev/Arduino-FOC/src/common/base_classes/FOCMotor.cpp').read_text(encoding='utf-8')
 if hashlib.sha256(lib.encode()).hexdigest()==patch.PATCHED_SHA256:
     original=lib
     for before,after in reversed(patch.CHANGES):original=original.replace(after,before,1)
@@ -27,7 +27,7 @@ def function(source,name):
         depth+=(source[i]=='{')-(source[i]=='}');i+=1
     return source[m.start():i]
 
-app=Path('src/main.cpp').read_text()
+app=Path('src/main.cpp').read_text(encoding='utf-8')
 prelude=r'''
 #include "FocAlignmentObservation.h"
 #include <cassert>
@@ -189,9 +189,9 @@ int main(){
 }
 '''
 with tempfile.TemporaryDirectory(prefix='foc-observe-') as directory:
-    path=Path(directory)/'FOCMotor.cpp';path.write_text(original)
-    assert patch.patch(path);assert not patch.patch(path);assert path.read_text()==patched
-    path.write_text(original+'\n// drift');before=path.read_bytes()
+    path=Path(directory)/'FOCMotor.cpp';path.write_bytes(original.encode('utf-8'))
+    assert patch.patch(path);assert not patch.patch(path);assert path.read_text(encoding='utf-8')==patched
+    path.write_bytes((original+'\n// drift').encode('utf-8'));before=path.read_bytes()
     try:patch.patch(path);raise AssertionError('accepted mismatched source')
     except RuntimeError:pass
     assert path.read_bytes()==before
@@ -204,7 +204,7 @@ with tempfile.TemporaryDirectory(prefix='foc-observe-') as directory:
     baseline=re.sub(r'\bFOCMotor\b','BaselineMotor',definition+'\n'+'\n'.join(function(original,n) for n in ['FOCMotor::initFOC','FOCMotor::alignSensor']))
     code=prelude+'\n'+function(app,'gateWheelOutputsOffFrom')+'\n'+baseline+'\n'+'\n'.join(function(patched,n) for n in ['FOCMotor::initFOC','FOCMotor::alignSensor'])
     code+='\n'+function(app,'printFocAlignmentObservation')+'\n'+function(app,'initializeWheelFoc')+checks
-    cpp.write_text(code)
+    cpp.write_bytes(code.encode('utf-8'))
     subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-pthread','-Iinclude',str(cpp),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
 # Hooks only consume cached getters or local values. No extra sensor update or wait.
