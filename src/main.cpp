@@ -5,6 +5,10 @@
 #include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <LittleFS.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 #include <ESPmDNS.h>
 #include <driver/gpio.h>
 #include <esp_timer.h>
@@ -694,6 +698,7 @@ void updateLqrRunDiagnostic(float right_output, float left_output);
 // Wi-Fi trace logger
 void setupWifiLogServer();
 void updateWifiLogServer();
+void serviceHttpRequests();
 void handleWifiStatusPage();
 void handleVelocityTraceDownload();
 void handleLoopTimingTraceDownload();
@@ -875,7 +880,7 @@ void loop() {
 
   if (!test_system_ready) {
     handleSerialCommand();
-    updateWifiLogServer();
+    serviceHttpRequests();
     delay(10);
     return;
   }
@@ -1165,7 +1170,7 @@ const float left_angle_delta =
     }
   }
 
-  updateWifiLogServer();
+  serviceHttpRequests();
 }
 
 namespace {
@@ -4246,11 +4251,69 @@ bool stopBalanceTest() {
   return true;
 }
 
+// HTTP bridge: only serviceHttpRequests (the control loop) reads live state.
+// The HTTP task owns sockets/files and consumes copies, never controller objects.
+struct HttpStatus { char text[1536]; };
+QueueHandle_t http_status_queue = nullptr;
+QueueHandle_t http_command_queue = nullptr;
+bool http_filesystem_ready = false;
+std::atomic<int> http_trace_request{0}; // 0 idle, 1 requested, 2 ready, -1 busy
+struct HttpTraceSnapshot {
+  VelocityTraceSample velocity[kVelocityTraceSize];
+  LoopTimingSample timing[kLoopTimingTraceSize];
+  LqrControlTraceSample control[kLqrControlTraceSize];
+  size_t velocity_index, velocity_count, timing_index, timing_count;
+  size_t control_index, control_count;
+} http_trace_snapshot{};
+void captureHttpStatus();
+
+void serviceHttpRequests() {
+  if (!http_status_queue) return;
+  char command = 0;
+  if (xQueueReceive(http_command_queue, &command, 0) == pdTRUE) {
+    switch (command) {
+      case 't': startBalanceTest(); break;
+      case 'd': stopBalanceTest(); break;
+      case 'g': cycleLqrTestMode(); break;
+      case 'i': cycleLqrSpeedSource(); break;
+    }
+  }
+  if (http_trace_request.load() == 1) {
+    // Also exclude direct motor/polarity tests, not just balancing.
+    if (lqr_direction_test_armed || balance_wait_active || polarity_test_active ||
+        right_target_voltage != 0.0f || left_target_voltage != 0.0f) {
+      http_trace_request.store(-1);
+    } else {
+      memcpy(http_trace_snapshot.velocity, velocity_trace, sizeof(velocity_trace));
+      memcpy(http_trace_snapshot.timing, loop_timing_trace, sizeof(loop_timing_trace));
+      memcpy(http_trace_snapshot.control, lqr_control_trace, sizeof(lqr_control_trace));
+      http_trace_snapshot.velocity_index = velocity_trace_write_index;
+      http_trace_snapshot.velocity_count = velocity_trace_count;
+      http_trace_snapshot.timing_index = loop_timing_write_index;
+      http_trace_snapshot.timing_count = loop_timing_count;
+      http_trace_snapshot.control_index = lqr_control_trace_write_index;
+      http_trace_snapshot.control_count = lqr_control_trace_count;
+      http_trace_request.store(2);
+    }
+  }
+  static uint32_t last_status_ms = 0;
+  if (millis() - last_status_ms >= 250) {
+    captureHttpStatus();
+    last_status_ms = millis();
+  }
+}
+
 //==================================================
 // Wi-Fi Trace Logger
 //==================================================
 bool traceDownloadBlocked() {
-  return lqr_direction_test_armed || balance_wait_active;
+  http_trace_request.store(1);
+  const uint32_t start = millis();
+  while (http_trace_request.load() == 1 && millis() - start < 500) {
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+  // A timeout may race a copy, so leave the request for the loop to finish.
+  return http_trace_request.load() != 2;
 }
 
 void sendTraceBusyResponse() {
@@ -4284,16 +4347,16 @@ void handleVelocityTraceDownload() {
       "LQR_speed,diag_speed_spike\n");
 
   const size_t first_index =
-      (velocity_trace_write_index + kVelocityTraceSize -
-       velocity_trace_count) %
+      (http_trace_snapshot.velocity_index + kVelocityTraceSize -
+       http_trace_snapshot.velocity_count) %
       kVelocityTraceSize;
   char line[320];
-  for (size_t i = 0; i < velocity_trace_count; ++i) {
+  for (size_t i = 0; i < http_trace_snapshot.velocity_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
     }
     const VelocityTraceSample& sample =
-        velocity_trace[(first_index + i) % kVelocityTraceSize];
+        http_trace_snapshot.velocity[(first_index + i) % kVelocityTraceSize];
     snprintf(
         line, sizeof(line),
         "%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
@@ -4325,16 +4388,16 @@ void handleLoopTimingTraceDownload() {
       "mpu_update_us,motor_move_us\n");
 
   const size_t first_index =
-      (loop_timing_write_index + kLoopTimingTraceSize -
-       loop_timing_count) %
+      (http_trace_snapshot.timing_index + kLoopTimingTraceSize -
+       http_trace_snapshot.timing_count) %
       kLoopTimingTraceSize;
   char line[128];
-  for (size_t i = 0; i < loop_timing_count; ++i) {
+  for (size_t i = 0; i < http_trace_snapshot.timing_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
     }
     const LoopTimingSample& sample =
-        loop_timing_trace[(first_index + i) % kLoopTimingTraceSize];
+        http_trace_snapshot.timing[(first_index + i) % kLoopTimingTraceSize];
     snprintf(line, sizeof(line), "%lu,%lu,%lu,%lu,%lu,%lu\n",
              static_cast<unsigned long>(sample.elapsed_ms),
              static_cast<unsigned long>(sample.whole_loop_us),
@@ -4362,16 +4425,16 @@ void handleLqrControlTraceDownload() {
       "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us\n");
 
   const size_t first_index =
-      (lqr_control_trace_write_index + kLqrControlTraceSize -
-       lqr_control_trace_count) %
+      (http_trace_snapshot.control_index + kLqrControlTraceSize -
+       http_trace_snapshot.control_count) %
       kLqrControlTraceSize;
   char line[512];
-  for (size_t i = 0; i < lqr_control_trace_count; ++i) {
+  for (size_t i = 0; i < http_trace_snapshot.control_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
     }
     const LqrControlTraceSample& sample =
-        lqr_control_trace[(first_index + i) % kLqrControlTraceSize];
+        http_trace_snapshot.control[(first_index + i) % kLqrControlTraceSize];
     snprintf(
         line, sizeof(line),
         "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
@@ -4396,83 +4459,35 @@ void handleLqrControlTraceDownload() {
   wifi_log_server.sendContent("");
 }
 
-void sendControlResult(bool succeeded, const char* conflict_message) {
-  if (!succeeded) {
-    wifi_log_server.send(409, "text/plain", conflict_message);
+void enqueueHttpCommand(char command) {
+  if (xQueueSend(http_command_queue, &command, 0) != pdTRUE) {
+    wifi_log_server.send(409, "text/plain", "Command pending\n");
     return;
   }
-  wifi_log_server.sendHeader("Location", "/");
-  wifi_log_server.send(303, "text/plain", "See Other\n");
+  wifi_log_server.send(202, "text/plain", "Command queued; check status for result\n");
 }
+void handleCycleLqrTestMode() { enqueueHttpCommand('g'); }
+void handleCycleLqrSpeedSource() { enqueueHttpCommand('i'); }
+void handleStartBalanceTest() { enqueueHttpCommand('t'); }
+void handleStopBalanceTest() { enqueueHttpCommand('d'); }
 
-void handleCycleLqrTestMode() {
-  sendControlResult(
-      cycleLqrTestMode(),
-      "MODE CHANGE NOT ALLOWED WHILE TEST IS ACTIVE\n");
-}
-
-void handleCycleLqrSpeedSource() {
-  sendControlResult(
-      cycleLqrSpeedSource(),
-      "SPEED SOURCE CHANGE NOT ALLOWED WHILE TEST IS ACTIVE\n");
-}
-
-void handleStartBalanceTest() {
-  sendControlResult(startBalanceTest(), "START NOT ALLOWED\n");
-}
-
-void handleStopBalanceTest() {
-  sendControlResult(stopBalanceTest(), "STOP NOT ALLOWED\n");
-}
-
-void handleWifiStatusPage() {
-  char page[3072];
-  const String ip_address = WiFi.localIP().toString();
+void captureHttpStatus() {
+  HttpStatus status{};
   const bool test_active =
       lqr_direction_test_armed || balance_wait_active || polarity_test_active;
-  const bool start_allowed =
-      test_system_ready && !emergency_stop_active && !test_active;
-  const char* state =
-      polarity_test_active
-          ? "POLARITY TEST"
-          : (balance_wait_active
-                 ? "BALANCE WAIT"
-                 : (lqr_direction_test_armed ? "RUNNING" : "STOPPED"));
-  snprintf(
-      page, sizeof(page),
-      "<!doctype html><html><head><meta charset=\"utf-8\">"
-      "<title>ESP32 LQR Logger</title></head><body>"
-      "<h1>ESP32 LQR Logger</h1>"
-      "<p>WiFi: %s<br>IP: %s</p>"
-      "<p>State: <strong>%s</strong></p>"
-      "<p>Last stop reason: <strong>%s</strong></p>"
-      "<p>Cached AngleY: %.6f deg<br>Reference: %.6f deg<br>Delta: %.6f deg</p>"
-      "<p>System initialized: %s<br>Right: driver_init=%d sensor_ready=%d "
-      "fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d<br>"
-      "Left: driver_init=%d sensor_ready=%d fault=%d (%s) "
-      "motor_status=%u motor_enabled=%d EN=%d</p>"
-      "<p>LQR Test Mode: <strong>%s</strong></p>"
-      "<form method=\"POST\" action=\"/control/mode\">"
-      "<button type=\"submit\"%s>Change Mode</button></form>"
-      "<p>LQR Speed Source: <strong>%s</strong></p>"
-      "<form method=\"POST\" action=\"/control/speed-source\">"
-      "<button type=\"submit\"%s>Change Speed Source</button></form>"
-      "<h2>Control</h2>"
-      "<form method=\"POST\" action=\"/control/start\">"
-      "<button type=\"submit\"%s>START BALANCE TEST</button></form>"
-      "<form method=\"POST\" action=\"/control/stop\">"
-      "<button type=\"submit\">STOP TEST</button></form>"
-      "<p>Trace samples:<br>Velocity: %u<br>Loop Timing: %u<br>"
-      "LQR Control: %u</p>"
-      "<p>Trace:<br>"
-      "<a href=\"/trace/velocity.csv\">Velocity Trace</a><br>"
-      "<a href=\"/trace/loop.csv\">Loop Timing Trace</a><br>"
-      "<a href=\"/trace/lqr.csv\">LQR Control Trace</a></p>"
-      "</body></html>",
-      WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
-      ip_address.c_str(), state, last_stop_reason,
-      LQR_angle, angle_zeropoint, LQR_angle - angle_zeropoint,
-      test_system_ready ? "yes" : "no",
+  const char* state = polarity_test_active ? "POLARITY TEST" :
+      (balance_wait_active ? "BALANCE WAIT" :
+       (lqr_direction_test_armed ? "RUNNING" : "STOPPED"));
+  snprintf(status.text, sizeof(status.text),
+      "State: %s\nLast stop reason: %s\n"
+      "Cached AngleY: %.6f deg\nReference: %.6f deg\nDelta: %.6f deg\n"
+      "System initialized: %s\n"
+      "Right: driver_init=%d sensor_ready=%d fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d\n"
+      "Left: driver_init=%d sensor_ready=%d fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d\n"
+      "LQR Test Mode: %s\nLQR Speed Source: %s\n"
+      "Test active: %s\nTrace samples: Velocity=%u Loop Timing=%u LQR Control=%u\n",
+      state, last_stop_reason, LQR_angle, angle_zeropoint,
+      LQR_angle - angle_zeropoint, test_system_ready ? "yes" : "no",
       static_cast<int>(driver1_initialized), static_cast<int>(sensor1.ready),
       static_cast<int>(sensor1.fault), sensor1.error,
       static_cast<unsigned>(motor1.motor_status), static_cast<int>(motor1.enabled),
@@ -4480,13 +4495,43 @@ void handleWifiStatusPage() {
       static_cast<int>(driver2_initialized), static_cast<int>(sensor2.ready),
       static_cast<int>(sensor2.fault), sensor2.error,
       static_cast<unsigned>(motor2.motor_status), static_cast<int>(motor2.enabled),
-      digitalRead(motor2EnablePin), lqrTestModeDisplayName(),
-      test_active ? " disabled" : "", lqrSpeedSourceName(),
-      test_active ? " disabled" : "", start_allowed ? "" : " disabled",
-      static_cast<unsigned>(velocity_trace_count),
+      digitalRead(motor2EnablePin), lqrTestModeDisplayName(), lqrSpeedSourceName(),
+      test_active ? "yes" : "no", static_cast<unsigned>(velocity_trace_count),
       static_cast<unsigned>(loop_timing_count),
       static_cast<unsigned>(lqr_control_trace_count));
-  wifi_log_server.send(200, "text/html; charset=utf-8", page);
+  xQueueOverwrite(http_status_queue, &status);
+}
+
+void handleWifiStatusPage() {
+  HttpStatus status{};
+  if (xQueuePeek(http_status_queue, &status, 0) != pdTRUE) {
+    wifi_log_server.send(503, "text/plain", "Status initializing\n");
+    return;
+  }
+  wifi_log_server.sendHeader("Cache-Control", "no-store");
+  const String network_status = String("WiFi: connected\nIP: ") +
+      WiFi.localIP().toString() + "\n" + status.text;
+  wifi_log_server.send(200, "text/plain; charset=utf-8", network_status.c_str());
+}
+
+void serveWebFile(const char* path, const char* mime) {
+  if (!http_filesystem_ready) {
+    wifi_log_server.send(503, "text/plain", "LittleFS unavailable; motor control is independent.\n");
+    return;
+  }
+  File file = LittleFS.open(path, "r");
+  if (!file || file.isDirectory()) {
+    wifi_log_server.send(404, "text/plain", "Web file missing. Upload data with uploadfs.\n");
+    return;
+  }
+  wifi_log_server.streamFile(file, mime);
+}
+
+void httpTask(void*) {
+  for (;;) {
+    updateWifiLogServer();
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
 }
 
 void startWifiHttpServer() {
@@ -4494,7 +4539,10 @@ void startWifiHttpServer() {
     return;
   }
 
-  wifi_log_server.on("/", HTTP_GET, handleWifiStatusPage);
+  wifi_log_server.on("/", HTTP_GET, []() { serveWebFile("/index.html", "text/html; charset=utf-8"); });
+  wifi_log_server.on("/style.css", HTTP_GET, []() { serveWebFile("/style.css", "text/css"); });
+  wifi_log_server.on("/app.js", HTTP_GET, []() { serveWebFile("/app.js", "application/javascript"); });
+  wifi_log_server.on("/api/status", HTTP_GET, handleWifiStatusPage);
   wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
                      handleVelocityTraceDownload);
   wifi_log_server.on("/trace/loop.csv", HTTP_GET,
@@ -4536,29 +4584,23 @@ void setupWifiLogServer() {
     return;
   }
 
+  http_status_queue = xQueueCreate(1, sizeof(HttpStatus));
+  http_command_queue = xQueueCreate(1, sizeof(char));
+  if (!http_status_queue || !http_command_queue) {
+    Serial.println("HTTP queues unavailable; robot control continues without Web.");
+    return;
+  }
+  http_filesystem_ready = LittleFS.begin(false); // Never format on mount failure.
+  if (!http_filesystem_ready) Serial.println("LittleFS mount failed; no formatting performed.");
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.begin(SSID_NAME, SSID_KEY);
   Serial.printf("WiFi: connecting to SSID %s", SSID_NAME);
-  const uint32_t connect_start_ms = millis();
-  while (WiFi.status() != WL_CONNECTED &&
-         millis() - connect_start_ms < kWifiConnectTimeoutMs) {
-    delay(100);
-    Serial.print('.');
-  }
-  Serial.println();
-
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi connection timed out; robot control will continue.");
-    return;
+  // Connection and all socket/file work run outside the FOC loop.
+  if (xTaskCreatePinnedToCore(httpTask, "http", 8192, nullptr, 1, nullptr, 0) != pdPASS) {
+    Serial.println("HTTP task unavailable; robot control continues without Web.");
   }
 
-  const String ip_address = WiFi.localIP().toString();
-  Serial.printf("WiFi connected: SSID %s\n", SSID_NAME);
-  Serial.printf("WiFi DHCP IP: %s\n", ip_address.c_str());
-  Serial.printf("HTTP access URL: http://%s/\n", ip_address.c_str());
-  startWifiHttpServer();
-  startMdns();
 }
 
 void updateWifiLogServer() {

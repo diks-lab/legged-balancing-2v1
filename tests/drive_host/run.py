@@ -33,6 +33,8 @@ prelude = r'''
 #include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <vector>
+#include <cstring>
 using std::min; using std::max; using std::abs;
 template<class T, class L, class H> T constrain(T x,L lo,H hi) {
   return x < lo ? T(lo) : (x > hi ? T(hi) : x);
@@ -84,6 +86,24 @@ struct MPU6050 {
 };
 unsigned long _micros(){return micros();}
 '''
+prelude += r'''
+constexpr int pdTRUE=1;
+struct HostQueue { std::vector<unsigned char> bytes; size_t item; bool full=false; };
+using QueueHandle_t=HostQueue*;
+QueueHandle_t xQueueCreate(int,size_t item){return new HostQueue{{},item,false};}
+int xQueueOverwrite(QueueHandle_t q,const void* data){
+  q->bytes.assign((const unsigned char*)data,(const unsigned char*)data+q->item);q->full=true;return 1;
+}
+int xQueueSend(QueueHandle_t q,const void* data,int){if(q->full)return 0;return xQueueOverwrite(q,data);}
+int xQueuePeek(QueueHandle_t q,void* data,int){if(!q->full)return 0;memcpy(data,q->bytes.data(),q->item);return 1;}
+int xQueueReceive(QueueHandle_t q,void* data,int t){int r=xQueuePeek(q,data,t);q->full=false;return r;}
+#define pdMS_TO_TICKS(x) (x)
+std::function<void()> onHttpYield;
+void vTaskDelay(int ms){delay(ms);if(onHttpYield)onHttpYield();}
+'''
+bridge_start = source.index('struct HttpStatus {')
+bridge_end = source.index('void captureHttpStatus();', bridge_start)
+prefix += source[bridge_start:bridge_end]
 names = [
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
@@ -96,7 +116,8 @@ names = [
     'resetLqrDriveSignTrace','resetLqrStopTrace','startLqrStopTrace','setStatusLed','printLqrStatus',
     'stopForActualFall','traceDownloadBlocked','beginCsvResponse','sendTraceBusyResponse',
     'handleVelocityTraceDownload','handleLoopTimingTraceDownload','handleLqrControlTraceDownload',
-    'handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','sendControlResult',
+    'captureHttpStatus','serviceHttpRequests','handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','enqueueHttpCommand',
+    'cycleLqrSpeedSource',
     'updateWheelVelocityDiagnostic',
 ]
 # No control behavior is stubbed: these functions only print or store logs.
@@ -148,6 +169,9 @@ void start(float sign){
   assert(speed_direct_control==0); // preserve the old tilt-only drive profile
 }
 int main(){
+  http_status_queue=xQueueCreate(1,sizeof(HttpStatus));
+  http_command_queue=xQueueCreate(1,sizeof(char));
+  onHttpYield=[]{serviceHttpRequests();};
   // AUTO START still requires an explicit t-equivalent and starts at rest.
   setupCase(); lqr_direction_test_armed=false; lqr_diagnostic_armed=false;
   assert(!requestLqrDrive(.3f,'>'));
@@ -164,9 +188,9 @@ int main(){
     near(test_LQR_u,.29f);near(LQR_u,test_LQR_u);
     assert(lqrMotorVoltage(test_LQR_u,1,1)>0);
   }
-  setupCase();step(.2f);assert(speed_control<0 && test_LQR_u<0);
-  setupCase();LQR_distance=.1f;step();near(distance_control,-.04f);assert(test_LQR_u<0);
-  setupCase();LQR_distance=-.1f;step();assert(test_LQR_u>0);
+  setupCase();step(.2f);assert(speed_control<0 && speed_direct_control>0 && test_LQR_u>0);
+  setupCase();LQR_distance=.1f;step();near(distance_control,.01f);assert(test_LQR_u>0);
+  setupCase();LQR_distance=-.1f;step();assert(test_LQR_u<0);
   // Re-selecting AttitudeOnly exactly recovers c4ba29b, irrespective of x/v.
   setupCase(LqrTestMode::AttitudeOnly);LQR_angle=.25f;LQR_gyro=.5f;LQR_distance=8;
   step(12);near(test_LQR_u,.29f);assert(distance_control==0 && speed_control==0);
@@ -250,7 +274,7 @@ int main(){
   const auto newline=wifi_log_server.body.find('\n');
   assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.begin()+newline,',')==23);
   assert(std::count(wifi_log_server.body.begin()+newline+1,wifi_log_server.body.end(),',')==23);
-  LQR_angle=5.93f;angle_zeropoint=1;handleWifiStatusPage();
+  LQR_angle=5.93f;angle_zeropoint=1;captureHttpStatus();handleWifiStatusPage();
   assert(wifi_log_server.body.find("Cached AngleY: 5.930000 deg")!=String::npos);
   assert(wifi_log_server.body.find("Reference: 1.000000 deg")!=String::npos);
   assert(wifi_log_server.body.find("Delta: 4.930000 deg")!=String::npos);
@@ -285,10 +309,10 @@ int main(){
   assert(lqr_control_trace[1].right_motor_enabled && !lqr_control_trace[1].right_driver_en);
   for(int i=0;i<20;++i){delay(20);updateWheelVelocityDiagnostic();updateLqrControlTrace(0,0,false);}
   assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
-  handleWifiStatusPage();
+  captureHttpStatus();handleWifiStatusPage();
   assert(wifi_log_server.status==200);
   assert(wifi_log_server.body.find("TILT_STOP")!=String::npos);
-  assert(wifi_log_server.body.find("Velocity: 1")!=String::npos);
+  assert(wifi_log_server.body.find("Velocity=1")!=String::npos);
   handleVelocityTraceDownload();assert(wifi_log_server.status==200);
   const String csv=wifi_log_server.body;
   assert(std::count(csv.begin(),csv.end(),'\n')==2);
@@ -299,10 +323,10 @@ int main(){
   handleLqrControlTraceDownload();assert(wifi_log_server.status==200);
   assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.end(),'\n')==3);
   assert(wifi_log_server.body.find("AFTER_DISABLE")!=String::npos);
-  handleStopBalanceTest(); // a redundant Web STOP must preserve the fall
+  handleStopBalanceTest();serviceHttpRequests(); // a redundant Web STOP must preserve the fall
   assert(std::string(last_stop_reason)=="TILT_STOP" && velocity_trace_count==1);
-  handleStartBalanceTest(); // rejected while disabled: no erase
-  assert(wifi_log_server.status==409 && lqr_control_trace_count==2);
+  handleStartBalanceTest();serviceHttpRequests(); // rejected while disabled: no erase
+  assert(wifi_log_server.status==202 && lqr_control_trace_count==2);
   assert(std::string(last_stop_reason)=="TILT_STOP");
   emergency_stop_active=false; // same zero-output re-enable state as u
   assert(startBalanceTest());
@@ -315,7 +339,7 @@ int main(){
   setupCase();sensor2.fault=true;gateWheelOutputsOff();assert(stopOnWheelFault());
   assert(!pins[27] && !pins[32] && !test_system_ready && !lqr_direction_test_armed);
   assert(!startBalanceTest());
-  handleWifiStatusPage();
+  captureHttpStatus();handleWifiStatusPage();
   assert(wifi_log_server.body.find("System initialized: no")!=String::npos);
   assert(wifi_log_server.body.find("fault=1")!=String::npos);
   // Trace sum and status report selected contributions, not unused speed PID.

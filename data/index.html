@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ESP32 LQR Logger</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body><main><h1>ESP32 LQR Logger</h1><p>PS4を基本操作に使用します。Webは状態表示・停止後のログ取得用です。</p>
+<p id="connection" role="status">接続中…</p><pre id="status">状態取得中…</pre>
+<h2>Trace CSV</h2><p>走行・倒立・直接駆動試験中は取得できません。転倒後の記録も取得できます。</p>
+<nav><a href="/trace/velocity.csv">Velocity Trace</a><a href="/trace/loop.csv">Loop Timing Trace</a><a href="/trace/lqr.csv">LQR Control Trace</a></nav>
+<h2>停止</h2><button data-command="stop">STOP TEST</button>
+<details><summary>既存の診断操作</summary><p>停止状態で使用してください。受付と実行結果は異なります。状態表示で確認してください。</p>
+<button data-command="mode">Change Mode</button><button data-command="speed-source">Change Speed Source</button><button data-command="start">START BALANCE TEST</button></details>
+<p id="result" role="status"></p></main></body></html>
