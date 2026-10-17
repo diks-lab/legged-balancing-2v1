@@ -67,6 +67,7 @@ struct { File file{}; int opens=0;
   File open(const char*,const char*) {++opens;return file;}
 } LittleFS;
 struct WebServer {
+  bool _server=false;
   explicit WebServer(int) {}
   int status=0;std::string body;
   struct Client {bool connected(){return true;}};

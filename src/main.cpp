@@ -262,7 +262,23 @@ enum class Ps4DriveState {
 };
 Ps4DriveState ps4_drive_state = Ps4DriveState::Neutral;
 
-WebServer wifi_log_server(80);
+// WebServer::begin() returns void. Check the underlying TCP listener instead
+// of equating task creation (or a begin call) with a working HTTP listener.
+class CheckedHttpServer : public WebServer {
+ public:
+  using WebServer::WebServer;
+  bool listening() { return static_cast<bool>(_server); }
+};
+CheckedHttpServer wifi_log_server(80);
+std::atomic<bool> startup_foc_ready{false};
+// The following startup publication state is owned by the HTTP task.
+bool startup_menu_printed = false;
+bool http_routes_registered = false;
+bool http_listener_failure_reported = false;
+bool wifi_connection_ready = false;
+bool wifi_timeout_reported = false;
+uint32_t wifi_wait_started_ms = 0;
+String wifi_announced_ip;
 bool wifi_log_server_started = false;
 bool mdns_started = false;
 bool mdns_attempted = false;
@@ -707,6 +723,8 @@ void updateLqrRunDiagnostic(float right_output, float left_output);
 
 // Wi-Fi trace logger
 void setupWifiLogServer();
+void reportStartupFailure(const char* stage);
+void printHttpStartupMemory(const char* stage);
 void updateWifiLogServer();
 void serviceHttpRequests();
 void handleWifiStatusPage();
@@ -747,6 +765,7 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 }  // namespace
 
 void setup() {
+  const char* startup_stage = "WHEEL_ALIGN_TIMER";
   gateWheelOutputsOff();
   pinMode(motor1EnablePin, OUTPUT);
   pinMode(motor2EnablePin, OUTPUT);
@@ -770,26 +789,33 @@ void setup() {
   if (esp_timer_create(&alignArgs, &wheelAlignTimer) != ESP_OK) {
     disableBothDrivers();
     Serial.println("ERROR: wheel alignment timer unavailable; reboot required.");
+    reportStartupFailure(startup_stage);
     return;
   }
   // Initialize/check BOTH wheel sensors before any motor can be enabled.
+  startup_stage = "WHEEL_SENSORS";
   sensor1.begin(19, 18);
   sensor2.begin(23, 5);
   if (!wheelSensorsOK()) {
     disableBothDrivers();
     Serial.println("ERROR: wheel sensor initialization failed; reboot required.");
+    reportStartupFailure(startup_stage);
     return;
   }
+  startup_stage = "RIGHT_AS5600";
   if (!i2cDeviceIsPresent(I2Cone, kAs5600Address)) {
     Serial.println("ERROR: right AS5600 not found at 0x36.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   motor1.linkSensor(&sensor1);
 
+  startup_stage = "MPU6050";
   if (!i2cDeviceIsPresent(I2Cone, kMpu6050Address)) {
     Serial.println("ERROR: MPU6050 not found at 0x68.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   mpu6050.begin();
@@ -797,9 +823,11 @@ void setup() {
 
   driver1.voltage_power_supply = kWheelSupplyVoltage;
   driver1.voltage_limit = kWheelSupplyVoltage;
+  startup_stage = "RIGHT_DRIVER";
   if (!driver1.init()) {
     Serial.println("ERROR: Right driver initialization failed.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   driver1_initialized = true;
@@ -811,31 +839,39 @@ void setup() {
   motor1.torque_controller = TorqueControlType::voltage;
   motor1.controller = MotionControlType::torque;
   motor1.useMonitoring(Serial);
+  startup_stage = "RIGHT_MOTOR";
   if (!refreshWheelSensors() || !motor1.init() || !refreshWheelSensors()) {
     Serial.println("ERROR: Right motor initialization failed.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
+  startup_stage = "RIGHT_FOC";
   const int motor1FocStatus = initializeWheelFoc(motor1);
   Serial.printf("Right FOC initialization result: %d\n", motor1FocStatus);
   if (motor1FocStatus == 0) {
     Serial.println("ERROR: Right FOC initialization failed.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   driver1.disable();
 
+  startup_stage = "LEFT_AS5600";
   if (!i2cDeviceIsPresent(I2Ctwo, kAs5600Address)) {
     Serial.println("ERROR: left AS5600 not found at 0x36.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   motor2.linkSensor(&sensor2);
   driver2.voltage_power_supply = kWheelSupplyVoltage;
   driver2.voltage_limit = kWheelSupplyVoltage;
+  startup_stage = "LEFT_DRIVER";
   if (!driver2.init()) {
     Serial.println("ERROR: Left driver initialization failed.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   driver2_initialized = true;
@@ -847,16 +883,20 @@ void setup() {
   motor2.torque_controller = TorqueControlType::voltage;
   motor2.controller = MotionControlType::torque;
   motor2.useMonitoring(Serial);
+  startup_stage = "LEFT_MOTOR";
   if (!refreshWheelSensors() || !motor2.init() || !refreshWheelSensors()) {
     Serial.println("ERROR: Left motor initialization failed.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
+  startup_stage = "LEFT_FOC";
   const int motor2FocStatus = initializeWheelFoc(motor2);
   Serial.printf("Left FOC initialization result: %d\n", motor2FocStatus);
   if (motor2FocStatus == 0) {
     Serial.println("ERROR: Left FOC initialization failed.");
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   driver2.disable();
@@ -864,10 +904,12 @@ void setup() {
   motor1.updateVoltageLimit(kWheelRunVoltageLimit);
   motor2.updateVoltageLimit(kWheelRunVoltageLimit);
   // Fresh checked samples after blocking initialization, before re-enabling.
+  startup_stage = "POST_FOC_SENSORS";
   sensor1.update();
   sensor2.update();
   if (!wheelSensorsOK()) {
     disableBothDrivers();
+    reportStartupFailure(startup_stage);
     return;
   }
   Serial.printf("Right sensor_direction=%s m1_direction=%.2f\n",
@@ -883,8 +925,8 @@ void setup() {
   lqr_direction_test_armed = false;
   balance_wait_active = false;
   Serial.println("OK: both motors initialized and stopped at 0.00 V.");
+  startup_foc_ready.store(true);
   setupWifiLogServer();
-  printHelp();
 }
 
 void loop() {
@@ -4585,33 +4627,46 @@ void httpTask(void*) {
 }
 
 void startWifiHttpServer() {
-  if (wifi_log_server_started) {
+  if (wifi_log_server_started && wifi_log_server.listening()) {
     return;
   }
 
-  wifi_log_server.on("/", HTTP_GET, []() { serveWebFile("/index.html", "text/html; charset=utf-8"); });
-  wifi_log_server.on("/style.css", HTTP_GET, []() { serveWebFile("/style.css", "text/css"); });
-  wifi_log_server.on("/app.js", HTTP_GET, []() { serveWebFile("/app.js", "application/javascript"); });
-  wifi_log_server.on("/api/status", HTTP_GET, handleWifiStatusPage);
-  wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
-                     handleVelocityTraceDownload);
-  wifi_log_server.on("/trace/loop.csv", HTTP_GET,
-                     handleLoopTimingTraceDownload);
-  wifi_log_server.on("/trace/lqr.csv", HTTP_GET,
-                     handleLqrControlTraceDownload);
-  wifi_log_server.on("/control/mode", HTTP_POST,
-                     handleCycleLqrTestMode);
-  wifi_log_server.on("/control/speed-source", HTTP_POST,
-                     handleCycleLqrSpeedSource);
-  wifi_log_server.on("/control/start", HTTP_POST,
-                     handleStartBalanceTest);
-  wifi_log_server.on("/control/stop", HTTP_POST,
-                     handleStopBalanceTest);
-  wifi_log_server.onNotFound([]() {
-    wifi_log_server.send(404, "text/plain", "NOT FOUND\n");
-  });
+  if (!http_routes_registered) {
+    wifi_log_server.on("/", HTTP_GET, []() { serveWebFile("/index.html", "text/html; charset=utf-8"); });
+    wifi_log_server.on("/style.css", HTTP_GET, []() { serveWebFile("/style.css", "text/css"); });
+    wifi_log_server.on("/app.js", HTTP_GET, []() { serveWebFile("/app.js", "application/javascript"); });
+    wifi_log_server.on("/api/status", HTTP_GET, handleWifiStatusPage);
+    wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
+                       handleVelocityTraceDownload);
+    wifi_log_server.on("/trace/loop.csv", HTTP_GET,
+                       handleLoopTimingTraceDownload);
+    wifi_log_server.on("/trace/lqr.csv", HTTP_GET,
+                       handleLqrControlTraceDownload);
+    wifi_log_server.on("/control/mode", HTTP_POST,
+                       handleCycleLqrTestMode);
+    wifi_log_server.on("/control/speed-source", HTTP_POST,
+                       handleCycleLqrSpeedSource);
+    wifi_log_server.on("/control/start", HTTP_POST,
+                       handleStartBalanceTest);
+    wifi_log_server.on("/control/stop", HTTP_POST,
+                       handleStopBalanceTest);
+    wifi_log_server.onNotFound([]() {
+      wifi_log_server.send(404, "text/plain", "NOT FOUND\n");
+    });
+    http_routes_registered = true;
+  }
   wifi_log_server.begin();
-  wifi_log_server_started = true;
+  wifi_log_server_started = wifi_log_server.listening();
+  if (!wifi_log_server_started) {
+    wifi_log_server.close(); // Release a socket whose bind/listen failed.
+    if (!http_listener_failure_reported) {
+      reportStartupFailure("HTTP_LISTEN");
+      printHttpStartupMemory("listener_failed");
+      http_listener_failure_reported = true;
+    }
+    return;
+  }
+  http_listener_failure_reported = false;
   Serial.println("WiFi trace HTTP server started.");
 }
 
@@ -4658,8 +4713,33 @@ void printHttpStartupMemory(const char* stage) {
       static_cast<unsigned>(sizeof(http_trace_snapshot)));
 }
 
+void reportStartupFailure(const char* stage) {
+  Serial.printf(
+      "STARTUP: stage=%s state=FAILED foc=%s littlefs=%s wifi_ip=%s http=%s menu=%s\n",
+      stage, startup_foc_ready.load() ? "READY" : "NOT_READY",
+      http_filesystem_ready ? "READY" : "NOT_READY",
+      wifi_connection_ready ? "READY" : "NOT_READY",
+      wifi_log_server_started ? "LISTENING" : "NOT_READY",
+      startup_menu_printed ? "ALREADY_PRINTED" : "SUPPRESSED");
+}
+
+void maybePrintStartupMenu() {
+  // Called by the HTTP task only. No polling/waiting in the control loop.
+  if (startup_menu_printed || !startup_foc_ready.load() ||
+      !http_filesystem_ready || !http_task_ready.load() ||
+      !wifi_connection_ready || !wifi_log_server_started ||
+      !wifi_log_server.listening()) return;
+  startup_menu_printed = true;
+  Serial.println("STARTUP: state=READY foc=READY littlefs=READY wifi_ip=READY http=LISTENING");
+  printHelp(); // Static help text only; no actuator/controller state is read.
+}
+
 void setupWifiLogServer() {
-  if (!kEnableWifiLogServer || http_task_handle) return;
+  if (!kEnableWifiLogServer) {
+    reportStartupFailure("WIFI_DISABLED");
+    return;
+  }
+  if (http_task_handle) return;
 
   printHttpStartupMemory("before_queues");
   http_status_queue = xQueueCreate(1, sizeof(HttpStatus));
@@ -4669,6 +4749,7 @@ void setupWifiLogServer() {
     if (http_command_queue) vQueueDelete(http_command_queue);
     http_status_queue = http_command_queue = nullptr;
     printHttpStartupMemory("queues_failed");
+    reportStartupFailure("HTTP_QUEUES");
     Serial.println("HTTP queues unavailable; robot control continues without Web.");
     return;
   }
@@ -4685,36 +4766,69 @@ void setupWifiLogServer() {
     vQueueDelete(http_status_queue);
     vQueueDelete(http_command_queue);
     http_status_queue = http_command_queue = nullptr;
+    reportStartupFailure("HTTP_TASK");
     Serial.println("HTTP task unavailable; robot control continues without Web.");
     return;
   }
   http_filesystem_ready = LittleFS.begin(false); // Never format on mount failure.
-  if (!http_filesystem_ready) Serial.println("LittleFS mount failed; no formatting performed.");
+  if (!http_filesystem_ready) {
+    Serial.println("LittleFS mount failed; no formatting performed.");
+    reportStartupFailure("LITTLEFS_MOUNT");
+  } else {
+    Serial.println("LittleFS mount: READY");
+  }
   printHttpStartupMemory("after_filesystem");
-  WiFi.mode(WIFI_STA);
+  if (!WiFi.mode(WIFI_STA)) reportStartupFailure("WIFI_MODE");
   WiFi.setAutoReconnect(true);
   WiFi.begin(SSID_NAME, SSID_KEY);
   Serial.printf("WiFi: connecting to SSID %s\n", SSID_NAME);
   printHttpStartupMemory("after_wifi");
+  wifi_wait_started_ms = millis();
   http_task_ready.store(true);
 }
 
 void updateWifiLogServer() {
-  if (!kEnableWifiLogServer) {
-    return;
-  }
-
+  if (!kEnableWifiLogServer) return;
   const uint32_t now_ms = millis();
-  if (now_ms - wifi_status_last_check_ms >=
-      kWifiStatusCheckIntervalMs) {
+  if (now_ms - wifi_status_last_check_ms >= kWifiStatusCheckIntervalMs) {
     wifi_status_last_check_ms = now_ms;
-    if (WiFi.status() == WL_CONNECTED) {
+    const int connection_status = WiFi.status();
+    const auto ip = WiFi.localIP();
+    const bool has_ip = static_cast<uint32_t>(ip) != 0;
+    if (connection_status == WL_CONNECTED && has_ip) {
+      const String ip_address = ip.toString();
+      if (!wifi_connection_ready || wifi_announced_ip != ip_address) {
+        // Print the numeric URL before attempting HTTP or optional mDNS.
+        Serial.println("WiFi: 接続完了 (connected)");
+        Serial.printf("WiFi DHCP IP: %s\n", ip_address.c_str());
+        Serial.printf("HTTP access URL: http://%s/\n", ip_address.c_str());
+        wifi_announced_ip = ip_address;
+      }
+      wifi_connection_ready = true;
+      wifi_timeout_reported = false;
       startWifiHttpServer();
-      startMdns();
+      maybePrintStartupMenu();
+      if (wifi_log_server_started) startMdns(); // Auxiliary; never gates menu.
+    } else {
+      const bool connection_was_ready = wifi_connection_ready;
+      if (wifi_log_server_started) wifi_log_server.close();
+      wifi_log_server_started = false;
+      wifi_connection_ready = false;
+      if (connection_was_ready) {
+        wifi_wait_started_ms = now_ms;
+        reportStartupFailure(connection_status == WL_CONNECTED ? "IP_LOST" : "WIFI_DISCONNECTED");
+      }
+      if (!wifi_timeout_reported && now_ms - wifi_wait_started_ms >= kWifiConnectTimeoutMs) {
+        wifi_timeout_reported = true;
+        reportStartupFailure(connection_status == WL_CONNECTED ? "IP_TIMEOUT" : "WIFI_TIMEOUT");
+        Serial.printf("WiFi wait: status=%d ip=%s elapsed_ms=%lu; reconnect continues without blocking control.\n",
+                      connection_status, ip.toString().c_str(),
+                      static_cast<unsigned long>(now_ms - wifi_wait_started_ms));
+      }
     }
   }
-
-  if (wifi_log_server_started && WiFi.status() == WL_CONNECTED) {
+  if (wifi_log_server_started && WiFi.status() == WL_CONNECTED &&
+      static_cast<uint32_t>(WiFi.localIP()) != 0) {
     wifi_log_server.handleClient();
   }
 }
