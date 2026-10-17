@@ -27,6 +27,7 @@ prelude = r'''
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
+#include "Ps4EventInbox.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "common/pid.h"
@@ -37,6 +38,11 @@ std::atomic<bool> http_task_ready{false};
 #include <iostream>
 #include <vector>
 #include <cstring>
+#include <mutex>
+using portMUX_TYPE=std::mutex;
+#define portMUX_INITIALIZER_UNLOCKED {}
+void portENTER_CRITICAL(portMUX_TYPE* m){m->lock();}
+void portEXIT_CRITICAL(portMUX_TYPE* m){m->unlock();}
 using std::min; using std::max; using std::abs;
 template<class T, class L, class H> T constrain(T x,L lo,H hi) {
   return x < lo ? T(lo) : (x > hi ? T(hi) : x);
@@ -82,6 +88,11 @@ struct WebServer {
 };
 struct {
   bool ok=false;int begins=0;
+  void (*connect_cb)()=nullptr;void (*disconnect_cb)()=nullptr;void (*input_cb)()=nullptr;
+  Ps4InputState input{};
+  void attachOnConnect(void (*cb)()){connect_cb=cb;}
+  void attachOnDisconnect(void (*cb)()){disconnect_cb=cb;}
+  void attach(void (*cb)()){input_cb=cb;}
   bool begin(){++begins;return ok;} // No pairing-argument overload is allowed here.
 } PS4;
 struct DriveTestMotor {
@@ -137,11 +148,14 @@ names = [
     'serveWebFile','cycleLqrSpeedSource','resetPs4MotionInput','executeOperatorCommand',
     'applyPs4Steering','ps4ButtonsReleased','handlePs4Connection','processPs4Input',
     'ps4InputStatesEqual','ps4DriveSpeedRequestFromLeftStickY',
+    'onPs4Connect','onPs4Disconnect','onPs4Input','raisePs4ControlBarrier',
+    'observePs4InputOnly','rearmPs4AfterFoc','updatePs4Controller',
     'setupPs4Controller','servicePs4DiagnosticSerial','serviceHttpPs4DiagnosticSerial','drainPs4DiagnosticSerial','executePs4Command','ps4CommandName','ps4CommandRejectionReason',
     'updateWheelVelocityDiagnostic',
 ]
 # No control behavior is stubbed: these functions only print or store logs.
 stubs = r'''
+Ps4InputState readPs4Input(){return PS4.input;}
 void formatHttpResources(char* text,size_t capacity){snprintf(text,capacity,"\nHTTP resources: host stub\n");}
 
 float legCommand=-1;int legWrites=0;
@@ -578,6 +592,101 @@ int main(){
   captureHttpStatus();handleWifiStatusPage();
   assert(wifi_log_server.body.find("last_press=Cross,Circle,Square,Triangle,Up,Down,Left,Right,L1,R1,Options,Share,PS")!=String::npos);
   assert(wifi_log_server.body.find("reason=ACTIVE_TEST_OR_SAFETY_GATE accepted/rejected=0/1\n")!=String::npos);
+
+  // Callback wiring: callbacks only publish, with no Serial or actuator work.
+  setupCase();stopBalanceTest();ps4_was_connected=false;ps4_diagnostics=Ps4Diagnostics{};
+  PS4.ok=true;setupPs4Controller();
+  assert(PS4.connect_cb && PS4.disconnect_cb && PS4.input_cb);
+  const auto before_callback_output=Serial.output;
+  PS4.connect_cb();
+  assert(!ps4_was_connected && Serial.output==before_callback_output);
+  updatePs4Controller();assert(ps4_was_connected && ps4_diagnostics.connects==1);
+  // Press/release within less than the old 50ms poll interval are both retained.
+  PS4.input={};PS4.input_cb();
+  PS4.input.options=true;PS4.input_cb();
+  PS4.input.options=false;PS4.input_cb();
+  assert(!balance_wait_active);
+  updatePs4Controller();assert(balance_wait_active);
+  assert(ps4_diagnostics.last_press&(1u<<10));
+  assert(ps4_diagnostics.last_release&(1u<<10));
+  const auto unchanged_revision=ps4_diagnostics.revision;
+  const auto unchanged_sample=ps4_diagnostics.sample_ms;
+  const auto unchanged_decisions=ps4_diagnostics.decisions;
+  for(int i=0;i<30;++i){nowMs+=50;PS4.input_cb();updatePs4Controller();}
+  assert(ps4_was_connected && ps4_diagnostics.revision==unchanged_revision);
+  assert(ps4_diagnostics.sample_ms==unchanged_sample && ps4_diagnostics.decisions==unchanged_decisions);
+  assert(ps4_diagnostics.fifo_duplicates>=30);
+  // Hold forward+yaw with no new callbacks: ramps continue, no implicit disconnect.
+  setupCase();PS4.input={};PS4.input_cb();updatePs4Controller();
+  PS4.input.left_stick_y=-127;PS4.input.right_stick_x=127;PS4.input_cb();updatePs4Controller();
+  assert(lqr_drive_start_pending);startPendingLqrDrive();lqr_target_speed=0;
+  const auto held_revision=ps4_diagnostics.revision, held_sample=ps4_diagnostics.sample_ms;
+  for(int i=0;i<15;++i){nowMs+=50;updatePs4Controller();}
+  near(lqr_target_speed,.05f);near(ps4_yaw_output,.1f);
+  assert(ps4_was_connected && lqr_auto_drive_active);
+  assert(ps4_diagnostics.revision==held_revision && ps4_diagnostics.sample_ms==held_sample);
+  // Even changing transport duplicate counters cannot create periodic Serial output.
+  http_task_ready.store(true);ps4_serial_seen_revision=ps4_diagnostics.revision;
+  ps4_diagnostic_serial_offset=ps4_diagnostic_serial_size=0;Serial.output.clear();
+  for(int i=0;i<20;++i){nowMs+=500;PS4.input_cb();updatePs4Controller();captureHttpStatus();serviceHttpPs4DiagnosticSerial();}
+  assert(Serial.output.empty());http_task_ready.store(false);
+  // An actual neutral report still starts normal soft stop; maintenance completes it.
+  lqr_speed_for_control=.2f;PS4.input={};PS4.input_cb();updatePs4Controller();
+  assert(lqr_soft_stop_active && lqr_target_speed==0 && lqr_direction_test_armed);
+  for(int i=0;i<200 && ps4_drive_state==Ps4DriveState::Stopping;++i){step();nowMs+=50;updatePs4Controller();}
+  assert(!lqr_soft_stop_active && ps4_drive_state==Ps4DriveState::Neutral);
+  // Ordered disconnect+reconnect survives one drain; a held reconnect cannot drive.
+  const auto old_connections=ps4_diagnostics.connects, old_disconnections=ps4_diagnostics.disconnects;
+  PS4.disconnect_cb();PS4.connect_cb();PS4.input.left_stick_y=-127;PS4.input_cb();
+  updatePs4Controller();
+  assert(ps4_diagnostics.connects==old_connections+1 && ps4_diagnostics.disconnects==old_disconnections+1);
+  assert(ps4_was_connected && !lqr_drive_start_pending && !lqr_auto_drive_active);
+  // Stop priority: older Share/Options must never re-enable after a short Cross.
+  PS4.input={};PS4.input_cb();
+  PS4.input.share=true;PS4.input_cb();PS4.input.share=false;PS4.input_cb();
+  PS4.input.options=true;PS4.input_cb();PS4.input.options=false;PS4.input_cb();
+  PS4.input.cross=true;PS4.input_cb();PS4.input.cross=false;PS4.input_cb();
+  updatePs4Controller();
+  assert(emergency_stop_active && !pins[27] && !pins[32] && !lqr_direction_test_armed && !balance_wait_active);
+  // Overflow preserves stop/link latches and press/release evidence, not unsafe replay.
+  const auto previous_overflows=ps4_diagnostics.fifo_overflows;
+  for(int i=0;i<80;++i){PS4.input.right_stick_x=(i%2)?40:50;PS4.input_cb();}
+  PS4.input.options=true;PS4.input_cb();PS4.input.options=false;PS4.input_cb();
+  PS4.input.cross=true;PS4.input_cb();PS4.input.cross=false;PS4.input_cb();
+  PS4.disconnect_cb();PS4.connect_cb();
+  updatePs4Controller();
+  assert(ps4_diagnostics.fifo_overflows>previous_overflows && ps4_event_rearm_required);
+  assert(ps4_diagnostics.overflow_presses&(1u<<10));
+  assert(ps4_diagnostics.overflow_releases&(1u<<10));
+  assert(ps4_diagnostics.overflow_presses&1u);assert(ps4_diagnostics.overflow_releases&1u);
+  assert(std::string(ps4_diagnostics.reason)=="QUEUE_OVERFLOW_REARM");
+  assert(emergency_stop_active && !pins[27] && !pins[32] && ps4_was_connected);
+  // Recovery needs a real fresh neutral callback, even if it repeats latest values.
+  PS4.input={};PS4.input_cb();updatePs4Controller();assert(!ps4_event_rearm_required);
+  PS4.input.share=true;PS4.input_cb();updatePs4Controller();
+  assert(!emergency_stop_active && pins[27] && pins[32] && !balance_wait_active);
+  // FOC handoff ignores queued startup motion but never loses queued Cross.
+  setupCase();PS4.input={};PS4.input_cb();PS4.input.options=true;PS4.input_cb();
+  rearmPs4AfterFoc();updatePs4Controller();assert(lqr_direction_test_armed && !balance_wait_active && !lqr_drive_start_pending);
+  PS4.input={};PS4.input_cb();updatePs4Controller();
+  PS4.input.cross=true;PS4.input_cb();rearmPs4AfterFoc();updatePs4Controller();
+  assert(emergency_stop_active && !pins[27] && !pins[32]);
+  // Overflow itself does not add a disconnect/full stop; actual neutral still stops.
+  setupCase();PS4.input={};PS4.input_cb();updatePs4Controller();
+  PS4.input.left_stick_y=-127;PS4.input_cb();updatePs4Controller();
+  assert(lqr_drive_start_pending);startPendingLqrDrive();
+  for(int i=0;i<80;++i){PS4.input.right_stick_x=(i%2)?40:50;PS4.input_cb();}
+  updatePs4Controller();assert(lqr_auto_drive_active && !emergency_stop_active && ps4_was_connected);
+  // Keep the FIFO full again, then put neutral into the overflow summary.
+  for(int i=0;i<80;++i){PS4.input.right_stick_x=(i%2)?60:70;PS4.input_cb();}
+  lqr_speed_for_control=.2f;PS4.input={};PS4.input_cb();updatePs4Controller();
+  assert(lqr_soft_stop_active && lqr_target_speed==0 && !emergency_stop_active);
+
+  // The first forwarded packet after reconnect must not treat held Options as a new start.
+  PS4.disconnect_cb();PS4.connect_cb();PS4.input={};PS4.input.options=true;PS4.input_cb();
+  updatePs4Controller();assert(!balance_wait_active && !lqr_drive_start_pending);
+  PS4.input={};PS4.input_cb();PS4.input.cross=true;PS4.input_cb();PS4.input.cross=false;PS4.input_cb();
+  updatePs4Controller();assert(emergency_stop_active && !pins[27] && !pins[32]);
 
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);

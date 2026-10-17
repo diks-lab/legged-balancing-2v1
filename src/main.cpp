@@ -16,6 +16,7 @@
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
+#include "Ps4EventInbox.h"
 
 #include "Servo_STS3032.h"
 #include "ssid.h"
@@ -206,11 +207,26 @@ constexpr char kPs4HostMac[] = "01:02:03:04:05:06";
 
 Ps4Diagnostics ps4_diagnostics;
 // Bounded serial staging: no blocking printf/flush for the new observations.
-char ps4_diagnostic_serial[768] = {};
+char ps4_diagnostic_serial[1024] = {};
 size_t ps4_diagnostic_serial_offset = 0, ps4_diagnostic_serial_size = 0;
 uint32_t ps4_diagnostic_serial_last_ms = 0;
 constexpr uint32_t kPs4ObservationIntervalMs = 500;
 bool ps4_packet_command_attempted = false;
+struct Ps4InboxLock {
+  portMUX_TYPE mutex = portMUX_INITIALIZER_UNLOCKED;
+  void lock() { portENTER_CRITICAL(&mutex); }
+  void unlock() { portEXIT_CRITICAL(&mutex); }
+};
+using Ps4Inbox = Ps4EventInbox<Ps4InboxLock>;
+Ps4Inbox ps4_event_inbox;
+Ps4Inbox::Batch ps4_event_batch;
+Ps4InputState ps4_held_input{};
+bool ps4_has_held_input=false, ps4_event_rearm_required=false;
+bool ps4_observation_is_new=true, ps4_disconnect_prehandled=false;
+bool ps4_event_time_valid=false;
+uint32_t ps4_event_time_ms=0;
+uint32_t ps4_controls_after_sequence=0, ps4_serial_seen_revision=0;
+bool ps4_controls_barrier_valid=false;
 
 enum class OperatorCommand { Start, EndTest, FullStop, SoftStop, EnableDrivers, CycleMode, LegUp, LegDown };
 bool executeOperatorCommand(OperatorCommand command);
@@ -737,6 +753,12 @@ bool motionCommandAllowed();
 
 // Test / monitor
 void setupPs4Controller();
+void onPs4Connect();
+void onPs4Disconnect();
+void onPs4Input();
+void raisePs4ControlBarrier(uint32_t sequence);
+void observePs4InputOnly(const Ps4InputState& input, uint32_t now);
+void rearmPs4AfterFoc();
 void servicePs4DiagnosticSerial();
 void serviceHttpPs4DiagnosticSerial();
 void drainPs4DiagnosticSerial();
@@ -969,9 +991,7 @@ void initializeRobotHardware() {
   Serial.println("OK: both motors initialized and stopped at 0.00 V.");
   // Sampling began while waiting for Web. Reapply the original first-packet
   // release guard so held startup inputs cannot become new motion commands.
-  ps4_input_initialized = false;
-  ps4_controls_released = false;
-  resetPs4MotionInput();
+  rearmPs4AfterFoc();
 }
 
 void enforceStartupOutputGate() {
@@ -4428,7 +4448,7 @@ StaticTask_t http_task_tcb;
 TaskHandle_t http_task_handle = nullptr;
 std::atomic<bool> http_task_ready{false};
 
-struct HttpStatus { char text[1536]; };
+struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
 QueueHandle_t http_status_queue = nullptr;
 QueueHandle_t http_command_queue = nullptr;
 bool http_filesystem_ready = false;
@@ -4706,6 +4726,7 @@ void captureHttpStatus() {
       static_cast<unsigned>(lqr_control_trace_count));
   const size_t used = strlen(status.text);
   ps4_diagnostics.format(status.text + used, sizeof(status.text) - used, kPs4DriveStickDeadzone);
+  status.ps4_revision = ps4_diagnostics.revision;
   xQueueOverwrite(http_status_queue, &status);
 }
 
@@ -5221,9 +5242,13 @@ void setupPs4Controller() {
 //   PS4.begin(kPs4HostMac);
 //   Serial.printf("PS4 CONTROLLER: initialized (host MAC %s); waiting without blocking.\n",
 //                 kPs4HostMac);
+  PS4.attachOnConnect(onPs4Connect);
+  PS4.attachOnDisconnect(onPs4Disconnect);
+  PS4.attach(onPs4Input);
   ps4_diagnostics.init_attempted = true;
   ps4_diagnostics.init_ok = PS4.begin(); // Preserve the existing pairing setup.
   ps4_diagnostics.dirty = true;
+  ++ps4_diagnostics.revision;
   Serial.printf("PS4 library initialization: %s; controller connection is separate.\n",
                 ps4_diagnostics.init_ok ? "OK" : "FAILED");
 }
@@ -5442,7 +5467,8 @@ void serviceHttpPs4DiagnosticSerial() {
     HttpStatus status{};
     if (xQueuePeek(http_status_queue, &status, 0) == pdTRUE) {
       const char* observations = strstr(status.text, "PS4 init=");
-      if (observations) {
+      if (observations && status.ps4_revision != ps4_serial_seen_revision) {
+        ps4_serial_seen_revision = status.ps4_revision;
         snprintf(ps4_diagnostic_serial, sizeof(ps4_diagnostic_serial), "%s", observations);
         ps4_diagnostic_serial_offset = 0;
         ps4_diagnostic_serial_size = strlen(ps4_diagnostic_serial);
@@ -5595,7 +5621,8 @@ void handlePs4Connection(bool connected) {
   ps4_input_initialized = false;
   ps4_controls_released = false;
   // Cancel all drive owners on disconnect, including serial-origin requests.
-  if (!connected && (lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
+  if (!connected && !ps4_disconnect_prehandled &&
+      (lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
     executePs4Command(OperatorCommand::SoftStop);
   }
   resetPs4MotionInput();
@@ -5604,8 +5631,10 @@ void handlePs4Connection(bool connected) {
 }
 
 void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
-  const bool input_changed = !ps4_input_initialized || !ps4InputStatesEqual(input, previous_ps4_input);
-  ps4_diagnostics.observe(input, now_ms);
+  const bool input_changed = ps4_observation_is_new &&
+      (!ps4_input_initialized || !ps4InputStatesEqual(input, previous_ps4_input));
+  if (ps4_observation_is_new) ps4_diagnostics.observe(input,
+      ps4_event_time_valid ? ps4_event_time_ms : now_ms);
   ps4_packet_command_attempted = false;
   const bool buttons_released = ps4ButtonsReleased(input);
   const bool sticks_centered = abs(input.left_stick_x) <= kPs4DriveStickDeadzone &&
@@ -5614,8 +5643,8 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
       abs(input.right_stick_y) <= kPs4DriveStickDeadzone;
   // Observe a fully released packet after each connection, then require edges.
   if (buttons_released && sticks_centered) ps4_controls_released = true;
-  const bool edges_allowed = ps4_input_initialized && ps4_controls_released;
-  if (input.cross && (!ps4_input_initialized || !previous_ps4_input.cross)) {
+  const bool edges_allowed = ps4_observation_is_new && ps4_input_initialized && ps4_controls_released;
+  if (ps4_observation_is_new && input.cross && (!ps4_input_initialized || !previous_ps4_input.cross)) {
     executePs4Command(OperatorCommand::FullStop);
   } else if (edges_allowed && !input.cross) {
     if (input.share && !previous_ps4_input.share && sticks_centered) {
@@ -5655,7 +5684,7 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
         beginPs4DriveStopping(now_ms);
       } else if (ps4_drive_state == Ps4DriveState::Stopping) {
         const bool complete = !lqr_auto_drive_active && !lqr_drive_start_pending && !lqr_soft_stop_active;
-        printPs4DriveStopDiagnostic(input, true, complete, now_ms);
+        if (input_changed || complete) printPs4DriveStopDiagnostic(input, true, complete, now_ms);
         if (complete) {
           printPs4DriveStopSummary(now_ms);
           setPs4DriveState(Ps4DriveState::Neutral);
@@ -5721,13 +5750,127 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
   ps4_last_diagnostic_ms = now_ms;
 }
 
+// These callbacks run in the library's Bluetooth task, not an ISR. Reading
+// its already-copied input and submitting a bounded record are their only jobs.
+void onPs4Connect() { ps4_event_inbox.connect(millis()); }
+void onPs4Disconnect() { ps4_event_inbox.disconnect(millis()); }
+void onPs4Input() { ps4_event_inbox.input(readPs4Input(), millis()); }
+
+void raisePs4ControlBarrier(uint32_t sequence) {
+  if (!ps4_controls_barrier_valid || Ps4Inbox::after(sequence, ps4_controls_after_sequence)) {
+    ps4_controls_after_sequence=sequence;
+    ps4_controls_barrier_valid=true;
+  }
+}
+
+void rearmPs4AfterFoc() {
+  raisePs4ControlBarrier(ps4_event_inbox.barrier());
+  ps4_has_held_input=false;
+  ps4_input_initialized=false;
+  ps4_controls_released=false;
+  resetPs4MotionInput();
+}
+
+void observePs4InputOnly(const Ps4InputState& input, uint32_t now) {
+  ps4_diagnostics.observe(input, now);
+  previous_ps4_input=input;
+  ps4_input_initialized=true;
+}
+
 void updatePs4Controller() {
-  const bool connected = PS4.isConnected();
-  handlePs4Connection(connected);
-  if (!connected) return;
-  const uint32_t now_ms = millis();
-  if (ps4_input_initialized && now_ms - ps4_last_diagnostic_ms < kPs4DiagnosticIntervalMs) return;
-  processPs4Input(readPs4Input(), now_ms);
+  ps4_event_inbox.drain(ps4_event_batch);
+  const auto& batch=ps4_event_batch;
+  // Service actual stop notifications before any older queued motion command.
+  if (batch.cross_pending) {
+    executePs4Command(OperatorCommand::FullStop);
+    raisePs4ControlBarrier(batch.cross_sequence);
+    ps4_has_held_input=false;
+  }
+  if (batch.disconnect_pending) {
+    if (!batch.cross_pending &&
+        (lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
+      executePs4Command(OperatorCommand::SoftStop);
+    }
+    raisePs4ControlBarrier(batch.disconnect_sequence);
+    ps4_has_held_input=false;
+  }
+  if (batch.overflowed) {
+    raisePs4ControlBarrier(batch.sequence);
+    ps4_event_rearm_required=true;
+    // An actually received neutral transition is retained outside the FIFO too.
+    if (!batch.cross_pending && !batch.disconnect_pending && batch.neutral_pending &&
+        ps4_drive_state==Ps4DriveState::DriveRequested) {
+      executePs4Command(OperatorCommand::SoftStop);
+      beginPs4DriveStopping(millis());
+    }
+  }
+  ps4_disconnect_prehandled=batch.disconnect_pending;
+  for (size_t i=0;i<batch.count;++i) {
+    const auto& event=batch.events[i];
+    if (event.kind==Ps4Inbox::Kind::Connect || event.kind==Ps4Inbox::Kind::Disconnect) {
+      handlePs4Connection(event.kind==Ps4Inbox::Kind::Connect);
+      ps4_has_held_input=false;
+      continue;
+    }
+    if (!ps4_was_connected) { observePs4InputOnly(event.input,event.time_ms); continue; }
+    if (ps4_controls_barrier_valid && !Ps4Inbox::after(event.sequence,ps4_controls_after_sequence)) {
+      observePs4InputOnly(event.input,event.time_ms);
+      if (!ps4ButtonsReleased(event.input) ||
+          ps4DriveSpeedRequestFromLeftStickY(event.input.left_stick_y)!=0.0f ||
+          abs(event.input.right_stick_x)>kPs4DriveStickDeadzone) {
+        ps4_diagnostics.decision("STALE_INPUT",false,"INPUT_BEFORE_BARRIER");
+      }
+      continue; // Old data remains observable, but cannot re-enable after a stop.
+    }
+    ps4_controls_barrier_valid=false;
+    if (ps4_event_rearm_required) {
+      const bool neutral=ps4ButtonsReleased(event.input) &&
+          abs(event.input.left_stick_x)<=kPs4DriveStickDeadzone &&
+          abs(event.input.left_stick_y)<=kPs4DriveStickDeadzone &&
+          abs(event.input.right_stick_x)<=kPs4DriveStickDeadzone &&
+          abs(event.input.right_stick_y)<=kPs4DriveStickDeadzone;
+      if (!neutral) { observePs4InputOnly(event.input,event.time_ms); continue; }
+      ps4_event_rearm_required=false;
+      ps4_input_initialized=false;
+      ps4_controls_released=false;
+      ps4_diagnostics.decision("INPUT_RESYNC",true,"NEUTRAL_CONFIRMED");
+    }
+    ps4_held_input=event.input;
+    ps4_has_held_input=true;
+    ps4_event_time_valid=true;ps4_event_time_ms=event.time_ms;
+    processPs4Input(event.input,millis());
+    ps4_event_time_valid=false;
+  }
+  if (batch.overflowed) {
+    // Recover the observed link and input, never infer either from elapsed time.
+    handlePs4Connection(batch.connected);
+    if (batch.input_valid) observePs4InputOnly(batch.latest_input,millis());
+    ps4_diagnostics.overflow_presses |= batch.lost_presses;
+    ps4_diagnostics.overflow_releases |= batch.lost_releases;
+    ps4_diagnostics.last_press |= batch.lost_presses;
+    ps4_diagnostics.last_release |= batch.lost_releases;
+    ps4_diagnostics.decision("EVENT_FIFO",false,"QUEUE_OVERFLOW_REARM");
+  }
+  ps4_disconnect_prehandled=false;
+  if (ps4_diagnostics.connects!=batch.connects || ps4_diagnostics.disconnects!=batch.disconnects) {
+    ps4_diagnostics.connects=batch.connects;ps4_diagnostics.disconnects=batch.disconnects;
+    ps4_diagnostics.event=batch.connected?"CONNECTED":"DISCONNECTED";
+    ps4_diagnostics.dirty=true;++ps4_diagnostics.revision;
+  }
+  ps4_diagnostics.fifo_received=batch.received;
+  ps4_diagnostics.fifo_duplicates=batch.duplicates;
+  ps4_diagnostics.fifo_overflows=batch.overflows;
+  ps4_diagnostics.received_presses=batch.presses;
+  ps4_diagnostics.received_releases=batch.releases;
+  // Events supply edges. This independent tick supplies the existing slew and
+  // stop-state maintenance even when a controller holds identical input forever.
+  const uint32_t now=millis();
+  if (ps4_was_connected && ps4_has_held_input &&
+      now-ps4_last_diagnostic_ms>=kPs4DiagnosticIntervalMs) {
+    ps4_observation_is_new=false;
+    processPs4Input(ps4_held_input,now);
+    ps4_observation_is_new=true;
+  }
 }
 
 void pingLegServos() {

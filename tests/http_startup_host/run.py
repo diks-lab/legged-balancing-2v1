@@ -35,7 +35,7 @@ constexpr uint32_t kHttpTaskStackBytes = 8192;
 uint8_t http_task_stack[kHttpTaskStackBytes]; StaticTask_t http_task_tcb;
 TaskHandle_t http_task_handle = nullptr;
 std::atomic<bool> http_task_ready{false};
-struct HttpStatus { char text[1536]; };
+struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
 char http_trace_snapshot[20480];
 QueueHandle_t http_status_queue = nullptr, http_command_queue = nullptr;
 bool http_filesystem_ready = false;
