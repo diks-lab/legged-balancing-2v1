@@ -30,7 +30,6 @@ constexpr float kWheelRunVoltageLimit = 1.0f;
 // These vehicle signs are independent of SimpleFOC's electrical sensor direction.
 constexpr float kRightForwardSign = 1.0f;
 constexpr float kLeftForwardSign = 1.0f;
-constexpr bool kAttitudeOnlyVerification = true;
 
 void gateWheelOutputsOff() {
   gpio_set_level(static_cast<gpio_num_t>(motor1EnablePin), LOW);
@@ -76,7 +75,8 @@ constexpr uint32_t kLqrDriveWaitDiagIntervalMs = 200;
 constexpr uint32_t kLqrSpeedSourcesDiagIntervalMs = 200;
 constexpr float kLqrSpeedJumpDiagThreshold = 0.50f;
 constexpr bool kDisableDirectDriveSpeedControl = true;
-constexpr bool kReverseDirectDriveSpeedControl = true;
+// Speed error is target minus forward-positive feedback: do not negate it.
+constexpr bool kReverseDirectDriveSpeedControl = false;
 
 // Retain the existing direct-speed configuration for non-PS4 drive behavior
 // and diagnostics.  Active PS4 driving bypasses the direct motor term below
@@ -272,13 +272,14 @@ float right_target_voltage = 0.0f;
 float left_target_voltage = 0.0f;
 bool test_system_ready = false;
 bool emergency_stop_active = false;
+const char* last_stop_reason = "NONE";
 bool driver1_initialized = false;
 bool driver2_initialized = false;
 
 PIDController pid_angle{1, 0, 0, 100000, 8};
 PIDController pid_gyro{0.08, 0, 0, 100000, 8};
-PIDController pid_distance{0.4, 0, 0, 100000, 8};
-PIDController pid_speed{0.5, 0, 0, 100000, 8};
+PIDController pid_distance{0.1, 0, 0, 100000, 8};
+PIDController pid_speed{0.25, 0, 0, 100000, 8};
 
 // Half weights form the mean wheel position [rad] and speed [rad/s].
 constexpr float m1_direction = 0.5f * kRightForwardSign;
@@ -518,6 +519,15 @@ struct LoopTimingSample {
   uint32_t motor_move_us;
 };
 
+struct FocOutputSnapshot {
+  float right_voltage_q, left_voltage_q;
+  float right_current_sp, left_current_sp;
+  bool right_motor_enabled, left_motor_enabled;
+  bool right_driver_en, left_driver_en;
+  uint32_t capture_us;
+};
+FocOutputSnapshot last_foc_output = {};
+
 struct LqrControlTraceSample {
   uint32_t elapsed_ms;
   float angle;
@@ -535,6 +545,17 @@ struct LqrControlTraceSample {
   float lqr_u;
   float right_output;
   float left_output;
+  // Normal row: after loopFOC, BEFORE this cycle's move(). Stop row: after gate-off.
+  float right_voltage_q;
+  float left_voltage_q;
+  float right_current_sp;
+  float left_current_sp;
+  bool right_motor_enabled;
+  bool left_motor_enabled;
+  bool right_driver_en;
+  bool left_driver_en;
+  bool after_disable;
+  uint32_t foc_capture_us;
 };
 
 LoopTimingSample loop_timing_trace[kLoopTimingTraceSize];
@@ -553,6 +574,7 @@ float angle_control = 0.0f;
 float gyro_control = 0.0f;
 float distance_control = 0.0f;
 float speed_control = 0.0f;
+float speed_direct_control = 0.0f;
 float LQR_u = 0.0f;
 float test_LQR_u = 0.0f;
 float balance_brake_right = 0.0f;
@@ -626,6 +648,8 @@ uint32_t polarity_diagnostic_last_ms = 0;
 void setBothTargetsToZero();
 void stopBothMotorsAtZero();
 void disableBothDrivers();
+void captureFocOutputSnapshot();
+void stopForActualFall(float& right_output, float& left_output);
 bool wheelSensorsOK();
 bool refreshWheelSensors();
 bool stopOnWheelFault();
@@ -869,6 +893,9 @@ void loop() {
   if (stopOnWheelFault()) return;
   const uint32_t motor2_loopfoc_us =
       micros() - section_start_us;
+  // Preserve the values actually used by FOC before control/stop code can
+  // clear current_sp or voltage.q. Observation only, no additional I2C.
+  captureFocOutputSnapshot();
 
   section_start_us = micros();
   mpu6050.update();
@@ -890,10 +917,8 @@ void loop() {
       m2_direction < 0.0f ? -1.0f : 1.0f;
 
     right_output = lqrMotorVoltage(test_LQR_u, motor1_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
     left_output = lqrMotorVoltage(test_LQR_u, motor2_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
   }
 
@@ -1074,7 +1099,7 @@ const float left_angle_delta =
         state, static_cast<unsigned long>(millis() - drive_recovery_start_ms),
         LQR_angle - angle_zeropoint, LQR_gyro,
         distance_zeropoint - LQR_distance, lqr_speed_for_control,
-        angle_control, gyro_control, speed_control, distance_control,
+        angle_control, gyro_control, speed_direct_control, distance_control,
         right_output, left_output, static_cast<unsigned long>(saturation_ms));
   }
 
@@ -1094,59 +1119,7 @@ const float left_angle_delta =
   }
 
   if (lqr_direction_test_armed && confirmActualFall()) {
-    if (lqr_startup_diagnostic_active) {
-      const uint32_t elapsed_ms =
-          millis() - lqr_startup_diagnostic_start_ms;
-      Serial.println("LQR STARTUP STOP:");
-      Serial.printf("elapsed_ms=%lu\n",
-                    static_cast<unsigned long>(elapsed_ms));
-      Serial.printf("angle_error=%.6f\n",
-                    LQR_angle - angle_zeropoint);
-      Serial.printf("gyro=%.6f\n", LQR_gyro);
-      Serial.printf("test_LQR_u=%.6f\n", test_LQR_u);
-      Serial.printf("right_output=%.6f\n", right_output);
-      Serial.printf("left_output=%.6f\n", left_output);
-    }
-    lqr_startup_diagnostic_active = false;
-    lqr_direction_test_armed = false;
-    setStatusLed(false);
-    setBothTargetsToZero();
-    right_output = 0.0f;
-    left_output = 0.0f;
-    motor1.move(0.0f);
-    motor2.move(0.0f);
-
-    updateLqrControlTrace(right_output, left_output, true);
-
-    Serial.println("LQR direction test stopped: actual fall angle exceeded.");
-
-    lqr_stop_trace_active = false;
-
-    if (lqr_drive_sign_trace_count > 0) {
-      printLqrDriveSignTrace("TILT_STOP");
-      resetLqrDriveSignTrace();
-    }
-
-    if (lqr_stop_trace_count > 0) {
-      printLqrStopTrace("TILT_STOP");
-      resetLqrStopTrace();
-    }
-
-    printAndResetLqrRunTime();
-
-    printVelocityTrace();
-    printLoopTimingTrace();
-    printLqrControlTrace();
-    clearVelocityTrace();
-    clearLoopTimingTrace();
-    clearLqrControlTrace();
-
-    terminateLqrDriveSession("TILT_STOP", true);
-    emergency_stop_active = true;
-    disableBothDrivers();
-    Serial.println(
-        "SAFETY STOP: mode=FULL_STOP reason=TILT_STOP drivers=DISABLED balance=OFF");
-    disableLegServoTorqueForTestEnd("TILT_STOP");
+    stopForActualFall(right_output, left_output);
   }
 
   updateLqrControlTrace(right_output, left_output);
@@ -1199,6 +1172,57 @@ namespace {
 //==================================================
 // Motor / Sensor Control
 //==================================================
+void stopForActualFall(float& right_output, float& left_output) {
+  // Gate first: Serial/CSV dumps can block for seconds without USB attached.
+  // Keep the pre-stop command for the existing startup diagnostic only.
+  const float commanded_right_output = right_output;
+  const float commanded_left_output = left_output;
+  const bool startup_diagnostic_was_active = lqr_startup_diagnostic_active;
+  emergency_stop_active = true;
+  disableBothDrivers();
+  right_output = left_output = 0.0f;
+  last_stop_reason = "TILT_STOP";
+  lqr_startup_diagnostic_active = false;
+  lqr_direction_test_armed = false;
+  setStatusLed(false);
+  updateLqrControlTrace(right_output, left_output, true);
+  lqr_stop_trace_active = false;
+  if (startup_diagnostic_was_active) {
+    const uint32_t elapsed_ms =
+        millis() - lqr_startup_diagnostic_start_ms;
+    Serial.println("LQR STARTUP STOP:");
+    Serial.printf("elapsed_ms=%lu\n",
+                  static_cast<unsigned long>(elapsed_ms));
+    Serial.printf("angle_error=%.6f\n",
+                  LQR_angle - angle_zeropoint);
+    Serial.printf("gyro=%.6f\n", LQR_gyro);
+    Serial.printf("test_LQR_u=%.6f\n", test_LQR_u);
+    Serial.printf("right_output=%.6f\n", commanded_right_output);
+    Serial.printf("left_output=%.6f\n", commanded_left_output);
+  }
+
+  Serial.println("LQR direction test stopped: actual fall angle exceeded.");
+
+  if (lqr_drive_sign_trace_count > 0) {
+    printLqrDriveSignTrace("TILT_STOP");
+  }
+
+  if (lqr_stop_trace_count > 0) {
+    printLqrStopTrace("TILT_STOP");
+  }
+
+  printAndResetLqrRunTime();
+
+  printVelocityTrace();
+  printLoopTimingTrace();
+  printLqrControlTrace();
+
+  terminateLqrDriveSession("TILT_STOP", true);
+  Serial.println(
+      "SAFETY STOP: mode=FULL_STOP reason=TILT_STOP drivers=DISABLED balance=OFF");
+  disableLegServoTorqueForTestEnd("TILT_STOP");
+}
+
 bool wheelSensorsOK() {
   return sensor1.ready && sensor2.ready && !sensor1.fault && !sensor2.fault;
 }
@@ -1230,6 +1254,7 @@ bool stopOnWheelFault() {
   disableBothDrivers();
   test_system_ready = false;
   emergency_stop_active = true;
+  last_stop_reason = "WHEEL_FAULT";
   lqr_diagnostic_armed = false;
   lqr_direction_test_armed = false;
   polarity_test_active = false;
@@ -1449,6 +1474,15 @@ const char* lqrSpeedSourceName() {
   return lqr_speed_source == LqrSpeedSource::SimpleFoc ? "SIMPLEFOC"
                                                        : "10MS";
 }
+void captureFocOutputSnapshot() {
+  last_foc_output = {
+      motor1.voltage.q, motor2.voltage.q,
+      motor1.current_sp, motor2.current_sp,
+      static_cast<bool>(motor1.enabled), static_cast<bool>(motor2.enabled),
+      digitalRead(motor1EnablePin) == HIGH, digitalRead(motor2EnablePin) == HIGH,
+      micros()};
+}
+
 void updateLqrControlTrace(float right_output, float left_output,
                            bool force_sample) {
   if (!force_sample && !lqr_direction_test_armed) {
@@ -1479,12 +1513,27 @@ void updateLqrControlTrace(float right_output, float left_output,
 
   sample.angle_control = angle_control;
   sample.gyro_control = gyro_control;
-  sample.distance_control = distance_control;
-  sample.speed_control = speed_control;
+  sample.distance_control =
+      (lqr_test_mode == LqrTestMode::Full ||
+       lqr_test_mode == LqrTestMode::AttitudeDistance) ? distance_control : 0.0f;
+  sample.speed_control =
+      (lqr_test_mode == LqrTestMode::Full ||
+       lqr_test_mode == LqrTestMode::AttitudeSpeed) ? speed_direct_control : 0.0f;
 
   sample.lqr_u = test_LQR_u;
   sample.right_output = right_output;
   sample.left_output = left_output;
+  sample.after_disable = force_sample && emergency_stop_active;
+  if (sample.after_disable) captureFocOutputSnapshot();
+  sample.right_voltage_q = last_foc_output.right_voltage_q;
+  sample.left_voltage_q = last_foc_output.left_voltage_q;
+  sample.right_current_sp = last_foc_output.right_current_sp;
+  sample.left_current_sp = last_foc_output.left_current_sp;
+  sample.right_motor_enabled = last_foc_output.right_motor_enabled;
+  sample.left_motor_enabled = last_foc_output.left_motor_enabled;
+  sample.right_driver_en = last_foc_output.right_driver_en;
+  sample.left_driver_en = last_foc_output.left_driver_en;
+  sample.foc_capture_us = last_foc_output.capture_us;
 
   lqr_control_trace_write_index =
       (lqr_control_trace_write_index + 1) %
@@ -1515,7 +1564,8 @@ void printLqrControlTrace() {
       "elapsed_ms,angle,angle_zeropoint,angle_error,gyro,"
       "lqr_speed,speed_for_control,"
       "angle_control,gyro_control,distance_control,speed_control,"
-      "lqr_u,right_output,left_output");
+      "lqr_u,right_output,left_output,"
+      "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us");
 
   const size_t first_index =
       (lqr_control_trace_write_index +
@@ -1531,7 +1581,7 @@ void printLqrControlTrace() {
     Serial.printf(
         "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
         "%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f\n",
+        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%s,%lu\n",
         static_cast<unsigned long>(sample.elapsed_ms),
           sample.angle,
           sample.angle_zeropoint,
@@ -1545,7 +1595,15 @@ void printLqrControlTrace() {
           sample.speed_control,
           sample.lqr_u,
           sample.right_output,
-          sample.left_output);
+          sample.left_output,
+        sample.right_voltage_q, sample.left_voltage_q,
+        sample.right_current_sp, sample.left_current_sp,
+        static_cast<int>(sample.right_motor_enabled),
+        static_cast<int>(sample.left_motor_enabled),
+        static_cast<int>(sample.right_driver_en),
+        static_cast<int>(sample.left_driver_en),
+        sample.after_disable ? "AFTER_DISABLE" : "BEFORE_MOVE",
+        static_cast<unsigned long>(sample.foc_capture_us));
   }
 
   Serial.println("LQR CONTROL TRACE END");
@@ -1553,6 +1611,9 @@ void printLqrControlTrace() {
 
 void updateTestLqrOutput(float angle_term, float gyro_term,
                          float distance_term, float speed_term) {
+  speed_direct_control =
+      (lqr_test_mode == LqrTestMode::Full ||
+       lqr_test_mode == LqrTestMode::AttitudeSpeed) ? speed_term : 0.0f;
   switch (lqr_test_mode) {
     case LqrTestMode::Full:
       test_LQR_u =
@@ -1569,6 +1630,7 @@ void updateTestLqrOutput(float angle_term, float gyro_term,
       test_LQR_u = angle_term + gyro_term;
       break;
   }
+  LQR_u = test_LQR_u;
 }
 
 const char* lqrTestModeLogName() {
@@ -1652,12 +1714,10 @@ void captureLqrDriveSignTrace(float speed_direct_term) {
 
   sample.right_output =
       lqrMotorVoltage(test_LQR_u, trace_motor1_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
 
   sample.left_output =
       lqrMotorVoltage(test_LQR_u, trace_motor2_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
 
   sample.motor1_velocity = motor1.shaft_velocity;
@@ -1812,12 +1872,10 @@ void captureLqrStopTrace(float speed_direct_term) {
 
   sample.right_output =
       lqrMotorVoltage(test_LQR_u, stop_trace_motor1_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
 
   sample.left_output =
       lqrMotorVoltage(test_LQR_u, stop_trace_motor2_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
 
   sample.distance_delta =
@@ -1874,8 +1932,8 @@ void printLqrStopTrace(const char* reason) {
 }
 
 bool requestLqrDrive(float target_speed, char command) {
-  if (kAttitudeOnlyVerification) {
-    Serial.println("IGNORED: attitude-only verification; drive requests disabled.");
+  if (lqr_test_mode == LqrTestMode::AttitudeOnly) {
+    Serial.println("IGNORED: select a drive-capable LQR mode before requesting motion.");
     return false;
   }
   if (!test_system_ready || emergency_stop_active ||
@@ -2101,8 +2159,8 @@ void updateLqrDiagnostic() {
     return;
   }
 
-  if (kAttitudeOnlyVerification) {
-    // No position/speed PID or drive-induced tilt in this first hardware test.
+  if (lqr_test_mode == LqrTestMode::AttitudeOnly) {
+    // Preserve the c4ba29b control equation when this comparison mode is selected.
     angle_control = pid_angle(LQR_angle - angle_zeropoint);
     gyro_control = pid_gyro(LQR_gyro);
     distance_control = speed_control = 0.0f;
@@ -3029,15 +3087,12 @@ void updateLqrDiagnostic() {
     lqr_drive_angle_bias = 0.0f;
   }
 
-  // PS4 speed is an outer loop: its output is a requested body tilt, while
-  // angle and gyro remain the balancing inner loop.  The existing inner-loop
-  // motor polarity accelerates the measured wheel speed in the same direction
-  // as target_tilt, so negate the speed-controller output here.  This keeps
-  // the established balancing gains and motor direction settings unchanged
-  // while making positive/negative target_speed mean forward/backward in the
-  // measured-speed convention used by the wrong-way guard.
+  // Positive tilt means forward lean. Both drive targets are subtracted from
+  // measured tilt; a target change initially moves the wheels under the body
+  // to create the requested lean. Do not negate position/speed feedback along
+  // with the attitude terms: their errors already use target minus feedback.
   const float lqr_angle_error =
-      LQR_angle - (angle_zeropoint + lqr_ps4_target_tilt) +
+      LQR_angle - (angle_zeropoint + lqr_ps4_target_tilt) -
       lqr_drive_angle_bias;
   angle_control = pid_angle(lqr_angle_error);
   gyro_control = pid_gyro(LQR_gyro);
@@ -3058,7 +3113,11 @@ void updateLqrDiagnostic() {
     }
   }
 
-  float lqr_speed_direct_term = speed_control;
+  float lqr_speed_direct_term =
+    (lqr_test_mode == LqrTestMode::AttitudeSpeed ||
+     lqr_test_mode == LqrTestMode::Full)
+        ? -speed_control
+        : speed_control;
 
   if (lqr_auto_drive_active) {
     if (ps4_target_tilt_active) {
@@ -3094,7 +3153,7 @@ void updateLqrDiagnostic() {
           lqr_speed_direct_term == 0.0f) {
         lqr_speed_direct_term =
             constrain(
-                -speed_control,
+                speed_control,
                 -kLqrDriveWrongWaySpeedAssistLimit,
                 kLqrDriveWrongWaySpeedAssistLimit);
       }
@@ -3115,15 +3174,13 @@ void updateLqrDiagnostic() {
     lqr_speed_direct_term = 0.0f;
   }
 
-  LQR_u =
-      angle_control +
-      gyro_control +
-      distance_control +
-      lqr_speed_direct_term;
-
   // Update the actual test-control output before capturing traces
   // so LQR_u, test_LQR_u and reconstructed motor outputs belong
   // to the same control cycle.
+  if (lqr_test_mode == LqrTestMode::Full) {
+    distance_control = -distance_control;
+  }
+
   updateTestLqrOutput(
       angle_control,
       gyro_control,
@@ -3142,11 +3199,9 @@ void updateLqrDiagnostic() {
           m2_direction < 0.0f ? -1.0f : 1.0f;
       const float diagnostic_right_output =
           lqrMotorVoltage(test_LQR_u, motor1_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
       const float diagnostic_left_output =
           lqrMotorVoltage(test_LQR_u, motor2_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
 
       Serial.printf(
@@ -3322,6 +3377,7 @@ void resetLqrTestState() {
   gyro_control = 0.0f;
   distance_control = 0.0f;
   speed_control = 0.0f;
+  speed_direct_control = 0.0f;
   LQR_u = 0.0f;
   test_LQR_u = 0.0f;
 
@@ -3449,7 +3505,7 @@ void updateBalanceWait() {
     return;
   }
 
-  if (balance_brake_enabled && !kAttitudeOnlyVerification) {
+  if (balance_brake_enabled && lqr_test_mode != LqrTestMode::AttitudeOnly) {
     balance_brake_right = constrain(speed_control * m1_direction,
                                     -kBalanceBrakeVoltageLimit,
                                     kBalanceBrakeVoltageLimit);
@@ -3620,9 +3676,6 @@ void updateBalanceWait() {
     lqr_auto_drive_active = false;
 
     lqr_direction_test_start_ms = millis();
-    clearVelocityTrace();
-    clearLoopTimingTrace();
-    clearLqrControlTrace();
     lqr_direction_test_armed = true;
     lqr_startup_diagnostic_active = true;
     lqr_startup_diagnostic_start_ms = millis();
@@ -3766,10 +3819,6 @@ void printLoopTimingTrace() {
 }
 
 bool cycleLqrTestMode() {
-  if (kAttitudeOnlyVerification) {
-    Serial.println("LQR TEST MODE: ATTITUDE ONLY (locked for hardware verification)");
-    return false;
-  }
   if (lqr_direction_test_armed || balance_wait_active ||
       polarity_test_active) {
     Serial.println(
@@ -3834,10 +3883,13 @@ bool startBalanceTest() {
     return false;
   }
 
-  if (kAttitudeOnlyVerification) lqr_test_mode = LqrTestMode::AttitudeOnly;
   Serial.printf("LQR TEST MODE: %s\n", lqrTestModeDisplayName());
   Serial.printf("LQR SPEED SOURCE: %s\n", lqrSpeedSourceName());
   stopBothMotorsAtZero();
+  clearVelocityTrace();
+  clearLoopTimingTrace();
+  clearLqrControlTrace();
+  last_stop_reason = "NONE";
   resetLqrTestState();
   lqr_diagnostic_armed = true;
   printAndResetLqrRunTime();
@@ -3855,7 +3907,7 @@ bool startBalanceTest() {
   balance_sample_count = 0;
   balance_stable_message_shown = false;
   balance_timer_reset = false;
-  balance_brake_enabled = !kAttitudeOnlyVerification;
+  balance_brake_enabled = lqr_test_mode != LqrTestMode::AttitudeOnly;
   balance_brake_right = 0.0f;
   balance_brake_left = 0.0f;
   status_led_last_toggle_ms = millis();
@@ -4023,6 +4075,11 @@ const char* detectDriveSafetyFault(float right_output, float left_output) {
 }
 
 void stopLqrDriveOnly(const char* reason, bool require_recenter) {
+  if (reason != nullptr &&
+      (lqr_direction_test_armed || balance_wait_active ||
+       lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
+    last_stop_reason = reason;
+  }
   lqr_target_speed = 0.0f;
   lqr_drive_angle_bias = 0.0f;
   lqr_ps4_target_tilt_limit_deg =
@@ -4117,6 +4174,10 @@ void terminateLqrDriveSession(const char* reason, bool require_recenter) {
 }
 
 bool stopBalanceTest() {
+  // A redundant STOP after a fall must not overwrite its diagnostic reason.
+  if (lqr_direction_test_armed || balance_wait_active || polarity_test_active) {
+    last_stop_reason = "MANUAL_STOP";
+  }
   lqr_stop_trace_active = false;
 
   polarity_test_active = false;
@@ -4297,13 +4358,14 @@ void handleLqrControlTraceDownload() {
       "elapsed_ms,angle,angle_zeropoint,angle_error,gyro,"
       "lqr_speed,speed_for_control,"
       "angle_control,gyro_control,distance_control,speed_control,"
-      "lqr_u,right_output,left_output\n");
+      "lqr_u,right_output,left_output,"
+      "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us\n");
 
   const size_t first_index =
       (lqr_control_trace_write_index + kLqrControlTraceSize -
        lqr_control_trace_count) %
       kLqrControlTraceSize;
-  char line[256];
+  char line[512];
   for (size_t i = 0; i < lqr_control_trace_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
@@ -4313,13 +4375,22 @@ void handleLqrControlTraceDownload() {
     snprintf(
         line, sizeof(line),
         "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+        "%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%s,%lu\n",
         static_cast<unsigned long>(sample.elapsed_ms), sample.angle,
         sample.angle_zeropoint, sample.angle_error, sample.gyro,
         sample.lqr_speed, sample.speed_for_control,
         sample.angle_control, sample.gyro_control,
         sample.distance_control, sample.speed_control, sample.lqr_u,
-        sample.right_output, sample.left_output);
+        sample.right_output, sample.left_output,
+        sample.right_voltage_q, sample.left_voltage_q,
+        sample.right_current_sp, sample.left_current_sp,
+        static_cast<int>(sample.right_motor_enabled),
+        static_cast<int>(sample.left_motor_enabled),
+        static_cast<int>(sample.right_driver_en),
+        static_cast<int>(sample.left_driver_en),
+        sample.after_disable ? "AFTER_DISABLE" : "BEFORE_MOVE",
+        static_cast<unsigned long>(sample.foc_capture_us));
     wifi_log_server.sendContent(line);
   }
   wifi_log_server.sendContent("");
@@ -4355,7 +4426,7 @@ void handleStopBalanceTest() {
 }
 
 void handleWifiStatusPage() {
-  char page[2600];
+  char page[3072];
   const String ip_address = WiFi.localIP().toString();
   const bool test_active =
       lqr_direction_test_armed || balance_wait_active || polarity_test_active;
@@ -4374,6 +4445,12 @@ void handleWifiStatusPage() {
       "<h1>ESP32 LQR Logger</h1>"
       "<p>WiFi: %s<br>IP: %s</p>"
       "<p>State: <strong>%s</strong></p>"
+      "<p>Last stop reason: <strong>%s</strong></p>"
+      "<p>Cached AngleY: %.6f deg<br>Reference: %.6f deg<br>Delta: %.6f deg</p>"
+      "<p>System initialized: %s<br>Right: driver_init=%d sensor_ready=%d "
+      "fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d<br>"
+      "Left: driver_init=%d sensor_ready=%d fault=%d (%s) "
+      "motor_status=%u motor_enabled=%d EN=%d</p>"
       "<p>LQR Test Mode: <strong>%s</strong></p>"
       "<form method=\"POST\" action=\"/control/mode\">"
       "<button type=\"submit\"%s>Change Mode</button></form>"
@@ -4393,7 +4470,17 @@ void handleWifiStatusPage() {
       "<a href=\"/trace/lqr.csv\">LQR Control Trace</a></p>"
       "</body></html>",
       WiFi.status() == WL_CONNECTED ? "connected" : "disconnected",
-      ip_address.c_str(), state, lqrTestModeDisplayName(),
+      ip_address.c_str(), state, last_stop_reason,
+      LQR_angle, angle_zeropoint, LQR_angle - angle_zeropoint,
+      test_system_ready ? "yes" : "no",
+      static_cast<int>(driver1_initialized), static_cast<int>(sensor1.ready),
+      static_cast<int>(sensor1.fault), sensor1.error,
+      static_cast<unsigned>(motor1.motor_status), static_cast<int>(motor1.enabled),
+      digitalRead(motor1EnablePin),
+      static_cast<int>(driver2_initialized), static_cast<int>(sensor2.ready),
+      static_cast<int>(sensor2.fault), sensor2.error,
+      static_cast<unsigned>(motor2.motor_status), static_cast<int>(motor2.enabled),
+      digitalRead(motor2EnablePin), lqrTestModeDisplayName(),
       test_active ? " disabled" : "", lqrSpeedSourceName(),
       test_active ? " disabled" : "", start_allowed ? "" : " disabled",
       static_cast<unsigned>(velocity_trace_count),
@@ -4533,8 +4620,12 @@ void updateLqrRunDiagnostic(float right_output, float left_output) {
                 lqr_speed_for_control);
   Serial.printf("angle_control=%.6f\n", angle_control);
   Serial.printf("gyro_control=%.6f\n", gyro_control);
-  Serial.printf("distance_control=%.6f\n", distance_control);
-  Serial.printf("speed_control=%.6f\n", speed_control);
+  Serial.printf("distance_control=%.6f\n",
+                (lqr_test_mode == LqrTestMode::Full ||
+                 lqr_test_mode == LqrTestMode::AttitudeDistance)
+                    ? distance_control : 0.0f);
+  Serial.printf("speed_control=%.6f speed_pid_raw=%.6f\n",
+                speed_direct_control, speed_control);
   Serial.printf("lqr_test_mode=%s\n", lqrTestModeLogName());
   Serial.printf("lqr_speed_source=%s\n", lqrSpeedSourceName());
   Serial.printf("test_LQR_u=%.6f\n", test_LQR_u);
@@ -4565,8 +4656,12 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
   Serial.printf("lqr_speed_source=%s\n", lqrSpeedSourceName());
   Serial.printf("angle_control=%.6f\n", angle_control);
   Serial.printf("gyro_control=%.6f\n", gyro_control);
-  Serial.printf("distance_control=%.6f\n", distance_control);
-  Serial.printf("speed_control=%.6f\n", speed_control);
+  Serial.printf("distance_control=%.6f\n",
+                (lqr_test_mode == LqrTestMode::Full ||
+                 lqr_test_mode == LqrTestMode::AttitudeDistance)
+                    ? distance_control : 0.0f);
+  Serial.printf("speed_control=%.6f speed_pid_raw=%.6f\n",
+                speed_direct_control, speed_control);
   Serial.printf("lqr_test_mode=%s\n", lqrTestModeLogName());
   Serial.printf("test_LQR_u=%.6f\n", test_LQR_u);
   Serial.printf("right_output=%.6f\n", right_output);
@@ -4579,8 +4674,8 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 void printHelp() {
   Serial.println();
   Serial.println("SimpleFOC two-wheel + MPU6050 integration test");
-  Serial.println("ATTITUDE ONLY verification: g locked; drive requests and wait brake disabled.");
-  Serial.println("Use t, wait for AUTO START; d disarms and disables both wheel drivers.");
+  Serial.println("Default ATTITUDE ONLY; g selects FULL / ATTITUDE+SPEED / ATTITUDE+DISTANCE / ATTITUDE ONLY.");
+  Serial.println("t starts stationary balance; >/< explicitly request short drive; . soft-stops; e cancels drive; d disarms.");
   Serial.println("  1 : right +0.50 V, left 0 V");
   Serial.println("  2 : right -0.50 V, left 0 V");
   Serial.println("  3 : right 0 V, left +0.50 V");
@@ -4640,18 +4735,18 @@ void printLqrStatus() {
       snapshot_right_angle * m1_direction + snapshot_left_angle * m2_direction;
   const float snapshot_lqr_speed = snapshot_right_velocity * m1_direction +
                                    snapshot_left_velocity * m2_direction;
-  const float snapshot_lqr_speed_for_control =
-      lqr_speed_source == LqrSpeedSource::SimpleFoc
-          ? snapshot_lqr_speed
-          : diag_LQR_speed_10ms;
+  const float snapshot_lqr_speed_for_control = lqr_speed_for_control;
   // Report the last control calculation, without re-running stateful PIDs or
   // changing test_LQR_u from a diagnostic print. AttitudeOnly excludes both
   // position and speed, exactly as updateLqrDiagnostic() does.
   const float snapshot_angle_control = angle_control;
   const float snapshot_gyro_control = gyro_control;
-  const bool attitude_only = lqr_test_mode == LqrTestMode::AttitudeOnly;
-  const float snapshot_distance_control = attitude_only ? 0.0f : distance_control;
-  const float snapshot_speed_control = attitude_only ? 0.0f : speed_control;
+  const float snapshot_distance_control =
+      (lqr_test_mode == LqrTestMode::Full ||
+       lqr_test_mode == LqrTestMode::AttitudeDistance) ? distance_control : 0.0f;
+  const float snapshot_speed_control =
+      (lqr_test_mode == LqrTestMode::Full ||
+       lqr_test_mode == LqrTestMode::AttitudeSpeed) ? speed_direct_control : 0.0f;
   const float snapshot_lqr_u = LQR_u;
   const float snapshot_motor1_output_sign =
     m1_direction < 0.0f ? -1.0f : 1.0f;
@@ -4660,11 +4755,9 @@ void printLqrStatus() {
 
   const float snapshot_right_test_output =
     lqrMotorVoltage(test_LQR_u, snapshot_motor1_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
   const float snapshot_left_test_output =
     lqrMotorVoltage(test_LQR_u, snapshot_motor2_output_sign,
-                      lqr_test_mode == LqrTestMode::AttitudeOnly,
                       kLqrTestVoltageLimit);
 
   Serial.printf("AngleY=%.6f GyroY=%.6f\n", snapshot_angle_y,
@@ -4695,6 +4788,9 @@ void printLqrStatus() {
   Serial.printf("lqr_speed_source=%s\n", lqrSpeedSourceName());
   Serial.printf("distance_control=%.6f speed_control=%.6f\n",
                 snapshot_distance_control, snapshot_speed_control);
+  Serial.printf("speed_pid_raw=%.6f speed_direct_term=%.6f drive_target_tilt=%.6f\n",
+                speed_control, speed_direct_control,
+                lqr_drive_angle_bias + lqr_ps4_target_tilt_deg);
   Serial.printf("lqr_test_mode=%s\n", lqrTestModeLogName());
   Serial.printf("test_LQR_u=%.6f\n", test_LQR_u);
   Serial.printf("LQR_u=%.6f diagnostic=%s direction_test=%s dt_ms=%.3f\n",
@@ -5588,8 +5684,8 @@ void handleSerialCommand() {
       break;
     case 'b':
     case 'B':
-      if (kAttitudeOnlyVerification) {
-        Serial.println("IGNORED: attitude-only verification; speed brake disabled.");
+      if (lqr_test_mode == LqrTestMode::AttitudeOnly) {
+        Serial.println("IGNORED: ATTITUDE ONLY keeps the speed brake disabled.");
       } else if (!balance_wait_active) {
         Serial.println("Balance brake toggle is available only during Balance Wait.");
       } else {
