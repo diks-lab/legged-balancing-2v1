@@ -23,6 +23,10 @@ code = r'''
 #include <string>
 #include <vector>
 using String=std::string;
+struct { bool measuring=false;bool active(){return measuring;} } foc_alignment_observer;
+std::atomic<const char*> foc_deferred_http_failure{nullptr};
+bool foc_deferred_http_started=false,foc_deferred_ip_announcement=false;
+enum class FocGateSource {WebAbort};
 using QueueHandle_t = int*;
 using TaskHandle_t = void*;
 using StackType_t = uint8_t;
@@ -94,6 +98,7 @@ bool test_system_ready=false, emergency_stop_active=false, fail_foc=false, lose_
 int foc_calls=0, gates=0, snapshots=0;
 bool wheel_outputs_enabled=false;
 void gateWheelOutputsOff(){++gates;wheel_outputs_enabled=false;}
+void gateWheelOutputsOffFrom(FocGateSource){gateWheelOutputsOff();}
 void disableBothDrivers(){gateWheelOutputsOff();}
 int listen_attempts=0, route_count=0, handled=0, help_count=0;
 constexpr int HTTP_GET=1,HTTP_POST=2;
@@ -155,6 +160,7 @@ code += '\n'.join(function(n) for n in
                    'updateWifiLogServer'])
 code += r'''
 void reset(){
+  foc_alignment_observer.measuring=false;foc_deferred_http_failure.store(nullptr);foc_deferred_http_started=foc_deferred_ip_announcement=false;
   if(http_status_queue)delete http_status_queue;
   if(http_command_queue)delete http_command_queue;
   http_status_queue=http_command_queue=nullptr;http_task_handle=nullptr;
@@ -180,6 +186,12 @@ void tick(){
 }
 void connect(uint32_t ip=0xc0a8012a){WiFi.connection_status=WL_CONNECTED;WiFi.ip.value=ip;}
 int main(){
+  reset();foc_alignment_observer.measuring=true;
+  printHttpStartupMemory("during_alignment");reportStartupFailure("WEB_LOST_DURING_FOC");
+  assert(Serial.text.empty() && String(foc_deferred_http_failure.load())=="WEB_LOST_DURING_FOC");
+  foc_alignment_observer.measuring=false;
+  reportStartupFailure(foc_deferred_http_failure.exchange(nullptr));
+  assert(Serial.text.find("WEB_LOST_DURING_FOC")!=String::npos);
   for (int failed=0;failed<=2;++failed){
     reset();i2c0_resources_ready=i2c1_resources_ready=false;
     I2Cone.fail=failed==1;I2Ctwo.fail=failed==2;wheel_outputs_enabled=true;
@@ -246,6 +258,12 @@ int main(){
   assert(done<ip && ip<url && url<listener && listener<menu);
   for(int i=0;i<4;++i)tick();
   assert(help_count==1 && listen_attempts==1);
+  // A same-IP reconnect during observation defers diagnostics until afterwards.
+  WiFi.connection_status=0;WiFi.ip.value=0;tick();
+  foc_alignment_observer.measuring=true;Serial.text.clear();connect();tick();
+  assert(Serial.text.empty() && foc_deferred_ip_announcement);
+  foc_alignment_observer.measuring=false;tick();
+  assert(Serial.text.find("http://192.168.1.42/")!=String::npos && !foc_deferred_ip_announcement);
   // IP change and reconnect announce the numeric URL again, without another menu.
   connect(0xc0a8012b);tick();assert(help_count==1);
   assert(Serial.text.find("http://192.168.1.43/")!=String::npos);

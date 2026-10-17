@@ -28,6 +28,8 @@ prelude = r'''
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
+#include "FocAlignmentObservation.h"
+class Print { public: virtual ~Print()=default;virtual size_t write(uint8_t)=0; };
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "common/pid.h"

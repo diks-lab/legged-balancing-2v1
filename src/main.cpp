@@ -19,6 +19,7 @@
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
+#include "FocAlignmentObservation.h"
 
 #include "Servo_STS3032.h"
 #include "ssid.h"
@@ -39,14 +40,38 @@ constexpr float kWheelRunVoltageLimit = 1.0f;
 constexpr float kRightForwardSign = 1.0f;
 constexpr float kLeftForwardSign = 1.0f;
 
-void gateWheelOutputsOff() {
+struct FocObservationLock {
+  portMUX_TYPE mutex=portMUX_INITIALIZER_UNLOCKED;
+  void lock(){portENTER_CRITICAL(&mutex);}
+  void unlock(){portEXIT_CRITICAL(&mutex);}
+};
+FocAlignmentObservation<FocObservationLock> foc_alignment_observer;
+class FocQuietPrint : public Print {
+ public:
+  uint8_t text[512]{};size_t used=0;uint32_t dropped=0;
+  void clear(){used=0;dropped=0;}
+  size_t write(uint8_t byte) override {
+    if(used<sizeof(text))text[used++]=byte;else ++dropped;
+    return 1;
+  }
+} foc_quiet_print;
+std::atomic<const char*> foc_deferred_http_failure{nullptr};
+bool foc_deferred_http_started=false; // HTTP task only.
+bool foc_deferred_ip_announcement=false; // Preserve same-IP reconnect announcements.
+void printFocAlignmentObservation(unsigned slot);
+void gateWheelOutputsOffFrom(FocGateSource source) {
   gpio_set_level(static_cast<gpio_num_t>(motor1EnablePin), LOW);
   gpio_set_level(static_cast<gpio_num_t>(motor2EnablePin), LOW);
+  // Safety GPIO writes always precede the short observation lock.
+  foc_alignment_observer.gate(source,micros());
 }
+void gateWheelOutputsOff(){gateWheelOutputsOffFrom(FocGateSource::Other);}
+void gateRightSensorFault(){gateWheelOutputsOffFrom(FocGateSource::RightSensor);}
+void gateLeftSensorFault(){gateWheelOutputsOffFrom(FocGateSource::LeftSensor);}
 esp_timer_handle_t wheelAlignTimer = nullptr;
 std::atomic<bool> wheelAlignExpired{false};
 void wheelAlignTimeout(void*) {
-  gateWheelOutputsOff();
+  gateWheelOutputsOffFrom(FocGateSource::Timer);
   wheelAlignExpired.store(true);
 }
 constexpr uint8_t kRightLegServoId = 1;
@@ -302,13 +327,13 @@ uint32_t wifi_status_last_check_ms = 0;
 BLDCMotor motor1(7);
 BLDCDriver3PWM driver1(13, 12, 14, motor1EnablePin);
 TwoWire I2Cone(0);
-CheckedWheelSensor sensor1(I2Cone, gateWheelOutputsOff);
+CheckedWheelSensor sensor1(I2Cone, gateRightSensorFault);
 MPU6050 mpu6050(I2Cone);
 
 BLDCMotor motor2(7);
 BLDCDriver3PWM driver2(26, 25, 33, motor2EnablePin);
 TwoWire I2Ctwo(1);
-CheckedWheelSensor sensor2(I2Ctwo, gateWheelOutputsOff);
+CheckedWheelSensor sensor2(I2Ctwo, gateLeftSensorFault);
 
 //==================================================
 // Control Variables
@@ -1069,7 +1094,7 @@ void enforceStartupOutputGate() {
     StartupFocGate expected = StartupFocGate::Initializing;
     startup_foc_gate.compare_exchange_strong(expected, StartupFocGate::Aborted);
   }
-  if (startup_foc_gate.load() == StartupFocGate::Aborted) gateWheelOutputsOff();
+  if (startup_foc_gate.load() == StartupFocGate::Aborted) gateWheelOutputsOffFrom(FocGateSource::WebAbort);
 }
 
 bool startupHardwareStepAllowed() {
@@ -1494,14 +1519,69 @@ bool refreshWheelSensors() {
 }
 
 bool initializeWheelFoc(BLDCMotor& motor) {
-  if (!wheelSensorsOK() || !wheelAlignTimer) return false;
-  wheelAlignExpired.store(false);
-  if (esp_timer_start_once(wheelAlignTimer, 6000000) != ESP_OK) return false;
-  const bool focOK = motor.initFOC();
-  gateWheelOutputsOff();
-  esp_timer_stop(wheelAlignTimer);
-  return focOK && !wheelAlignExpired.load() && motor.pp_check_result &&
-         wheelSensorsOK();
+  const unsigned slot=&motor==&motor1 ? 0u : 1u;
+  foc_alignment_observer.begin(slot,&motor,micros());
+  foc_quiet_print.clear();
+  int raw=-1,start=-1,stop=-1;
+  bool raw_called=false;
+  if (wheelSensorsOK() && wheelAlignTimer) {
+    wheelAlignExpired.store(false);
+    start=esp_timer_start_once(wheelAlignTimer,6000000);
+    if(start==ESP_OK) {
+#ifndef SIMPLEFOC_DISABLE_DEBUG
+      SimpleFOCDebug::enable(&foc_quiet_print);
+#endif
+      raw_called=true;
+      raw=motor.initFOC();
+      gateWheelOutputsOffFrom(FocGateSource::Cleanup);
+      stop=esp_timer_stop(wheelAlignTimer);
+#ifndef SIMPLEFOC_DISABLE_DEBUG
+      SimpleFOCDebug::enable(&Serial);
+#endif
+    }
+  }
+  // Includes precondition/timer-start failures: never print with EN left on.
+  if(!raw_called)gateWheelOutputsOffFrom(FocGateSource::Cleanup);
+  const bool expired=wheelAlignExpired.load();
+  const bool sensors_ok=wheelSensorsOK();
+  const bool accepted=raw_called && static_cast<bool>(raw) && !expired && motor.pp_check_result && sensors_ok;
+  foc_alignment_observer.end(raw,start,stop,expired,motor.pp_check_result,
+      sensors_ok,accepted,micros());
+  printFocAlignmentObservation(slot);
+  return accepted;
+}
+
+void printFocAlignmentObservation(unsigned slot) {
+  const auto& r=foc_alignment_observer.records[slot];
+  // Called only after GPIO gate-off and end(). No sensor updates/readbacks.
+  for(size_t i=0;i<foc_quiet_print.used;++i)Serial.write(foc_quiet_print.text[i]);
+  char line[320];
+  snprintf(line,sizeof(line),
+      "FOC OBS wheel=%s raw_initFOC=%d pp_observed=%d pp_pass=%d accepted=%d timer_start=%d timer_stop=%d expired=%d sensors_ok=%d total_us=%lu debug_dropped=%lu right_error=%s left_error=%s\n",
+      slot==0?"RIGHT":"LEFT",r.raw_result,r.pp_observed,r.pp_pass,r.accepted,
+      r.timer_start,r.timer_stop,r.expired,r.sensors_ok,static_cast<unsigned long>(r.total_us),
+      static_cast<unsigned long>(foc_quiet_print.dropped),sensor1.error,sensor2.error);
+  Serial.print(line);
+  snprintf(line,sizeof(line),
+      "FOC OBS valid_mask=%lu start=%.7f mid=%.7f end=%.7f forward_delta=%.7f reverse_delta=%.7f moved=%.7f zero=%.7f point_us=%lu/%lu/%lu/%lu/%lu\n",
+      static_cast<unsigned long>(r.valid),r.angles[0],r.angles[1],r.angles[2],
+      r.angles[1]-r.angles[0],r.angles[2]-r.angles[1],r.moved,r.angles[4],
+      static_cast<unsigned long>(r.point_us[0]),static_cast<unsigned long>(r.point_us[1]),
+      static_cast<unsigned long>(r.point_us[2]),static_cast<unsigned long>(r.point_us[3]),
+      static_cast<unsigned long>(r.point_us[4]));
+  Serial.print(line);
+  snprintf(line,sizeof(line),"FOC OBS forward_us=%lu reverse_us=%lu zero_us=%lu (valid_mask controls validity)\n",
+      static_cast<unsigned long>((r.valid&3u)==3u?r.point_us[1]-r.point_us[0]:0),
+      static_cast<unsigned long>((r.valid&6u)==6u?r.point_us[2]-r.point_us[1]:0),
+      static_cast<unsigned long>((r.valid&24u)==24u?r.point_us[4]-r.point_us[3]:0));
+  Serial.print(line);
+  static const char* const names[]={"OTHER","TIMER","WEB_ABORT","RIGHT_SENSOR","LEFT_SENSOR","NORMAL_CLEANUP","LIBRARY_DISABLE"};
+  for(unsigned i=0;i<static_cast<unsigned>(FocGateSource::Count);++i){
+    if(!r.gates[i].count)continue;
+    snprintf(line,sizeof(line),"FOC OBS gate=%s count=%lu first_us=%lu\n",names[i],
+        static_cast<unsigned long>(r.gates[i].count),static_cast<unsigned long>(r.gates[i].first_us));
+    Serial.print(line);
+  }
 }
 
 bool stopOnWheelFault() {
@@ -4903,6 +4983,11 @@ void httpTask(void*) {
     updateWifiLogServer();
     enforceStartupOutputGate();
     reapHttpTraceSnapshot();
+    if(!foc_alignment_observer.active()){
+      const char* deferred=foc_deferred_http_failure.exchange(nullptr);
+      if(deferred)reportStartupFailure(deferred);
+      if(foc_deferred_http_started){Serial.println("WiFi trace HTTP server started.");foc_deferred_http_started=false;}
+    }
     serviceHttpPs4DiagnosticSerial();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -4952,7 +5037,8 @@ void startWifiHttpServer() {
     return;
   }
   http_listener_failure_reported = false;
-  Serial.println("WiFi trace HTTP server started.");
+  if(foc_alignment_observer.active())foc_deferred_http_started=true;
+  else Serial.println("WiFi trace HTTP server started.");
 }
 
 
@@ -4972,6 +5058,7 @@ void formatHttpResources(char* text, size_t capacity) {
 }
 
 void printHttpStartupMemory(const char* stage) {
+  if(foc_alignment_observer.active())return;
 #if HTTP_MEMORY_STAGE_DIAGNOSTICS
   constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   char text[384];
@@ -5003,6 +5090,7 @@ void printStartupMemoryResult(const char* result) {
 }
 
 void reportStartupFailure(const char* stage) {
+  if(foc_alignment_observer.active()){foc_deferred_http_failure.store(stage);return;}
   char text[384];
   snprintf(text, sizeof(text),
       "STARTUP: stage=%s state=FAILED foc=%s littlefs=%s wifi_ip=%s http=%s menu=%s i2c0=%s i2c1=%s\n",
@@ -5098,13 +5186,15 @@ void updateWifiLogServer() {
     const bool has_ip = static_cast<uint32_t>(ip) != 0;
     if (connection_status == WL_CONNECTED && has_ip) {
       const String ip_address = ip.toString();
-      if (!wifi_connection_ready || wifi_announced_ip != ip_address) {
+      if (!wifi_connection_ready || wifi_announced_ip != ip_address) foc_deferred_ip_announcement=true;
+      if (foc_deferred_ip_announcement && !foc_alignment_observer.active()) {
         // Print the numeric URL before attempting HTTP or optional mDNS.
         printHttpStartupMemory("wifi_ip_ready");
         Serial.println("WiFi: 接続完了 (connected)");
         Serial.printf("WiFi DHCP IP: %s\n", ip_address.c_str());
         Serial.printf("HTTP access URL: http://%s/\n", ip_address.c_str());
         wifi_announced_ip = ip_address;
+        foc_deferred_ip_announcement=false;
       }
       wifi_connection_ready = true;
       wifi_timeout_reported = false;
@@ -5126,7 +5216,7 @@ void updateWifiLogServer() {
       if (!wifi_timeout_reported && now_ms - wifi_wait_started_ms >= kWifiConnectTimeoutMs) {
         wifi_timeout_reported = true;
         reportStartupFailure(connection_status == WL_CONNECTED ? "IP_TIMEOUT" : "WIFI_TIMEOUT");
-        Serial.printf("WiFi wait: status=%d ip=%s elapsed_ms=%lu; reconnect continues without blocking control.\n",
+        if(!foc_alignment_observer.active())Serial.printf("WiFi wait: status=%d ip=%s elapsed_ms=%lu; reconnect continues without blocking control.\n",
                       connection_status, ip.toString().c_str(),
                       static_cast<unsigned long>(now_ms - wifi_wait_started_ms));
       }
@@ -5624,6 +5714,7 @@ void servicePs4DiagnosticSerial() {
 }
 
 void serviceHttpPs4DiagnosticSerial() {
+  if(foc_alignment_observer.active())return;
   const uint32_t now = millis();
   if (ps4_diagnostic_serial_offset == ps4_diagnostic_serial_size &&
       now - ps4_diagnostic_serial_last_ms >= kPs4ObservationIntervalMs) {
@@ -6561,3 +6652,14 @@ void handleSerialCommand() {
   }
 }
 }  // namespace
+
+
+void observeFocAlignPoint(const void* motor,FocAlignPoint point,float value,uint32_t now) {
+  foc_alignment_observer.point(motor,point,value,now);
+}
+void observeFocAlignPp(const void* motor,float moved,bool passed) {
+  foc_alignment_observer.pp(motor,moved,passed);
+}
+void observeFocLibraryDisable(uint32_t now) {
+  foc_alignment_observer.gate(FocGateSource::LibraryDisable,now);
+}
