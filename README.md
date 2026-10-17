@@ -353,3 +353,10 @@ checksum, zero error byte, printable ASCII, and excluding a TX echo.
 - Any direction-enable pin (none is used by the existing source).
 - All responses and physical motion; this repository change has not been tested
   on the robot.
+
+## WebファイルとPS4操作の整理
+
+Webの配置・LittleFS・通常ファームとdataの書き込み手順は
+[docs/web-files.md](docs/web-files.md) を参照。
+PS4の操作一覧・共通指令経路・実機未検証範囲は
+[docs/ps4-operation.md](docs/ps4-operation.md) を参照。
