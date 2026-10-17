@@ -9,13 +9,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
-#include <ESPmDNS.h>
 #include <driver/gpio.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <atomic>
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
+#include "Ps4Diagnostics.h"
 
 #include "Servo_STS3032.h"
 #include "ssid.h"
@@ -204,27 +204,13 @@ constexpr float kPs4LegExtensionMaxPercent = 30.0f;
 // Keep this value stable so the controller can reconnect after a restart.
 constexpr char kPs4HostMac[] = "01:02:03:04:05:06";
 
-struct Ps4InputState {
-  int8_t left_stick_x;
-  int8_t left_stick_y;
-  int8_t right_stick_x;
-  int8_t right_stick_y;
-  uint8_t l2;
-  uint8_t r2;
-  bool cross;
-  bool circle;
-  bool square;
-  bool triangle;
-  bool dpad_up;
-  bool dpad_down;
-  bool dpad_left;
-  bool dpad_right;
-  bool l1;
-  bool r1;
-  bool options;
-  bool share;
-  bool ps_button;
-};
+Ps4Diagnostics ps4_diagnostics;
+// Bounded serial staging: no blocking printf/flush for the new observations.
+char ps4_diagnostic_serial[768] = {};
+size_t ps4_diagnostic_serial_offset = 0, ps4_diagnostic_serial_size = 0;
+uint32_t ps4_diagnostic_serial_last_ms = 0;
+constexpr uint32_t kPs4ObservationIntervalMs = 500;
+bool ps4_packet_command_attempted = false;
 
 enum class OperatorCommand { Start, EndTest, FullStop, SoftStop, EnableDrivers, CycleMode, LegUp, LegDown };
 bool executeOperatorCommand(OperatorCommand command);
@@ -272,16 +258,22 @@ class CheckedHttpServer : public WebServer {
 CheckedHttpServer wifi_log_server(80);
 std::atomic<bool> startup_foc_ready{false};
 // The following startup publication state is owned by the HTTP task.
-bool startup_menu_printed = false;
+std::atomic<bool> startup_menu_printed{false};
 bool http_routes_registered = false;
 bool http_listener_failure_reported = false;
-bool wifi_connection_ready = false;
+std::atomic<bool> wifi_connection_ready{false};
 bool wifi_timeout_reported = false;
 uint32_t wifi_wait_started_ms = 0;
 String wifi_announced_ip;
 bool wifi_log_server_started = false;
-bool mdns_started = false;
-bool mdns_attempted = false;
+std::atomic<bool> startup_web_ready{false};
+std::atomic<bool> startup_http_ready{false};
+enum class StartupFocGate { Waiting, Initializing, Aborted, Ready };
+std::atomic<StartupFocGate> startup_foc_gate{StartupFocGate::Waiting};
+// Main-loop-owned startup state; HTTP only sees its queued text snapshot.
+bool foc_initialization_attempted = false;
+bool foc_initialization_failed = false;
+const char* startup_phase = "WEB_WAIT";
 uint32_t wifi_status_last_check_ms = 0;
 
 BLDCMotor motor1(7);
@@ -723,6 +715,11 @@ void updateLqrRunDiagnostic(float right_output, float left_output);
 
 // Wi-Fi trace logger
 void setupWifiLogServer();
+void initializeRobotHardware();
+void advanceStartup();
+bool startupHardwareStepAllowed();
+void enforceStartupOutputGate();
+void publishStartupPhase(const char* stage);
 void reportStartupFailure(const char* stage);
 void printHttpStartupMemory(const char* stage);
 void updateWifiLogServer();
@@ -740,6 +737,12 @@ bool motionCommandAllowed();
 
 // Test / monitor
 void setupPs4Controller();
+void servicePs4DiagnosticSerial();
+void serviceHttpPs4DiagnosticSerial();
+void drainPs4DiagnosticSerial();
+bool executePs4Command(OperatorCommand command);
+const char* ps4CommandName(OperatorCommand command);
+const char* ps4CommandRejectionReason(OperatorCommand command);
 void updatePs4Controller();
 void applyPs4Steering(float& right_output, float& left_output);
 void resetPs4MotionInput();
@@ -765,56 +768,70 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 }  // namespace
 
 void setup() {
-  const char* startup_stage = "WHEEL_ALIGN_TIMER";
   gateWheelOutputsOff();
   pinMode(motor1EnablePin, OUTPUT);
   pinMode(motor2EnablePin, OUTPUT);
+  digitalWrite(motor1EnablePin, LOW);
+  digitalWrite(motor2EnablePin, LOW);
+  pinMode(ledPin, OUTPUT);
+  setStatusLed(false);
   Serial.begin(115200);
   Serial2.begin(1000000, SERIAL_8N1, 16, 17);
   sms_sts.pSerial = &Serial2;
   delay(1000);
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
-  setupPs4Controller();
+  setupPs4Controller(); // Connection is diagnostic, not an FOC prerequisite.
+  setupWifiLogServer(); // No motor/I2C initialization before Web readiness.
+  publishStartupPhase("WEB_WAIT");
+}
 
-  pinMode(motor1EnablePin, OUTPUT);
-  pinMode(motor2EnablePin, OUTPUT);
-  pinMode(ledPin, OUTPUT);
-  digitalWrite(motor1EnablePin, LOW);
-  digitalWrite(motor2EnablePin, LOW);
-  setStatusLed(false);
-
+namespace {
+void initializeRobotHardware() {
+  const char* startup_stage = "WHEEL_ALIGN_TIMER";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   esp_timer_create_args_t alignArgs = {};
   alignArgs.callback = wheelAlignTimeout;
   alignArgs.name = "wheel_align_guard";
   if (esp_timer_create(&alignArgs, &wheelAlignTimer) != ESP_OK) {
     disableBothDrivers();
     Serial.println("ERROR: wheel alignment timer unavailable; reboot required.");
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
   // Initialize/check BOTH wheel sensors before any motor can be enabled.
   startup_stage = "WHEEL_SENSORS";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   sensor1.begin(19, 18);
   sensor2.begin(23, 5);
   if (!wheelSensorsOK()) {
     disableBothDrivers();
     Serial.println("ERROR: wheel sensor initialization failed; reboot required.");
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
   startup_stage = "RIGHT_AS5600";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   if (!i2cDeviceIsPresent(I2Cone, kAs5600Address)) {
     Serial.println("ERROR: right AS5600 not found at 0x36.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
   motor1.linkSensor(&sensor1);
 
   startup_stage = "MPU6050";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   if (!i2cDeviceIsPresent(I2Cone, kMpu6050Address)) {
     Serial.println("ERROR: MPU6050 not found at 0x68.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
@@ -824,9 +841,12 @@ void setup() {
   driver1.voltage_power_supply = kWheelSupplyVoltage;
   driver1.voltage_limit = kWheelSupplyVoltage;
   startup_stage = "RIGHT_DRIVER";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   if (!driver1.init()) {
     Serial.println("ERROR: Right driver initialization failed.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
@@ -840,27 +860,36 @@ void setup() {
   motor1.controller = MotionControlType::torque;
   motor1.useMonitoring(Serial);
   startup_stage = "RIGHT_MOTOR";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   if (!refreshWheelSensors() || !motor1.init() || !refreshWheelSensors()) {
     Serial.println("ERROR: Right motor initialization failed.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
   startup_stage = "RIGHT_FOC";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   const int motor1FocStatus = initializeWheelFoc(motor1);
   Serial.printf("Right FOC initialization result: %d\n", motor1FocStatus);
   if (motor1FocStatus == 0) {
     Serial.println("ERROR: Right FOC initialization failed.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
   driver1.disable();
 
   startup_stage = "LEFT_AS5600";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   if (!i2cDeviceIsPresent(I2Ctwo, kAs5600Address)) {
     Serial.println("ERROR: left AS5600 not found at 0x36.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
@@ -868,9 +897,12 @@ void setup() {
   driver2.voltage_power_supply = kWheelSupplyVoltage;
   driver2.voltage_limit = kWheelSupplyVoltage;
   startup_stage = "LEFT_DRIVER";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   if (!driver2.init()) {
     Serial.println("ERROR: Left driver initialization failed.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
@@ -884,18 +916,24 @@ void setup() {
   motor2.controller = MotionControlType::torque;
   motor2.useMonitoring(Serial);
   startup_stage = "LEFT_MOTOR";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   if (!refreshWheelSensors() || !motor2.init() || !refreshWheelSensors()) {
     Serial.println("ERROR: Left motor initialization failed.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
   startup_stage = "LEFT_FOC";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   const int motor2FocStatus = initializeWheelFoc(motor2);
   Serial.printf("Left FOC initialization result: %d\n", motor2FocStatus);
   if (motor2FocStatus == 0) {
     Serial.println("ERROR: Left FOC initialization failed.");
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
@@ -905,10 +943,13 @@ void setup() {
   motor2.updateVoltageLimit(kWheelRunVoltageLimit);
   // Fresh checked samples after blocking initialization, before re-enabling.
   startup_stage = "POST_FOC_SENSORS";
+  if (!startupHardwareStepAllowed()) return;
+  publishStartupPhase(startup_stage);
   sensor1.update();
   sensor2.update();
   if (!wheelSensorsOK()) {
     disableBothDrivers();
+    publishStartupPhase(startup_stage);
     reportStartupFailure(startup_stage);
     return;
   }
@@ -917,6 +958,7 @@ void setup() {
   Serial.printf("Left sensor_direction=%s m2_direction=%.2f\n",
                 motor2.sensor_direction == CW ? "CW" : "CCW", m2_direction);
 
+  if (!startupHardwareStepAllowed()) return;
   setBothTargetsToZero();
   driver1.enable();
   driver2.enable();
@@ -925,16 +967,80 @@ void setup() {
   lqr_direction_test_armed = false;
   balance_wait_active = false;
   Serial.println("OK: both motors initialized and stopped at 0.00 V.");
-  startup_foc_ready.store(true);
-  setupWifiLogServer();
+  // Sampling began while waiting for Web. Reapply the original first-packet
+  // release guard so held startup inputs cannot become new motion commands.
+  ps4_input_initialized = false;
+  ps4_controls_released = false;
+  resetPs4MotionInput();
 }
+
+void enforceStartupOutputGate() {
+  // Only GPIO is touched from HTTP, as with the existing alignment timer.
+  // CAS orders a preflight-loss abort against the main task's final commit:
+  // post-startup Wi-Fi loss cannot become a new runtime stop rule.
+  if (!startup_web_ready.load()) {
+    StartupFocGate expected = StartupFocGate::Initializing;
+    startup_foc_gate.compare_exchange_strong(expected, StartupFocGate::Aborted);
+  }
+  if (startup_foc_gate.load() == StartupFocGate::Aborted) gateWheelOutputsOff();
+}
+
+bool startupHardwareStepAllowed() {
+  if (startup_web_ready.load() && startup_foc_gate.load() != StartupFocGate::Aborted &&
+      !emergency_stop_active) return true;
+  test_system_ready = false;
+  disableBothDrivers();
+  publishStartupPhase(emergency_stop_active ? "FOC_INHIBITED_FULL_STOP" : "WEB_LOST_DURING_FOC");
+  reportStartupFailure(startup_phase);
+  return false;
+}
+
+void advanceStartup() {
+  // Only the main loop may admit FOC or use either I2C bus.
+  if (foc_initialization_attempted || test_system_ready) return;
+  gateWheelOutputsOff();
+  if (emergency_stop_active) {
+    if (strcmp(startup_phase, "FOC_INHIBITED_FULL_STOP") != 0)
+      publishStartupPhase("FOC_INHIBITED_FULL_STOP");
+    return;
+  }
+  if (!startup_web_ready.load()) return;
+  foc_initialization_attempted = true; // Hardware failures still require reboot.
+  startup_foc_gate.store(StartupFocGate::Initializing);
+  initializeRobotHardware();
+  if (test_system_ready && !startupHardwareStepAllowed()) test_system_ready = false;
+  StartupFocGate expected = StartupFocGate::Initializing;
+  const bool committed = test_system_ready &&
+      startup_foc_gate.compare_exchange_strong(expected, StartupFocGate::Ready);
+  if (committed) {
+    publishStartupPhase("READY");
+    startup_foc_ready.store(true);
+  } else {
+    const bool late_abort = test_system_ready;
+    test_system_ready = false;
+    disableBothDrivers();
+    startup_foc_gate.store(StartupFocGate::Waiting);
+    foc_initialization_failed = true;
+    if (late_abort) {
+      publishStartupPhase("WEB_LOST_DURING_FOC");
+      reportStartupFailure(startup_phase);
+    } else {
+      publishStartupPhase(startup_phase); // Preserve the exact failed stage.
+    }
+  }
+}
+
+}  // namespace
 
 void loop() {
   updatePs4Controller();
+  servicePs4DiagnosticSerial();
 
   if (!test_system_ready) {
+    gateWheelOutputsOff();
     handleSerialCommand();
     serviceHttpRequests();
+    advanceStartup();
     delay(10);
     return;
   }
@@ -4542,6 +4648,10 @@ void handleLqrControlTraceDownload() {
 }
 
 void enqueueHttpCommand(char command) {
+  if (command == 't' && !startup_foc_ready.load()) {
+    wifi_log_server.send(409, "text/plain", "FOC NOT INITIALIZED; START REJECTED\n");
+    return;
+  }
   if (xQueueSend(http_command_queue, &command, 0) != pdTRUE) {
     wifi_log_server.send(409, "text/plain", "Command pending\n");
     return;
@@ -4553,6 +4663,11 @@ void handleCycleLqrSpeedSource() { enqueueHttpCommand('i'); }
 void handleStartBalanceTest() { enqueueHttpCommand('t'); }
 void handleStopBalanceTest() { enqueueHttpCommand('d'); }
 
+void publishStartupPhase(const char* stage) {
+  startup_phase = stage;
+  if (http_status_queue) captureHttpStatus();
+}
+
 void captureHttpStatus() {
   HttpStatus status{};
   const bool test_active =
@@ -4561,6 +4676,7 @@ void captureHttpStatus() {
       (balance_wait_active ? "BALANCE WAIT" :
        (lqr_direction_test_armed ? "RUNNING" : "STOPPED"));
   snprintf(status.text, sizeof(status.text),
+      "Startup phase: %s / Web prerequisite: %s / FOC=%s attempted=%d\n"
       "State: %s\nLast stop reason: %s\n"
       "Cached AngleY: %.6f deg\nReference: %.6f deg\nDelta: %.6f deg\n"
       "System initialized: %s\n"
@@ -4569,6 +4685,10 @@ void captureHttpStatus() {
       "LQR Test Mode: %s\nLQR Speed Source: %s\n"
       "PS4: %s / %s / motion_ready=%d\nTarget speed: %.4f / yaw command: %.4f V\n"
       "Test active: %s\nTrace samples: Velocity=%u Loop Timing=%u LQR Control=%u\n",
+      startup_phase, startup_web_ready.load() ? "READY" : "WAITING/FAILED",
+      test_system_ready ? "READY" : (foc_initialization_failed ? "FAILED" :
+          (foc_initialization_attempted ? "INITIALIZING" : "NOT_INITIALIZED")),
+      static_cast<int>(foc_initialization_attempted),
       state, last_stop_reason, LQR_angle, angle_zeropoint,
       LQR_angle - angle_zeropoint, test_system_ready ? "yes" : "no",
       static_cast<int>(driver1_initialized), static_cast<int>(sensor1.ready),
@@ -4584,6 +4704,8 @@ void captureHttpStatus() {
       test_active ? "yes" : "no", static_cast<unsigned>(velocity_trace_count),
       static_cast<unsigned>(loop_timing_count),
       static_cast<unsigned>(lqr_control_trace_count));
+  const size_t used = strlen(status.text);
+  ps4_diagnostics.format(status.text + used, sizeof(status.text) - used, kPs4DriveStickDeadzone);
   xQueueOverwrite(http_status_queue, &status);
 }
 
@@ -4596,8 +4718,14 @@ void handleWifiStatusPage() {
   wifi_log_server.sendHeader("Cache-Control", "no-store");
   char resources[280];
   formatHttpResources(resources, sizeof(resources));
+  char preflight[160];
+  snprintf(preflight, sizeof(preflight),
+      "Web preflight: LittleFS=%s WiFi_IP=%s HTTP=%s mDNS=DISABLED\n",
+      http_filesystem_ready ? "READY" : "FAILED",
+      wifi_connection_ready.load() ? "READY" : "WAITING",
+      startup_http_ready.load() ? "LISTENING" : "NOT_READY");
   const String network_status = String("WiFi: connected\nIP: ") +
-      WiFi.localIP().toString() + "\n" + status.text + resources;
+      WiFi.localIP().toString() + "\n" + preflight + status.text + resources;
   wifi_log_server.send(200, "text/plain; charset=utf-8", network_status.c_str());
 }
 
@@ -4622,6 +4750,8 @@ void httpTask(void*) {
                 static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)));
   for (;;) {
     updateWifiLogServer();
+    enforceStartupOutputGate();
+    serviceHttpPs4DiagnosticSerial();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -4657,6 +4787,7 @@ void startWifiHttpServer() {
   }
   wifi_log_server.begin();
   wifi_log_server_started = wifi_log_server.listening();
+  startup_http_ready.store(wifi_log_server_started);
   if (!wifi_log_server_started) {
     wifi_log_server.close(); // Release a socket whose bind/listen failed.
     if (!http_listener_failure_reported) {
@@ -4670,19 +4801,6 @@ void startWifiHttpServer() {
   Serial.println("WiFi trace HTTP server started.");
 }
 
-void startMdns() {
-  if (mdns_attempted) {
-    return;
-  }
-  mdns_attempted = true;
-  if (MDNS.begin("legged-balance")) {
-    MDNS.addService("http", "tcp", 80);
-    mdns_started = true;
-    Serial.println("mDNS: http://legged-balance.local/");
-  } else {
-    Serial.println("mDNS unavailable; use the IP address URL.");
-  }
-}
 
 void formatHttpResources(char* text, size_t capacity) {
   constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -4719,7 +4837,7 @@ void reportStartupFailure(const char* stage) {
       stage, startup_foc_ready.load() ? "READY" : "NOT_READY",
       http_filesystem_ready ? "READY" : "NOT_READY",
       wifi_connection_ready ? "READY" : "NOT_READY",
-      wifi_log_server_started ? "LISTENING" : "NOT_READY",
+      startup_http_ready.load() ? "LISTENING" : "NOT_READY",
       startup_menu_printed ? "ALREADY_PRINTED" : "SUPPRESSED");
 }
 
@@ -4807,12 +4925,15 @@ void updateWifiLogServer() {
       wifi_connection_ready = true;
       wifi_timeout_reported = false;
       startWifiHttpServer();
+      startup_web_ready.store(http_filesystem_ready && wifi_log_server_started);
       maybePrintStartupMenu();
-      if (wifi_log_server_started) startMdns(); // Auxiliary; never gates menu.
+
     } else {
       const bool connection_was_ready = wifi_connection_ready;
       if (wifi_log_server_started) wifi_log_server.close();
       wifi_log_server_started = false;
+      startup_http_ready.store(false);
+      startup_web_ready.store(false);
       wifi_connection_ready = false;
       if (connection_was_ready) {
         wifi_wait_started_ms = now_ms;
@@ -5100,8 +5221,11 @@ void setupPs4Controller() {
 //   PS4.begin(kPs4HostMac);
 //   Serial.printf("PS4 CONTROLLER: initialized (host MAC %s); waiting without blocking.\n",
 //                 kPs4HostMac);
-  PS4.begin();
-  Serial.printf("PS4 CONTROLLER: initialized .\n");
+  ps4_diagnostics.init_attempted = true;
+  ps4_diagnostics.init_ok = PS4.begin(); // Preserve the existing pairing setup.
+  ps4_diagnostics.dirty = true;
+  Serial.printf("PS4 library initialization: %s; controller connection is separate.\n",
+                ps4_diagnostics.init_ok ? "OK" : "FAILED");
 }
 
 
@@ -5293,6 +5417,88 @@ void beginPs4DriveStopping(uint32_t now_ms) {
   stop_speed_abs_max = abs(lqr_speed_for_control);
 }
 
+void servicePs4DiagnosticSerial() {
+  // With HTTP available, its task owns the UART staging buffer. If task/queue
+  // creation failed, this fallback runs only while startup keeps wheels gated.
+  if (http_task_ready.load()) return;
+  const uint32_t now = millis();
+  if (ps4_diagnostic_serial_offset == ps4_diagnostic_serial_size &&
+      ps4_diagnostics.dirty && now - ps4_diagnostic_serial_last_ms >= kPs4ObservationIntervalMs) {
+    ps4_diagnostics.format(ps4_diagnostic_serial, sizeof(ps4_diagnostic_serial),
+                           kPs4DriveStickDeadzone, true);
+    ps4_diagnostic_serial_offset = 0;
+    ps4_diagnostic_serial_size = strlen(ps4_diagnostic_serial);
+    ps4_diagnostic_serial_last_ms = now;
+    ps4_diagnostics.dirty = false;
+    ps4_diagnostics.pending_press = ps4_diagnostics.pending_release = 0;
+  }
+  drainPs4DiagnosticSerial();
+}
+
+void serviceHttpPs4DiagnosticSerial() {
+  const uint32_t now = millis();
+  if (ps4_diagnostic_serial_offset == ps4_diagnostic_serial_size &&
+      now - ps4_diagnostic_serial_last_ms >= kPs4ObservationIntervalMs) {
+    HttpStatus status{};
+    if (xQueuePeek(http_status_queue, &status, 0) == pdTRUE) {
+      const char* observations = strstr(status.text, "PS4 init=");
+      if (observations) {
+        snprintf(ps4_diagnostic_serial, sizeof(ps4_diagnostic_serial), "%s", observations);
+        ps4_diagnostic_serial_offset = 0;
+        ps4_diagnostic_serial_size = strlen(ps4_diagnostic_serial);
+        ps4_diagnostic_serial_last_ms = now;
+      }
+    }
+  }
+  drainPs4DiagnosticSerial();
+}
+
+void drainPs4DiagnosticSerial() {
+  const int room = Serial.availableForWrite();
+  if (room <= 0) return;
+  const size_t count = min(static_cast<size_t>(min(room, 48)),
+      ps4_diagnostic_serial_size - ps4_diagnostic_serial_offset);
+  for (size_t i = 0; i < count; ++i) {
+    Serial.write(static_cast<uint8_t>(ps4_diagnostic_serial[ps4_diagnostic_serial_offset++]));
+  }
+}
+
+const char* ps4CommandName(OperatorCommand command) {
+  switch (command) {
+    case OperatorCommand::Start: return "START";
+    case OperatorCommand::EndTest: return "END_TEST";
+    case OperatorCommand::FullStop: return "FULL_STOP";
+    case OperatorCommand::SoftStop: return "SOFT_STOP";
+    case OperatorCommand::EnableDrivers: return "ENABLE_DRIVERS";
+    case OperatorCommand::CycleMode: return "CYCLE_MODE";
+    case OperatorCommand::LegUp: return "LEG_UP";
+    case OperatorCommand::LegDown: return "LEG_DOWN";
+  }
+  return "UNKNOWN";
+}
+
+const char* ps4CommandRejectionReason(OperatorCommand command) {
+  if (command == OperatorCommand::CycleMode) return "ACTIVE_TEST";
+  if (!test_system_ready) return "FOC_NOT_INITIALIZED";
+  if (emergency_stop_active) return "DRIVERS_DISABLED";
+  if (polarity_test_active) return "POLARITY_TEST";
+  if (balance_wait_active) return "BALANCE_PREPARING";
+  if (lqr_drive_start_pending) return "DRIVE_PENDING";
+  if (lqr_soft_stop_active) return "SOFT_STOP_ACTIVE";
+  if (lqr_auto_drive_active) return "DRIVE_ACTIVE";
+  if (drive_recovery_state != DriveRecoveryState::Inactive) return "DRIVE_RECOVERY";
+  return "ACTIVE_TEST_OR_SAFETY_GATE";
+}
+
+bool executePs4Command(OperatorCommand command) {
+  ps4_packet_command_attempted = true;
+  const char* rejected_reason = ps4CommandRejectionReason(command);
+  const bool accepted = executeOperatorCommand(command); // Existing gates/actions unchanged.
+  ps4_diagnostics.decision(ps4CommandName(command), accepted,
+                           accepted ? "COMMAND_ACCEPTED" : rejected_reason);
+  return accepted;
+}
+
 void resetPs4MotionInput() {
   ps4_drive_speed_request = 0.0f;
   ps4_drive_stick_y = 0;
@@ -5385,18 +5591,22 @@ bool ps4ButtonsReleased(const Ps4InputState& input) {
 void handlePs4Connection(bool connected) {
   if (connected == ps4_was_connected) return;
   ps4_was_connected = connected;
+  ps4_diagnostics.connection(connected);
   ps4_input_initialized = false;
   ps4_controls_released = false;
   // Cancel all drive owners on disconnect, including serial-origin requests.
   if (!connected && (lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
-    executeOperatorCommand(OperatorCommand::SoftStop);
+    executePs4Command(OperatorCommand::SoftStop);
   }
   resetPs4MotionInput();
   setPs4DriveState(Ps4DriveState::OutsideDeadzone);
-  Serial.println(connected ? "PS4 CONTROLLER CONNECTED" : "PS4 CONTROLLER DISCONNECTED");
+  // New serial observations are emitted by the bounded logger, not here.
 }
 
 void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
+  const bool input_changed = !ps4_input_initialized || !ps4InputStatesEqual(input, previous_ps4_input);
+  ps4_diagnostics.observe(input, now_ms);
+  ps4_packet_command_attempted = false;
   const bool buttons_released = ps4ButtonsReleased(input);
   const bool sticks_centered = abs(input.left_stick_x) <= kPs4DriveStickDeadzone &&
       abs(input.left_stick_y) <= kPs4DriveStickDeadzone &&
@@ -5406,18 +5616,18 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
   if (buttons_released && sticks_centered) ps4_controls_released = true;
   const bool edges_allowed = ps4_input_initialized && ps4_controls_released;
   if (input.cross && (!ps4_input_initialized || !previous_ps4_input.cross)) {
-    executeOperatorCommand(OperatorCommand::FullStop);
+    executePs4Command(OperatorCommand::FullStop);
   } else if (edges_allowed && !input.cross) {
     if (input.share && !previous_ps4_input.share && sticks_centered) {
-      executeOperatorCommand(OperatorCommand::EnableDrivers);
+      executePs4Command(OperatorCommand::EnableDrivers);
     } else if (input.triangle && !previous_ps4_input.triangle && sticks_centered) {
-      executeOperatorCommand(OperatorCommand::CycleMode);
+      executePs4Command(OperatorCommand::CycleMode);
     } else if (input.options && !previous_ps4_input.options && sticks_centered) {
-      executeOperatorCommand(OperatorCommand::Start);
+      executePs4Command(OperatorCommand::Start);
     } else if (input.dpad_up && !previous_ps4_input.dpad_up) {
-      executeOperatorCommand(OperatorCommand::LegUp);
+      executePs4Command(OperatorCommand::LegUp);
     } else if (input.dpad_down && !previous_ps4_input.dpad_down) {
-      executeOperatorCommand(OperatorCommand::LegDown);
+      executePs4Command(OperatorCommand::LegDown);
     }
   }
 
@@ -5441,7 +5651,7 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
       ps4_yaw_output = 0.0f;
     } else if (neutral) {
       if (ps4_drive_state == Ps4DriveState::DriveRequested) {
-        executeOperatorCommand(OperatorCommand::SoftStop);
+        executePs4Command(OperatorCommand::SoftStop);
         beginPs4DriveStopping(now_ms);
       } else if (ps4_drive_state == Ps4DriveState::Stopping) {
         const bool complete = !lqr_auto_drive_active && !lqr_drive_start_pending && !lqr_soft_stop_active;
@@ -5460,9 +5670,12 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
       }
     } else if (ps4_drive_state == Ps4DriveState::Neutral && buttons_released) {
       // Pure yaw uses the same stable-start gate with zero forward speed.
+      ps4_packet_command_attempted = true;
       if (requestLqrDrive(ps4_drive_speed_request, ps4_drive_speed_request < 0 ? '<' : '>')) {
+        ps4_diagnostics.decision("DRIVE", true, "STABLE_START_REQUESTED");
         setPs4DriveState(Ps4DriveState::DriveRequested);
       } else {
+        ps4_diagnostics.decision("DRIVE", false, "DRIVE_SAFETY_GATE");
         ps4_motion_ready = false;
         setPs4DriveState(Ps4DriveState::OutsideDeadzone);
       }
@@ -5475,10 +5688,33 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
       ps4_yaw_output += constrain(ps4_yaw_request - ps4_yaw_output,
           -kPs4YawSlewPerUpdate, kPs4YawSlewPerUpdate);
       ps4_drive_target_update_last_ms = now_ms;
+      if (input_changed && !ps4_packet_command_attempted &&
+          (input.left_stick_y != previous_ps4_input.left_stick_y ||
+           input.right_stick_x != previous_ps4_input.right_stick_x)) {
+        ps4_diagnostics.decision("DRIVE_UPDATE", true, "TARGET_SLEW_APPLIED");
+      }
     }
   }
-  if (!ps4_input_initialized || !ps4InputStatesEqual(input, previous_ps4_input)) {
-    printPs4InputDiagnostic(input);
+  // Observe rejected/suppressed inputs without routing them to an actuator.
+  if (input_changed && !ps4_packet_command_attempted) {
+    const bool new_button = (Ps4Diagnostics::buttons(input) &
+        ~Ps4Diagnostics::buttons(previous_ps4_input)) != 0 || !ps4_input_initialized;
+    if (!buttons_released && new_button) {
+      const char* why = !ps4_controls_released ? "WAIT_RELEASE_AFTER_CONNECT" :
+          (!sticks_centered ? "STICKS_NOT_CENTERED" : "UNASSIGNED_OR_HELD_BUTTON");
+      ps4_diagnostics.decision("BUTTON", false, why);
+    } else if (ps4DriveSpeedRequestFromLeftStickY(input.left_stick_y) != 0.0f ||
+               abs(input.right_stick_x) > kPs4DriveStickDeadzone) {
+      if (!can_move || !ps4_motion_ready || ps4_drive_state == Ps4DriveState::Stopping) {
+        const char* why = !test_system_ready ? "FOC_NOT_INITIALIZED" :
+          (emergency_stop_active ? "DRIVERS_DISABLED" :
+           (!lqr_direction_test_armed ? "BALANCE_NOT_RUNNING" :
+            (lqr_test_mode == LqrTestMode::AttitudeOnly ? "ATTITUDE_ONLY" :
+             (drive_recovery_state != DriveRecoveryState::Inactive ? "DRIVE_RECOVERY" :
+              (ps4_drive_state == Ps4DriveState::Stopping ? "STOP_IN_PROGRESS" : "RECENTER_REQUIRED")))));
+        ps4_diagnostics.decision("DRIVE", false, why);
+      }
+    }
   }
   previous_ps4_input = input;
   ps4_input_initialized = true;

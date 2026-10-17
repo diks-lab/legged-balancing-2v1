@@ -6,7 +6,7 @@ import tempfile
 
 source = Path('src/main.cpp').read_text()
 def function(name):
-    match = re.search(r'^void ' + name + r'\([^;]*?\)\s*\{', source, re.M)
+    match = re.search(r'^(?:void|bool) ' + name + r'\([^;]*?\)\s*\{', source, re.M)
     assert match, name
     pos, depth = match.end(), 1
     while depth:
@@ -18,6 +18,7 @@ code = r'''
 #include <cassert>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -87,8 +88,13 @@ struct {
   void setAutoReconnect(bool){}
   void begin(const char*,const char*){assert(http_task_handle);}
 } WiFi;
-bool fail_listen=false, fail_mdns=false;
-int listen_attempts=0, route_count=0, handled=0, help_count=0, dns_attempts=0;
+bool fail_listen=false;
+bool test_system_ready=false, emergency_stop_active=false, fail_foc=false, lose_preflight_during_foc=false;
+int foc_calls=0, gates=0, snapshots=0;
+bool wheel_outputs_enabled=false;
+void gateWheelOutputsOff(){++gates;wheel_outputs_enabled=false;}
+void disableBothDrivers(){gateWheelOutputsOff();}
+int listen_attempts=0, route_count=0, handled=0, help_count=0;
 constexpr int HTTP_GET=1,HTTP_POST=2;
 struct WebServer {
   explicit WebServer(int){}
@@ -100,10 +106,6 @@ struct WebServer {
   void handleClient(){++handled;}
   void send(int,const char*,const char*){}
 };
-struct {
-  bool begin(const char*){++dns_attempts;return !fail_mdns;}
-  void addService(const char*,const char*,int){}
-} MDNS;
 void printHelp(){++help_count;Serial.println("NORMAL OPERATION MENU");}
 void serveWebFile(const char*,const char*){}
 void handleWifiStatusPage(){}
@@ -119,10 +121,27 @@ void handleStopBalanceTest(){}
 start = source.index('class CheckedHttpServer :')
 end = source.index('BLDCMotor motor1(', start)
 code += source[start:end]
+code += r'''
+void captureHttpStatus(){++snapshots;}
+void enforceStartupOutputGate();
+void reportStartupFailure(const char*);
+void initializeRobotHardware(){
+  assert(startup_web_ready.load() && !emergency_stop_active);
+  ++foc_calls;
+  if(lose_preflight_during_foc){
+    startup_web_ready.store(false);wheel_outputs_enabled=true;
+    enforceStartupOutputGate();
+    assert(!wheel_outputs_enabled && startup_foc_gate==StartupFocGate::Aborted);
+    startup_web_ready.store(true); // Even immediate recovery cannot undo an abort.
+  }
+  if(!fail_foc)test_system_ready=true;
+}
+'''
+
 code += '\n'.join(function(n) for n in
-                  ['formatHttpResources', 'printHttpStartupMemory', 'reportStartupFailure',
+                  ['publishStartupPhase','enforceStartupOutputGate','startupHardwareStepAllowed','advanceStartup','formatHttpResources', 'printHttpStartupMemory', 'reportStartupFailure',
                    'maybePrintStartupMenu', 'setupWifiLogServer', 'startWifiHttpServer',
-                   'startMdns', 'updateWifiLogServer'])
+                   'updateWifiLogServer'])
 code += r'''
 void reset(){
   if(http_status_queue)delete http_status_queue;
@@ -130,15 +149,22 @@ void reset(){
   http_status_queue=http_command_queue=nullptr;http_task_handle=nullptr;
   http_task_ready.store(false);fail_task=fail_mount=fail_mode=false;
   fail_queue=queues=deletes=creates=wifi_calls=0;stages.clear();Serial.text.clear();
-  kEnableWifiLogServer=true;startup_foc_ready.store(true);startup_menu_printed=false;
+  kEnableWifiLogServer=true;startup_foc_ready.store(false);startup_menu_printed=false;
+  startup_web_ready.store(false);startup_http_ready.store(false);
+  foc_initialization_attempted=foc_initialization_failed=false;startup_phase="WEB_WAIT";
+  test_system_ready=emergency_stop_active=fail_foc=lose_preflight_during_foc=false;
+  startup_foc_gate.store(StartupFocGate::Waiting);
+  foc_calls=gates=snapshots=0;wheel_outputs_enabled=false;
   http_routes_registered=http_listener_failure_reported=false;
   wifi_connection_ready=wifi_timeout_reported=false;wifi_announced_ip.clear();
   now_ms=wifi_wait_started_ms=wifi_status_last_check_ms=0;
-  wifi_log_server_started=mdns_started=mdns_attempted=false;
+  wifi_log_server_started=false;
   wifi_log_server.close();WiFi.connection_status=0;WiFi.ip.value=0;
-  fail_listen=fail_mdns=false;listen_attempts=route_count=handled=help_count=dns_attempts=0;
+  fail_listen=false;listen_attempts=route_count=handled=help_count=0;
 }
-void tick(){now_ms+=1000;updateWifiLogServer();}
+void tick(){
+  now_ms+=1000;updateWifiLogServer();advanceStartup();maybePrintStartupMenu();
+}
 void connect(uint32_t ip=0xc0a8012a){WiFi.connection_status=WL_CONNECTED;WiFi.ip.value=ip;}
 int main(){
   reset();
@@ -165,23 +191,22 @@ int main(){
   // A mounted filesystem and created task alone never trigger the menu.
   reset();setupWifiLogServer();
   for(int i=0;i<4;++i)tick();
-  assert(help_count==0 && listen_attempts==0);
+  assert(help_count==0 && listen_attempts==0 && foc_calls==0 && !wheel_outputs_enabled);
   tick();assert(Serial.text.find("stage=WIFI_TIMEOUT")!=String::npos);
   const auto timeout_log=Serial.text;
   tick();assert(Serial.text==timeout_log); // No repeated timeout spam.
   // Recovery after a startup timeout can complete startup exactly once.
-  connect();fail_mdns=true;tick();
+  connect();tick();
   assert(help_count==1 && startup_menu_printed && wifi_log_server_started && handled>0);
-  assert(!mdns_started && dns_attempts==1);
+  assert(foc_calls==1 && startup_foc_ready && test_system_ready);
   const auto done=Serial.text.find("接続完了");
   const auto ip=Serial.text.find("WiFi DHCP IP: 192.168.1.42");
   const auto url=Serial.text.find("HTTP access URL: http://192.168.1.42/");
   const auto listener=Serial.text.find("WiFi trace HTTP server started.");
   const auto menu=Serial.text.find("NORMAL OPERATION MENU");
-  const auto dns_failure=Serial.text.find("mDNS unavailable");
   assert(done!=String::npos && ip!=String::npos && url!=String::npos);
-  assert(listener!=String::npos && menu!=String::npos && dns_failure!=String::npos);
-  assert(done<ip && ip<url && url<listener && listener<menu && menu<dns_failure);
+  assert(listener!=String::npos && menu!=String::npos);
+  assert(done<ip && ip<url && url<listener && listener<menu);
   for(int i=0;i<4;++i)tick();
   assert(help_count==1 && listen_attempts==1);
   // IP change and reconnect announce the numeric URL again, without another menu.
@@ -199,26 +224,26 @@ int main(){
   // A cached IP without link association is not readiness either.
   reset();setupWifiLogServer();WiFi.ip.value=0xc0a8012a;
   for(int i=0;i<5;++i)tick();
-  assert(help_count==0 && listen_attempts==0);
+  assert(help_count==0 && listen_attempts==0 && foc_calls==0 && !wheel_outputs_enabled);
   assert(Serial.text.find("stage=WIFI_TIMEOUT")!=String::npos);
   assert(Serial.text.find("HTTP access URL:")==String::npos);
   // Link association with no DHCP address is not readiness.
   reset();setupWifiLogServer();WiFi.connection_status=WL_CONNECTED;
   for(int i=0;i<5;++i)tick();
-  assert(help_count==0 && listen_attempts==0);
+  assert(help_count==0 && listen_attempts==0 && foc_calls==0 && !wheel_outputs_enabled);
   assert(Serial.text.find("stage=IP_TIMEOUT")!=String::npos);
   assert(Serial.text.find("http://0.0.0.0/")==String::npos);
   connect();tick();assert(help_count==1);
   // A failed listen must not set the started flag; retries register routes once.
   reset();setupWifiLogServer();connect();fail_listen=true;tick();
-  assert(help_count==0 && !wifi_log_server_started && !wifi_log_server.listening());
+  assert(help_count==0 && !wifi_log_server_started && !wifi_log_server.listening() && foc_calls==0);
   assert(Serial.text.find("stage=HTTP_LISTEN")!=String::npos);
   const auto routes=route_count;tick();assert(listen_attempts==2 && route_count==routes);
   fail_listen=false;tick();assert(help_count==1 && wifi_log_server_started);
   assert(route_count==routes);
   // Missing filesystem, failed queues/task or failed FOC cannot produce a menu.
   reset();fail_mount=true;setupWifiLogServer();connect();tick();
-  assert(wifi_log_server_started && help_count==0);
+  assert(wifi_log_server_started && help_count==0 && foc_calls==0 && !wheel_outputs_enabled);
   assert(Serial.text.find("stage=LITTLEFS_MOUNT")!=String::npos);
   for(int failed=1;failed<=2;++failed){
     reset();fail_queue=failed;setupWifiLogServer();
@@ -226,14 +251,27 @@ int main(){
   }
   reset();fail_task=true;setupWifiLogServer();
   assert(help_count==0 && Serial.text.find("stage=HTTP_TASK")!=String::npos);
-  reset();startup_foc_ready.store(false);reportStartupFailure("LEFT_FOC");
-  setupWifiLogServer();connect();tick();
-  assert(help_count==0 && Serial.text.find("stage=LEFT_FOC state=FAILED foc=NOT_READY")!=String::npos);
+  reset();fail_foc=true;setupWifiLogServer();connect();tick();
+  assert(help_count==0 && foc_calls==1 && foc_initialization_failed && !test_system_ready);
+  for(int i=0;i<3;++i)tick();
+  assert(foc_calls==1 && !wheel_outputs_enabled); // No automatic retry after hardware failure.
+  reset();setupWifiLogServer();emergency_stop_active=true;connect();tick();
+  assert(foc_calls==0 && !wheel_outputs_enabled && help_count==0);
+  assert(String(startup_phase)=="FOC_INHIBITED_FULL_STOP");
   reset();fail_mode=true;setupWifiLogServer();
   assert(help_count==0 && Serial.text.find("stage=WIFI_MODE")!=String::npos);
+  reset();setupWifiLogServer();lose_preflight_during_foc=true;connect();tick();
+  assert(foc_calls==1 && !test_system_ready && !startup_foc_ready && foc_initialization_failed);
+  assert(!wheel_outputs_enabled && help_count==0);
+  tick();assert(foc_calls==1); // No reinitialization after a latched startup abort.
+  // A disconnect after startup commit does not introduce a runtime stop condition.
+  reset();setupWifiLogServer();connect();tick();
+  assert(startup_foc_gate==StartupFocGate::Ready);
+  wheel_outputs_enabled=true;startup_web_ready.store(false);enforceStartupOutputGate();
+  assert(wheel_outputs_enabled && startup_foc_gate==StartupFocGate::Ready);
   reset();kEnableWifiLogServer=false;setupWifiLogServer();
   assert(help_count==0 && Serial.text.find("stage=WIFI_DISABLED")!=String::npos);
-  reset();puts("PASS: HTTP static stack/memory diagnostics; FOC/FS/queues/task/link/IP/listen gates, timeouts, mDNS failure, recovery, one-shot startup menu");
+  reset();puts("PASS: HTTP static stack/memory diagnostics; FOC/FS/queues/task/link/IP/listen gates, timeouts, Web before FOC, no mDNS, recovery, one-shot startup menu");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='http-startup-') as directory:
@@ -244,9 +282,28 @@ with tempfile.TemporaryDirectory(prefix='http-startup-') as directory:
     subprocess.run([str(binary)], check=True)
 
 setup = function('setup')
-assert 'printHelp();' not in setup
-assert setup.count('return;') == setup.count('reportStartupFailure(startup_stage);')
-assert setup.index('startup_foc_ready.store(true)') > setup.index('const int motor2FocStatus')
+assert 'printHelp();' not in setup and 'setupWifiLogServer();' in setup
+assert 'initFOC' not in setup and 'sensor1.begin' not in setup
+hardware = function('initializeRobotHardware')
+assert hardware.count('return;') == hardware.count('reportStartupFailure(startup_stage);') + hardware.count('if (!startupHardwareStepAllowed()) return;')
+assert 'startup_foc_ready.store(true)' not in hardware
+assert function('advanceStartup').index('initializeRobotHardware();') < function('advanceStartup').index('startup_foc_ready.store(true)')
+assert 'MDNS.begin' not in source and 'ESPmDNS.h' not in source
+assert '.local/' not in source
+loop = function('loop')
+assert loop.index('updatePs4Controller();') < loop.index('advanceStartup();')
+assert loop.index('serviceHttpRequests();') < loop.index('advanceStartup();')
+assert 'PS4' not in function('advanceStartup') # No PS4-connection prerequisite.
+
 # Waiting/retrying remains outside the control loop and stop handlers.
 update = function('updateWifiLogServer')
 assert 'while (' not in update and 'delay(' not in update
+# HTTP observes queued copies and atomics, never controller objects or I2C.
+for name in ['httpTask', 'handleWifiStatusPage', 'serviceHttpPs4DiagnosticSerial']:
+    text = function(name)
+    assert 'initializeRobotHardware(' not in text
+    assert 'ps4_diagnostics.' not in text
+    for hardware_access in ['I2Cone', 'I2Ctwo', 'sensor1.', 'sensor2.', 'motor1.', 'motor2.', 'mpu6050.']:
+        assert hardware_access not in text, (name, hardware_access)
+for hardware_read in ['getAngle(', 'getVelocity(', 'beginTransmission(', 'requestFrom(', 'loopFOC(', 'initFOC(']:
+    assert hardware_read not in function('captureHttpStatus')

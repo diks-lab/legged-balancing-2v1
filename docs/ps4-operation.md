@@ -104,3 +104,54 @@ C3・レーザー・音声は対象外。既存PRのマージと実機への書�
 
 ペアリング初期化は基準版の引数なし `PS4.begin()` をそのまま維持する。
 コメント内のホストMAC指定の再有効化やアドレス変更は行っていない。
+
+## FOC前のPS4確認と観測ログ
+
+現在はWebの事前確認をFOCより先に行う。起動順序・出力遮断・I2C所有権は
+[web-files.md](web-files.md) を参照。PS4接続をFOC開始の必須条件にはしない。
+既存の `PS4.begin()` は接続を待たず、従来からFOC開始前の接続判定もなかったため、
+この仕様を保持する。引数なしの初期化とペアリング設定、ボタン/スティック割り当ては不変。
+
+Webの `/api/status` とUSBシリアルで次を確認できる。
+
+| 表示 | 意味 |
+|---|---|
+| `PS4 init=NOT_ATTEMPTED/OK/FAILED` | `PS4.begin()` の呼び出しと戻り値。接続済みという意味ではない |
+| `connected`、`event`、`connect/disconnect` | 実際に観測した接続状態、最後の接続/切断イベント、累積回数 |
+| `sample_ms` | 最後に入力を観測した起動後ミリ秒。同期初期化中は過去の値になる |
+| `raw LX/LY/RX/RY`、`L2/R2` | 左右スティック/トリガーの生値 |
+| `neutral_left/right` | 各スティックのX/Yが両方±10以内なら1 |
+| `buttons held` | 現在押されているボタンの名前 |
+| `last_press/last_release`、`events` | 最後に観測した押下/解放とボタン状態変化回数 |
+| `action/result/reason` | 入力から要求された操作と、受理/拒否、その理由 |
+| `decision`、`accepted/rejected` | 診断上の判定通番と累積回数。実機動作の成功回数ではない |
+
+`COMMAND_ACCEPTED` は既存の共通指令処理が受理したこと、
+`STABLE_START_REQUESTED` は既存の安定開始ゲートへ要求したことを示す。
+`TARGET_SLEW_APPLIED` も目標値への反映であり、走行・旋回が実機で成功したという意味ではない。
+
+主な拒否理由：
+
+- `FOC_NOT_INITIALIZED`：FOC未完了。Web待機中やハードウェア初期化失敗後にも入力は観測する。
+- `WAIT_RELEASE_AFTER_CONNECT` / `RECENTER_REQUIRED`：解放・中立確認待ち。
+- `STICKS_NOT_CENTERED`：中立で受け付けるボタン操作を、スティックが倒れた状態で要求した。
+- `UNASSIGNED_OR_HELD_BUTTON`：割り当てなし、または新たな押下エッジとして処理しない入力。
+- `DRIVERS_DISABLED` / `BALANCE_NOT_RUNNING` / `BALANCE_PREPARING`：既存の実行状態による拒否。
+- `ATTITUDE_ONLY` / `DRIVE_PENDING` / `SOFT_STOP_ACTIVE` / `STOP_IN_PROGRESS` /
+  `DRIVE_ACTIVE` / `DRIVE_RECOVERY`：モードや走行・停止・復帰状態による拒否。
+- `POLARITY_TEST` / `ACTIVE_TEST` / `DRIVE_SAFETY_GATE` / `ACTIVE_TEST_OR_SAFETY_GATE`：
+  既存の試験・安全ゲートによる拒否。判定は既存処理を呼び、診断のための別の制御実装は持たない。
+
+ログは固定長の最新状態とカウンターで保持し、無制限の履歴は作らない。
+短時間の変化は集約され、Webは最後の押下/解放を保持する。全パケットを保存するロガーではない。
+新規のシリアル診断は500ms以上の間隔で、空き送信容量と1回最大48バイトを上限に出力する。
+HTTPタスクが使える通常時は、制御側で新規UART出力を行わない。
+HTTPタスク生成失敗時の代替出力も車輪遮断中だけで、送信待ちやflushを追加しない。
+既存の操作結果・停止トレースのログは残るので、全体の制御周期は実機計測が必要。
+
+FOC完了直後は解放確認をやり直す。未初期化時の拒否入力や、押し続けたOptionsが
+FOC完了後に新たな開始操作へ化けないようにする。×の全停止は従来どおり優先する。
+
+FOC前の×で起動を抑止した場合は、Shareも既存の「未初期化では再有効化しない」ゲートで
+拒否される。FOCを実行するには機器の再起動が必要。解除用の新しい割り当てや、停止ラッチの
+自動解除は追加していない。

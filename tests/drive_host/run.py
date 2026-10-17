@@ -26,10 +26,12 @@ prelude = r'''
 #include "Arduino.h"
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
+#include "Ps4Diagnostics.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "common/pid.h"
 #include <atomic>
+std::atomic<bool> http_task_ready{false};
 #include <algorithm>
 #include <cassert>
 #include <iostream>
@@ -78,6 +80,10 @@ struct WebServer {
   void sendContent(const char* data){body+=data;}
   void streamFile(File,const char*) {status=200;body="asset";}
 };
+struct {
+  bool ok=false;int begins=0;
+  bool begin(){++begins;return ok;} // No pairing-argument overload is allowed here.
+} PS4;
 struct DriveTestMotor {
   explicit DriveTestMotor(int) {}
   float shaft_angle=0,shaft_velocity=0,target=0,current_sp=0;
@@ -131,6 +137,7 @@ names = [
     'serveWebFile','cycleLqrSpeedSource','resetPs4MotionInput','executeOperatorCommand',
     'applyPs4Steering','ps4ButtonsReleased','handlePs4Connection','processPs4Input',
     'ps4InputStatesEqual','ps4DriveSpeedRequestFromLeftStickY',
+    'setupPs4Controller','servicePs4DiagnosticSerial','serviceHttpPs4DiagnosticSerial','drainPs4DiagnosticSerial','executePs4Command','ps4CommandName','ps4CommandRejectionReason',
     'updateWheelVelocityDiagnostic',
 ]
 # No control behavior is stubbed: these functions only print or store logs.
@@ -160,7 +167,7 @@ void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
   resetLqrTestState(); cancelBalanceWait();
   lqr_test_mode=mode;
-  test_system_ready=true; emergency_stop_active=false;
+  test_system_ready=true; startup_foc_ready.store(true); emergency_stop_active=false;
   motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=4;
   lqr_diagnostic_armed=true; lqr_direction_test_armed=true;
   LQR_angle=LQR_gyro=LQR_speed=LQR_distance=0;
@@ -503,6 +510,74 @@ int main(){
   http_trace_request.store(1);http_trace_kind=2;
   assert(traceDownloadBlocked(3));assert(http_trace_kind==2);
   http_trace_request.store(0);
+
+
+  // PS4 library init result and actual connection are distinct diagnostic facts.
+  setupCase();ps4_diagnostics=Ps4Diagnostics{};PS4.ok=false;
+  setupPs4Controller();assert(ps4_diagnostics.init_attempted && !ps4_diagnostics.init_ok);
+  assert(!ps4_diagnostics.connected && PS4.begins==1);
+  PS4.ok=true;setupPs4Controller();assert(ps4_diagnostics.init_ok && !ps4_diagnostics.connected);
+  stopBalanceTest();test_system_ready=false;startup_foc_ready.store(false);
+  ps4_was_connected=false;handlePs4Connection(true);
+  assert(ps4_diagnostics.connected && ps4_diagnostics.connects==1);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.options=true;processPs4Input(packet,nowMs+=50);
+  assert(!balance_wait_active && !lqr_direction_test_armed);
+  assert(std::string(ps4_diagnostics.action)=="START");
+  assert(std::string(ps4_diagnostics.result)=="REJECTED");
+  assert(std::string(ps4_diagnostics.reason)=="FOC_NOT_INITIALIZED");
+  assert(ps4_diagnostics.last_press & (1u<<10));
+  packet={};processPs4Input(packet,nowMs+=50);
+  assert(ps4_diagnostics.last_release & (1u<<10));
+  packet.left_stick_x=-128;packet.left_stick_y=-127;
+  packet.right_stick_x=127;packet.right_stick_y=-11;
+  packet.l2=64;packet.r2=255;processPs4Input(packet,nowMs+=50);
+  captureHttpStatus();handleWifiStatusPage();
+  assert(wifi_log_server.body.find("PS4 init=OK connected=1")!=String::npos);
+  assert(wifi_log_server.body.find("LX=-128 LY=-127 RX=127 RY=-11")!=String::npos);
+  assert(wifi_log_server.body.find("neutral_left/right=0/0")!=String::npos);
+  assert(wifi_log_server.body.find("reason=FOC_NOT_INITIALIZED")!=String::npos);
+  assert(wifi_log_server.body.find("last_release=Options")!=String::npos);
+  // Disconnection events retain counters and release the raw buttons/state.
+  handlePs4Connection(false);
+  assert(!ps4_diagnostics.connected && ps4_diagnostics.disconnects==1);
+  captureHttpStatus();handleWifiStatusPage();
+  assert(wifi_log_server.body.find("event=DISCONNECTED")!=String::npos);
+  // New observations must never block on UART capacity or write an unbounded burst.
+  ps4_diagnostic_serial_offset=ps4_diagnostic_serial_size=0;
+  ps4_diagnostic_serial_last_ms=0;nowMs+=1000;Serial.output.clear();Serial.room=0;
+  ps4_diagnostics.dirty=true;servicePs4DiagnosticSerial();assert(Serial.output.empty());
+  const auto staged=ps4_diagnostic_serial_size;
+  Serial.room=5;servicePs4DiagnosticSerial();assert(Serial.output.size()==5);
+  Serial.room=128;servicePs4DiagnosticSerial();assert(Serial.output.size()<=53);
+  for(int i=0;i<30;++i)servicePs4DiagnosticSerial();
+  assert(Serial.output.size()==staged && Serial.output.find("event=DISCONNECTED")!=String::npos);
+  ps4_diagnostics.dirty=true;const auto count=Serial.output.size();
+  servicePs4DiagnosticSerial();assert(Serial.output.size()==count); // Still inside 500 ms limit.
+  Serial.room=128;
+
+  // After HTTP task publication, the control loop performs no UART diagnostic I/O.
+  http_task_ready.store(true);ps4_diagnostics.dirty=true;nowMs+=1000;
+  const auto before_io=Serial.output.size();servicePs4DiagnosticSerial();
+  assert(Serial.output.size()==before_io);
+  captureHttpStatus();serviceHttpPs4DiagnosticSerial();
+  assert(Serial.output.size()>before_io && Serial.output.size()<=before_io+48);
+  for(int i=0;i<30;++i)serviceHttpPs4DiagnosticSerial();
+  assert(Serial.output.find("PS4 init=OK connected=0")!=String::npos);
+  http_task_ready.store(false);
+
+  // Longest named button sets and decision data must fit in the Web status copy.
+  setupCase();ps4_diagnostics=Ps4Diagnostics{};ps4_diagnostics.init_attempted=ps4_diagnostics.init_ok=true;
+  packet={};packet.cross=packet.circle=packet.square=packet.triangle=true;
+  packet.dpad_up=packet.dpad_down=packet.dpad_left=packet.dpad_right=true;
+  packet.l1=packet.r1=packet.options=packet.share=packet.ps_button=true;
+  ps4_diagnostics.observe(packet,nowMs);ps4_diagnostics.observe({},nowMs+1);
+  ps4_diagnostics.observe(packet,nowMs+2);
+  ps4_diagnostics.decision("ENABLE_DRIVERS",false,"ACTIVE_TEST_OR_SAFETY_GATE");
+  startup_phase="FOC_INHIBITED_FULL_STOP";
+  captureHttpStatus();handleWifiStatusPage();
+  assert(wifi_log_server.body.find("last_press=Cross,Circle,Square,Triangle,Up,Down,Left,Right,L1,R1,Options,Share,PS")!=String::npos);
+  assert(wifi_log_server.body.find("reason=ACTIVE_TEST_OR_SAFETY_GATE accepted/rejected=0/1\n")!=String::npos);
 
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);
