@@ -58,6 +58,14 @@ struct { int status(){return WL_CONNECTED;}
   struct IP { String toString(){return "127.0.0.1";} };
   IP localIP(){return {};}
 } WiFi;
+struct File {
+  bool exists=false, directory=false;
+  explicit operator bool() const {return exists;}
+  bool isDirectory() const {return directory;}
+};
+struct { File file{}; int opens=0;
+  File open(const char*,const char*) {++opens;return file;}
+} LittleFS;
 struct WebServer {
   explicit WebServer(int) {}
   int status=0;std::string body;
@@ -67,6 +75,7 @@ struct WebServer {
   void setContentLength(int){}
   void send(int code,const char*,const char* data){status=code;body=data;}
   void sendContent(const char* data){body+=data;}
+  void streamFile(File,const char*) {status=200;body="asset";}
 };
 struct DriveTestMotor {
   explicit DriveTestMotor(int) {}
@@ -78,6 +87,7 @@ struct DriveTestMotor {
 struct DriveTestDriver {
   int en; DriveTestDriver(int,int,int,int e):en(e){}
   void disable(){digitalWrite(en,LOW);}
+  void enable(){digitalWrite(en,HIGH);}
   void setPwm(float,float,float){}
 };
 struct MPU6050 {
@@ -117,11 +127,18 @@ names = [
     'stopForActualFall','traceDownloadBlocked','beginCsvResponse','sendTraceBusyResponse',
     'handleVelocityTraceDownload','handleLoopTimingTraceDownload','handleLqrControlTraceDownload',
     'captureHttpStatus','serviceHttpRequests','handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','enqueueHttpCommand',
-    'cycleLqrSpeedSource',
+    'serveWebFile','cycleLqrSpeedSource','resetPs4MotionInput','executeOperatorCommand',
+    'applyPs4Steering','ps4ButtonsReleased','handlePs4Connection','processPs4Input',
+    'ps4InputStatesEqual','ps4DriveSpeedRequestFromLeftStickY',
     'updateWheelVelocityDiagnostic',
 ]
 # No control behavior is stubbed: these functions only print or store logs.
 stubs = r'''
+float legCommand=-1;int legWrites=0;
+void moveBothLegsToPercent(float x){legCommand=x;++legWrites;}
+void printPs4InputDiagnostic(const Ps4InputState&){}
+void printPs4DriveStopDiagnostic(const Ps4InputState&,bool,bool,uint32_t){}
+void printPs4DriveStopSummary(uint32_t){}
 void printLqrDriveSnapshot(const char*){}
 void printLqrDriveSignTrace(const char*){}
 void printLqrStopTrace(const char*){}
@@ -213,11 +230,11 @@ int main(){
     near(lqr_target_speed,sign*.15f); // original 0.03 -> 0.05 rad decel window
     LQR_distance=sign*.051f;step(sign*.2f);
     assert(!lqr_auto_drive_active && lqr_soft_stop_active && lqr_target_speed==0);
-    assert(sign*speed_direct_control<0 && sign*test_LQR_u<0);
+    assert(sign*speed_direct_control>0 && sign*test_LQR_u>0);
     for(int i=0;i<200 && lqr_soft_stop_active;++i)step();
     assert(!lqr_soft_stop_active);near(distance_zeropoint,LQR_distance);
     setupCase();start(sign);requestLqrSoftStop();step(sign*.2f);
-    assert(lqr_soft_stop_active && sign*speed_direct_control<0);
+    assert(lqr_soft_stop_active && sign*speed_direct_control>0);
   }
   // Preserve both zero-crossing and sustained-low-speed stop completions.
   setupCase();start(1);step(.2f);requestLqrSoftStop();
@@ -342,6 +359,139 @@ int main(){
   captureHttpStatus();handleWifiStatusPage();
   assert(wifi_log_server.body.find("System initialized: no")!=String::npos);
   assert(wifi_log_server.body.find("fault=1")!=String::npos);
+
+  // Missing/unmounted Web assets do not mutate motor or balance state.
+  setupCase();http_filesystem_ready=false;
+  serveWebFile("/index.html","text/html");
+  assert(wifi_log_server.status==503 && LittleFS.opens==0);
+  assert(lqr_direction_test_armed && !emergency_stop_active && pins[27] && pins[32]);
+  http_filesystem_ready=true;LittleFS.file={false,false};
+  serveWebFile("/index.html","text/html");assert(wifi_log_server.status==404);
+  assert(lqr_direction_test_armed && lqr_target_speed==0);
+  LittleFS.file={true,false};serveWebFile("/index.html","text/html");assert(wifi_log_server.status==200);
+  for(auto mode:{LqrTestMode::Full,LqrTestMode::AttitudeSpeed}){
+    for(float sign:{-1.0f,1.0f}){
+      setupCase(mode);start(sign);requestLqrSoftStop();step(sign*.2f);
+      assert(sign*speed_direct_control>0 && lqr_direction_test_armed);
+      near(speed_direct_control,-speed_control);
+    }
+  }
+  // Mode selection is available on PS4, preserving the existing boot mode.
+  setupCase(LqrTestMode::AttitudeOnly);stopBalanceTest();ps4_was_connected=false;
+  Ps4InputState modePacket{};handlePs4Connection(true);
+  processPs4Input(modePacket,nowMs+=50);modePacket.triangle=true;
+  processPs4Input(modePacket,nowMs+=50);assert(lqr_test_mode==LqrTestMode::Full);
+  processPs4Input(modePacket,nowMs+=50);assert(lqr_test_mode==LqrTestMode::Full);
+  // PS4 startup: connection and held buttons/sticks never start balancing.
+  setupCase();stopBalanceTest();ps4_was_connected=false;
+  Ps4InputState packet{};
+  handlePs4Connection(true);packet.options=true;packet.left_stick_y=-127;
+  for(int i=0;i<5;++i)processPs4Input(packet,nowMs+=50);
+  assert(!balance_wait_active && !lqr_direction_test_armed && !lqr_drive_start_pending);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.options=true;processPs4Input(packet,nowMs+=50);
+  assert(balance_wait_active && !lqr_drive_start_pending);
+  const auto prepare=balance_prepare_start_ms;
+  for(int i=0;i<5;++i)processPs4Input(packet,nowMs+=50);
+  assert(balance_prepare_start_ms==prepare); // held Options did not restart prepare
+  // Stick held during prepare cannot become a request at AUTO START.
+  packet.options=false;packet.left_stick_y=-127;
+  processPs4Input(packet,nowMs+=50);
+  lqr_direction_test_armed=true;balance_wait_active=false;
+  processPs4Input(packet,nowMs+=50);assert(!lqr_drive_start_pending);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.left_stick_y=-127;processPs4Input(packet,nowMs+=50);
+  assert(lqr_drive_start_pending && ps4_drive_state==Ps4DriveState::DriveRequested);
+  // Neutral cancels pending requests, preserving balance.
+  packet={};processPs4Input(packet,nowMs+=50);
+  assert(!lqr_drive_start_pending && lqr_direction_test_armed);
+  processPs4Input(packet,nowMs+=50);
+  // Neutral/deadzone and held buttons cannot initiate a drive.
+  setupCase();handlePs4Connection(false);handlePs4Connection(true);
+  packet={};packet.left_stick_y=10;packet.right_stick_x=-10;
+  processPs4Input(packet,nowMs+=50);assert(!lqr_drive_start_pending);
+  packet.circle=true;packet.left_stick_y=-127;
+  processPs4Input(packet,nowMs+=50);assert(!lqr_drive_start_pending);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.left_stick_y=-127;processPs4Input(packet,nowMs+=50);
+  assert(lqr_drive_start_pending);
+  // A rejected repeated start must not change an active drive's state/ownership.
+  startPendingLqrDrive();
+  assert(!executeOperatorCommand(OperatorCommand::Start));
+  assert(lqr_auto_drive_active && ps4_drive_state==Ps4DriveState::DriveRequested);
+  assert(!executeOperatorCommand(OperatorCommand::EnableDrivers));
+  handlePs4Connection(false);
+  assert(!lqr_auto_drive_active && !lqr_drive_start_pending && lqr_soft_stop_active);
+  // Pending cancellation on disconnect, including a serial-origin request.
+  setupCase();handlePs4Connection(true);assert(requestLqrDrive(.05f,'>'));
+  handlePs4Connection(false);assert(!lqr_drive_start_pending && !lqr_auto_drive_active);
+  // Both drive signs use the common gate and neutral performs a soft stop.
+  for(int direction:{-127,127}){
+    setupCase();handlePs4Connection(false);handlePs4Connection(true);
+    packet={};processPs4Input(packet,nowMs+=50);
+    packet.left_stick_y=direction;processPs4Input(packet,nowMs+=50);
+    assert(lqr_drive_start_pending);
+    startPendingLqrDrive();near(lqr_target_speed,direction<0?.05f:-.05f);
+    lqr_speed_for_control=direction<0?.2f:-.2f;
+    packet={};processPs4Input(packet,nowMs+=50);
+    assert(lqr_soft_stop_active && lqr_target_speed==0 && lqr_direction_test_armed);
+    near(ps4_yaw_output,0);assert(pins[27] && pins[32]);
+    step(direction<0?.2f:-.2f);
+    assert((direction<0 ? 1:-1)*speed_direct_control>0); // retain verified feedback sign
+  }
+  // Pure yaw shares the stable-start gate; saturation preserves common torque.
+  setupCase();handlePs4Connection(false);handlePs4Connection(true);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.right_stick_x=127;processPs4Input(packet,nowMs+=50);
+  assert(lqr_drive_start_pending && lqr_drive_pending_speed==0);
+  startPendingLqrDrive();
+  for(int i=0;i<20;++i)processPs4Input(packet,nowMs+=50);
+  near(ps4_yaw_output,.1f);
+  float turnRight=0,turnLeft=0;
+  test_LQR_u=.2f;applyPs4Steering(turnRight,turnLeft);
+  near(turnRight,.1f);near(turnLeft,.3f);
+  test_LQR_u=.98f;applyPs4Steering(turnRight,turnLeft);
+  near(turnRight,.96f);near(turnLeft,1);near((turnRight+turnLeft)/2,.98f);
+  test_LQR_u=1.5f;applyPs4Steering(turnRight,turnLeft);near(turnRight,1);near(turnLeft,1);
+  packet.right_stick_x=-127;
+  for(int i=0;i<25;++i)processPs4Input(packet,nowMs+=50);
+  assert(ps4_yaw_output<0);
+  // Disconnect releases both axes and pending/active commands; reconnect held is inert.
+  handlePs4Connection(false);near(ps4_drive_speed_request,0);near(ps4_yaw_output,0);
+  assert(!lqr_auto_drive_active && !lqr_drive_start_pending);
+  handlePs4Connection(true);
+  processPs4Input(packet,nowMs+=50);assert(!lqr_drive_start_pending);
+  // Explicit full stop gates outputs, disables drivers, and needs separate re-enable.
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.cross=true;processPs4Input(packet,nowMs+=50);
+  assert(emergency_stop_active && !pins[27] && !pins[32] && !lqr_direction_test_armed);
+  assert(std::string(last_stop_reason)=="DISARM");
+  packet.options=true;processPs4Input(packet,nowMs+=50);assert(!balance_wait_active);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.options=true;processPs4Input(packet,nowMs+=50);assert(!balance_wait_active);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.share=true;processPs4Input(packet,nowMs+=50);
+  assert(!emergency_stop_active && pins[27] && pins[32] && !balance_wait_active);
+  near(right_target_voltage,0);near(left_target_voltage,0);
+  packet={};processPs4Input(packet,nowMs+=50);
+  packet.options=true;processPs4Input(packet,nowMs+=50);assert(balance_wait_active);
+  // Leg actions are edges, retain the original bounds, and are blocked in motion.
+  setupCase();handlePs4Connection(false);handlePs4Connection(true);
+  packet={};processPs4Input(packet,nowMs+=50);ps4_leg_extension_percent=0;legWrites=0;
+  packet.dpad_up=true;
+  for(int i=0;i<5;++i)processPs4Input(packet,nowMs+=50);
+  assert(legWrites==1 && legCommand==10);
+  for(int i=0;i<5;++i){packet={};processPs4Input(packet,nowMs+=50);packet.dpad_up=true;processPs4Input(packet,nowMs+=50);}
+  assert(legCommand==30 && legWrites==3);
+  packet={};processPs4Input(packet,nowMs+=50);packet.dpad_down=true;processPs4Input(packet,nowMs+=50);
+  assert(legCommand==20);
+  lqr_soft_stop_active=true;packet={};processPs4Input(packet,nowMs+=50);
+  packet.dpad_down=true;processPs4Input(packet,nowMs+=50);assert(legCommand==20);
+  // Stable CSV copies remain independent if the robot starts after capture.
+  setupCase();stopBalanceTest();velocity_trace_count=1;velocity_trace[0].elapsed_ms=876;
+  assert(!traceDownloadBlocked());velocity_trace[0].elapsed_ms=999;
+  assert(http_trace_snapshot.velocity[0].elapsed_ms==876);
+
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);
   updateLqrControlTrace(0,0,true);
@@ -349,7 +499,7 @@ int main(){
   near(sample.angle_control+sample.gyro_control+sample.distance_control+sample.speed_control,sample.lqr_u);
   Serial.output.clear();printLqrStatus();
   assert(Serial.output.find("speed_control=0.000000")!=std::string::npos);
-  std::cout<<"PASS: production start/gates, terms/signs, both drive directions, deceleration, cancel/recovery, faults/fall, mode return, logs, fall CSV retention/Web reason/early gating\n";
+  std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, immutable CSV and Web status\n";
 }
 '''
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))

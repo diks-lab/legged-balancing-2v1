@@ -225,6 +225,15 @@ struct Ps4InputState {
   bool ps_button;
 };
 
+enum class OperatorCommand { Start, EndTest, FullStop, SoftStop, EnableDrivers, CycleMode, LegUp, LegDown };
+bool executeOperatorCommand(OperatorCommand command);
+// New steering command is bounded within the existing total wheel voltage limit.
+constexpr float kPs4YawVoltage = 0.10f;
+constexpr float kPs4YawSlewPerUpdate = 0.01f;
+float ps4_yaw_request = 0.0f;
+float ps4_yaw_output = 0.0f;
+bool ps4_controls_released = false;
+bool ps4_motion_ready = false;
 bool ps4_was_connected = false;
 bool ps4_input_initialized = false;
 uint32_t ps4_last_diagnostic_ms = 0;
@@ -713,6 +722,8 @@ bool motionCommandAllowed();
 // Test / monitor
 void setupPs4Controller();
 void updatePs4Controller();
+void applyPs4Steering(float& right_output, float& left_output);
+void resetPs4MotionInput();
 float ps4DriveSpeedRequestFromLeftStickY(int stick_y);
 void printPs4InputDiagnostic(const Ps4InputState& input);
 const char* ps4DriveStateName(Ps4DriveState state);
@@ -926,6 +937,8 @@ void loop() {
     left_output = lqrMotorVoltage(test_LQR_u, motor2_output_sign,
                       kLqrTestVoltageLimit);
   }
+
+  applyPs4Steering(right_output, left_output);
 
   if (polarity_test_active) {
     const uint32_t now_ms = millis();
@@ -2007,6 +2020,7 @@ bool requestLqrDrive(float target_speed, char command) {
 }
 
 void requestLqrSoftStop() {
+  ps4_yaw_request = ps4_yaw_output = 0.0f;
   lqr_drive_wrong_way_normal_since_ms = 0;
   lqr_drive_wrong_way_hard_since_ms = 0;
   // Releasing the stick must release accumulated propulsion immediately;
@@ -3094,8 +3108,8 @@ void updateLqrDiagnostic() {
 
   // Positive tilt means forward lean. Both drive targets are subtracted from
   // measured tilt; a target change initially moves the wheels under the body
-  // to create the requested lean. Do not negate position/speed feedback along
-  // with the attitude terms: their errors already use target minus feedback.
+  // to create the requested lean. FULL position and FULL / ATTITUDE+SPEED
+  // speed use the individually reversed feedback signs verified in dfd4d0c.
   const float lqr_angle_error =
       LQR_angle - (angle_zeropoint + lqr_ps4_target_tilt) -
       lqr_drive_angle_bias;
@@ -3166,10 +3180,9 @@ void updateLqrDiagnostic() {
       lqr_speed_direct_term = -speed_control;
     }
   } else if (lqr_soft_stop_active) {
-    // During soft stop, use speed feedback directly as braking.
-    // Active drive may disable direct speed control, but braking
-    // still needs the zero-speed correction to reach LQR_u.
-    lqr_speed_direct_term = speed_control;
+    // Keep the verified mode-specific feedback sign during deceleration too.
+    // The earlier default is -speed_control in FULL / ATTITUDE+SPEED.
+    // Do not overwrite it with the pre-dfd4d0c sign here.
   }
 
   // A DRIVE_ONLY recovery deliberately gives the inner attitude loop sole
@@ -3362,6 +3375,7 @@ void printAndResetLqrRunTime() {
 }
 
 void resetLqrTestState() {
+  resetPs4MotionInput();
   drive_recovery_state = DriveRecoveryState::Inactive;
   drive_recovery_start_ms = 0;
   drive_recovery_stable_since_ms = 0;
@@ -4080,6 +4094,7 @@ const char* detectDriveSafetyFault(float right_output, float left_output) {
 }
 
 void stopLqrDriveOnly(const char* reason, bool require_recenter) {
+  resetPs4MotionInput();
   if (reason != nullptr &&
       (lqr_direction_test_armed || balance_wait_active ||
        lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
@@ -4272,9 +4287,9 @@ void serviceHttpRequests() {
   char command = 0;
   if (xQueueReceive(http_command_queue, &command, 0) == pdTRUE) {
     switch (command) {
-      case 't': startBalanceTest(); break;
-      case 'd': stopBalanceTest(); break;
-      case 'g': cycleLqrTestMode(); break;
+      case 't': executeOperatorCommand(OperatorCommand::Start); break;
+      case 'd': executeOperatorCommand(OperatorCommand::EndTest); break;
+      case 'g': executeOperatorCommand(OperatorCommand::CycleMode); break;
       case 'i': cycleLqrSpeedSource(); break;
     }
   }
@@ -4485,6 +4500,7 @@ void captureHttpStatus() {
       "Right: driver_init=%d sensor_ready=%d fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d\n"
       "Left: driver_init=%d sensor_ready=%d fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d\n"
       "LQR Test Mode: %s\nLQR Speed Source: %s\n"
+      "PS4: %s / %s / motion_ready=%d\nTarget speed: %.4f / yaw command: %.4f V\n"
       "Test active: %s\nTrace samples: Velocity=%u Loop Timing=%u LQR Control=%u\n",
       state, last_stop_reason, LQR_angle, angle_zeropoint,
       LQR_angle - angle_zeropoint, test_system_ready ? "yes" : "no",
@@ -4496,6 +4512,8 @@ void captureHttpStatus() {
       static_cast<int>(sensor2.fault), sensor2.error,
       static_cast<unsigned>(motor2.motor_status), static_cast<int>(motor2.enabled),
       digitalRead(motor2EnablePin), lqrTestModeDisplayName(), lqrSpeedSourceName(),
+      ps4_was_connected ? "connected" : "disconnected", ps4DriveStateName(ps4_drive_state),
+      static_cast<int>(ps4_motion_ready), lqr_target_speed, ps4_yaw_output,
       test_active ? "yes" : "no", static_cast<unsigned>(velocity_trace_count),
       static_cast<unsigned>(loop_timing_count),
       static_cast<unsigned>(lqr_control_trace_count));
@@ -5083,155 +5101,205 @@ void beginPs4DriveStopping(uint32_t now_ms) {
   stop_speed_abs_max = abs(lqr_speed_for_control);
 }
 
-void updatePs4Controller() {
-  const bool connected = PS4.isConnected();
-  if (connected != ps4_was_connected) {
-    ps4_was_connected = connected;
-    ps4_input_initialized = false;
-    Serial.println(connected ? "PS4 CONTROLLER CONNECTED"
-                             : "PS4 CONTROLLER DISCONNECTED");
-    if (!connected) {
-      ps4_drive_speed_request = 0.0f;
-      ps4_drive_stick_y = 0;
-      if (ps4_drive_state == Ps4DriveState::DriveRequested) {
-        Serial.println("PS4 DRIVE:");
-        Serial.println("DISCONNECTED -> STOP REQUEST");
-        requestLqrSoftStop();
-      }
-      ps4_drive_state = Ps4DriveState::Neutral;
+void resetPs4MotionInput() {
+  ps4_drive_speed_request = 0.0f;
+  ps4_drive_stick_y = 0;
+  ps4_yaw_request = ps4_yaw_output = 0.0f;
+  ps4_motion_ready = false;
+}
+
+bool executeOperatorCommand(OperatorCommand command) {
+  switch (command) {
+    case OperatorCommand::Start:
+      if (!startBalanceTest()) return false;
+      resetPs4MotionInput();
+      setPs4DriveState(Ps4DriveState::OutsideDeadzone);
+      return true;
+    case OperatorCommand::EndTest:
+      return stopBalanceTest();
+    case OperatorCommand::CycleMode:
+      return cycleLqrTestMode();
+    case OperatorCommand::FullStop: {
+      const bool was_active = lqr_direction_test_armed || balance_wait_active || polarity_test_active;
+      ps4_controls_released = false;
+      // Remove actuator authority before any potentially blocking log output.
+      gateWheelOutputsOff();
+      emergency_stop_active = true;
+      disableBothDrivers();
+      setBothTargetsToZero();
+      disableLegServoTorqueForTestEnd("DISARM");
+      stopBalanceTest();
+      if (was_active || strcmp(last_stop_reason, "NONE") == 0) last_stop_reason = "DISARM";
+      printVelocityTrace();
+      printLoopTimingTrace();
+      printLqrControlTrace();
+      Serial.println("SAFETY STOP: mode=FULL_STOP reason=DISARM drivers=DISABLED balance=OFF");
+      return true;
     }
-  }
-
-  if (!connected) {
-    return;
-  }
-
-  const uint32_t now_ms = millis();
-  if (ps4_input_initialized &&
-      now_ms - ps4_last_diagnostic_ms < kPs4DiagnosticIntervalMs) {
-    return;
-  }
-
-  const Ps4InputState input = readPs4Input();
-  ps4_drive_stick_y = input.left_stick_y;
-  ps4_drive_speed_request =
-      ps4DriveSpeedRequestFromLeftStickY(input.left_stick_y);
-  if (ps4_input_initialized) {
-    const bool up_pressed = input.dpad_up && !previous_ps4_input.dpad_up;
-    const bool down_pressed = input.dpad_down && !previous_ps4_input.dpad_down;
-
-    if (up_pressed || down_pressed) {
-      if (ps4_drive_state == Ps4DriveState::DriveRequested) {
-        Serial.println("PS4 LEG CONTROL:");
-        Serial.println("ignored while driving");
-      } else {
-        const float previous_percent = ps4_leg_extension_percent;
-        const float step = up_pressed ? kPs4LegExtensionStepPercent
-                                      : -kPs4LegExtensionStepPercent;
-        ps4_leg_extension_percent =
-            constrain(previous_percent + step, kPs4LegExtensionMinPercent,
-                      kPs4LegExtensionMaxPercent);
-
-        Serial.println("PS4 LEG CONTROL:");
-        Serial.printf("direction=%s\n", up_pressed ? "UP" : "DOWN");
-        Serial.printf("percent=%.1f\n", ps4_leg_extension_percent);
-        if (ps4_leg_extension_percent == previous_percent) {
-          Serial.printf("limit=%s\n", up_pressed ? "MAX" : "MIN");
-        } else {
-          moveBothLegsToPercent(ps4_leg_extension_percent);
+    case OperatorCommand::SoftStop:
+      requestLqrSoftStop();
+      return true;
+    case OperatorCommand::EnableDrivers:
+      if (!test_system_ready || lqr_direction_test_armed || balance_wait_active ||
+          polarity_test_active) return false;
+      setBothTargetsToZero();
+      driver1.enable();
+      driver2.enable();
+      emergency_stop_active = false;
+      Serial.println("DRIVERS ENABLED: both targets remain 0.00 V.");
+      return true;
+    case OperatorCommand::LegUp:
+    case OperatorCommand::LegDown:
+      if (!test_system_ready || emergency_stop_active || balance_wait_active ||
+          polarity_test_active || lqr_auto_drive_active || lqr_drive_start_pending ||
+          lqr_soft_stop_active || drive_recovery_state != DriveRecoveryState::Inactive) {
+        Serial.println("PS4 LEG: ignored while preparing, moving, recovering or disabled.");
+        return false;
+      }
+      {
+        const float next = constrain(ps4_leg_extension_percent +
+            (command == OperatorCommand::LegUp ? kPs4LegExtensionStepPercent :
+                                                -kPs4LegExtensionStepPercent),
+            kPs4LegExtensionMinPercent, kPs4LegExtensionMaxPercent);
+        if (next != ps4_leg_extension_percent) {
+          ps4_leg_extension_percent = next;
+          moveBothLegsToPercent(next);
         }
       }
+      return true;
+  }
+  return false;
+}
+
+void applyPs4Steering(float& right_output, float& left_output) {
+  if (!ps4_was_connected || emergency_stop_active || !lqr_direction_test_armed ||
+      !lqr_auto_drive_active || lqr_soft_stop_active ||
+      ps4_drive_state != Ps4DriveState::DriveRequested ||
+      drive_recovery_state != DriveRecoveryState::Inactive) return;
+  // Preserve balance authority: yaw only uses the remaining voltage headroom.
+  const float common = lqrMotorVoltage(test_LQR_u, 1.0f, kLqrTestVoltageLimit);
+  const float headroom = max(0.0f, kLqrTestVoltageLimit - abs(common));
+  const float yaw = constrain(ps4_yaw_output, -headroom, headroom);
+  right_output = lqrMotorVoltage(common - yaw, kRightForwardSign, kLqrTestVoltageLimit);
+  left_output = lqrMotorVoltage(common + yaw, kLeftForwardSign, kLqrTestVoltageLimit);
+}
+
+bool ps4ButtonsReleased(const Ps4InputState& input) {
+  return !(input.cross || input.circle || input.square || input.triangle ||
+           input.dpad_up || input.dpad_down || input.dpad_left || input.dpad_right ||
+           input.l1 || input.r1 || input.options || input.share || input.ps_button);
+}
+
+void handlePs4Connection(bool connected) {
+  if (connected == ps4_was_connected) return;
+  ps4_was_connected = connected;
+  ps4_input_initialized = false;
+  ps4_controls_released = false;
+  // Cancel all drive owners on disconnect, including serial-origin requests.
+  if (!connected && (lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
+    executeOperatorCommand(OperatorCommand::SoftStop);
+  }
+  resetPs4MotionInput();
+  setPs4DriveState(Ps4DriveState::OutsideDeadzone);
+  Serial.println(connected ? "PS4 CONTROLLER CONNECTED" : "PS4 CONTROLLER DISCONNECTED");
+}
+
+void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
+  const bool buttons_released = ps4ButtonsReleased(input);
+  const bool sticks_centered = abs(input.left_stick_x) <= kPs4DriveStickDeadzone &&
+      abs(input.left_stick_y) <= kPs4DriveStickDeadzone &&
+      abs(input.right_stick_x) <= kPs4DriveStickDeadzone &&
+      abs(input.right_stick_y) <= kPs4DriveStickDeadzone;
+  // Observe a fully released packet after each connection, then require edges.
+  if (buttons_released && sticks_centered) ps4_controls_released = true;
+  const bool edges_allowed = ps4_input_initialized && ps4_controls_released;
+  if (input.cross && (!ps4_input_initialized || !previous_ps4_input.cross)) {
+    executeOperatorCommand(OperatorCommand::FullStop);
+  } else if (edges_allowed && !input.cross) {
+    if (input.share && !previous_ps4_input.share && sticks_centered) {
+      executeOperatorCommand(OperatorCommand::EnableDrivers);
+    } else if (input.triangle && !previous_ps4_input.triangle && sticks_centered) {
+      executeOperatorCommand(OperatorCommand::CycleMode);
+    } else if (input.options && !previous_ps4_input.options && sticks_centered) {
+      executeOperatorCommand(OperatorCommand::Start);
+    } else if (input.dpad_up && !previous_ps4_input.dpad_up) {
+      executeOperatorCommand(OperatorCommand::LegUp);
+    } else if (input.dpad_down && !previous_ps4_input.dpad_down) {
+      executeOperatorCommand(OperatorCommand::LegDown);
     }
   }
 
-  const bool stick_in_deadzone = ps4_drive_speed_request == 0.0f;
-  if (!ps4_input_initialized && !stick_in_deadzone) {
+  const bool can_move = lqr_direction_test_armed && !emergency_stop_active &&
+      drive_recovery_state == DriveRecoveryState::Inactive &&
+      lqr_test_mode != LqrTestMode::AttitudeOnly;
+  if (!can_move) {
+    resetPs4MotionInput();
     setPs4DriveState(Ps4DriveState::OutsideDeadzone);
-    Serial.println(
-        "PS4 DRIVE: connected outside deadzone; recenter stick to arm.");
-  } else if (stick_in_deadzone) {
-    if (ps4_drive_state == Ps4DriveState::DriveRequested) {
-      Serial.println("PS4 DRIVE:");
-      Serial.println("STOP REQUESTED");
-      requestLqrSoftStop();
-      beginPs4DriveStopping(now_ms);
-    } else if (ps4_drive_state == Ps4DriveState::Stopping) {
-      const bool stop_complete = !lqr_auto_drive_active &&
-                                 !lqr_drive_start_pending &&
-                                 !lqr_soft_stop_active;
-      printPs4DriveStopDiagnostic(input, stick_in_deadzone, stop_complete,
-                                  now_ms);
-      if (stop_complete) {
-        printPs4DriveStopSummary(now_ms);
+  } else {
+    if (sticks_centered && buttons_released && ps4_controls_released) {
+      ps4_motion_ready = true;
+    }
+    ps4_drive_stick_y = input.left_stick_y;
+    ps4_drive_speed_request = ps4DriveSpeedRequestFromLeftStickY(input.left_stick_y);
+    ps4_yaw_request = abs(input.right_stick_x) <= kPs4DriveStickDeadzone ? 0.0f :
+        constrain(static_cast<float>(input.right_stick_x) / 127.0f,
+                  -1.0f, 1.0f) * kPs4YawVoltage;
+    const bool neutral = ps4_drive_speed_request == 0.0f && ps4_yaw_request == 0.0f;
+    if (!ps4_motion_ready) {
+      ps4_yaw_output = 0.0f;
+    } else if (neutral) {
+      if (ps4_drive_state == Ps4DriveState::DriveRequested) {
+        executeOperatorCommand(OperatorCommand::SoftStop);
+        beginPs4DriveStopping(now_ms);
+      } else if (ps4_drive_state == Ps4DriveState::Stopping) {
+        const bool complete = !lqr_auto_drive_active && !lqr_drive_start_pending && !lqr_soft_stop_active;
+        printPs4DriveStopDiagnostic(input, true, complete, now_ms);
+        if (complete) {
+          printPs4DriveStopSummary(now_ms);
+          setPs4DriveState(Ps4DriveState::Neutral);
+        }
+      } else {
         setPs4DriveState(Ps4DriveState::Neutral);
-        Serial.println("PS4 DRIVE:");
-        Serial.println("READY FOR NEXT REQUEST");
       }
-    } else if (ps4_drive_state == Ps4DriveState::OutsideDeadzone) {
-      setPs4DriveState(Ps4DriveState::Neutral);
-      Serial.println("PS4 DRIVE:");
-      Serial.println("READY FOR NEXT REQUEST");
+    } else if (ps4_drive_state == Ps4DriveState::Stopping) {
+      if (!lqr_auto_drive_active && !lqr_drive_start_pending && !lqr_soft_stop_active) {
+        ps4_motion_ready = false;
+        setPs4DriveState(Ps4DriveState::OutsideDeadzone);
+      }
+    } else if (ps4_drive_state == Ps4DriveState::Neutral && buttons_released) {
+      // Pure yaw uses the same stable-start gate with zero forward speed.
+      if (requestLqrDrive(ps4_drive_speed_request, ps4_drive_speed_request < 0 ? '<' : '>')) {
+        setPs4DriveState(Ps4DriveState::DriveRequested);
+      } else {
+        ps4_motion_ready = false;
+        setPs4DriveState(Ps4DriveState::OutsideDeadzone);
+      }
     }
-  } else if (ps4_drive_state == Ps4DriveState::Stopping) {
-    const bool stop_complete = !lqr_auto_drive_active &&
-                               !lqr_drive_start_pending &&
-                               !lqr_soft_stop_active;
-    printPs4DriveStopDiagnostic(input, stick_in_deadzone, stop_complete,
-                                now_ms);
-    if (stop_complete) {
-      printPs4DriveStopSummary(now_ms);
-      setPs4DriveState(Ps4DriveState::OutsideDeadzone);
-    }
-  } else if (ps4_drive_state == Ps4DriveState::Neutral) {
-    Serial.println("PS4 DRIVE:");
-    Serial.printf("REQUEST speed=%+.2f\n", ps4_drive_speed_request);
-    if (requestLqrDrive(ps4_drive_speed_request,
-                        ps4_drive_speed_request > 0.0f ? '>' : '<')) {
-      setPs4DriveState(Ps4DriveState::DriveRequested);
-      Serial.println("PS4 DRIVE:");
-      Serial.printf("START REQUESTED speed=%+.2f\n",
-                    ps4_drive_speed_request);
-    } else {
-      setPs4DriveState(Ps4DriveState::OutsideDeadzone);
-      Serial.println(
-          "PS4 DRIVE: request rejected by LQR safety gate; recenter stick.");
+    if (ps4_drive_state == Ps4DriveState::DriveRequested && lqr_auto_drive_active &&
+        !lqr_soft_stop_active && now_ms - ps4_drive_target_update_last_ms >= kPs4DiagnosticIntervalMs) {
+      lqr_target_speed += constrain(ps4_drive_speed_request - lqr_target_speed,
+          -kPs4DriveTargetSlewPerUpdate, kPs4DriveTargetSlewPerUpdate);
+      lqr_target_speed = constrain(lqr_target_speed, -kPs4DriveMaxSpeed, kPs4DriveMaxSpeed);
+      ps4_yaw_output += constrain(ps4_yaw_request - ps4_yaw_output,
+          -kPs4YawSlewPerUpdate, kPs4YawSlewPerUpdate);
+      ps4_drive_target_update_last_ms = now_ms;
     }
   }
-
-  if (ps4_drive_state == Ps4DriveState::DriveRequested &&
-      lqr_auto_drive_active && !lqr_soft_stop_active &&
-      now_ms - ps4_drive_target_update_last_ms >=
-          kPs4DiagnosticIntervalMs) {
-    const float target_delta =
-        ps4_drive_speed_request - lqr_target_speed;
-    lqr_target_speed +=
-        constrain(target_delta, -kPs4DriveTargetSlewPerUpdate,
-                  kPs4DriveTargetSlewPerUpdate);
-    lqr_target_speed = constrain(lqr_target_speed, -kPs4DriveMaxSpeed,
-                                 kPs4DriveMaxSpeed);
-    ps4_drive_target_update_last_ms = now_ms;
-
-    if (now_ms - ps4_drive_track_diagnostic_last_ms >=
-        kPs4DriveTrackDiagnosticIntervalMs) {
-      Serial.println("PS4 DRIVE TRACK:");
-      Serial.printf("LY=%d\n", input.left_stick_y);
-      Serial.printf("requested=%+.2f\n", ps4_drive_speed_request);
-      Serial.printf("target=%+.2f\n", lqr_target_speed);
-      ps4_drive_track_diagnostic_last_ms = now_ms;
-    }
-  }
-
-  if (!ps4_input_initialized ||
-      !ps4InputStatesEqual(input, previous_ps4_input)) {
+  if (!ps4_input_initialized || !ps4InputStatesEqual(input, previous_ps4_input)) {
     printPs4InputDiagnostic(input);
-    if (!ps4_input_initialized ||
-        input.left_stick_y != previous_ps4_input.left_stick_y) {
-      printPs4DriveRequestDiagnostic(input);
-    }
-    previous_ps4_input = input;
-    ps4_input_initialized = true;
-    ps4_last_diagnostic_ms = now_ms;
   }
+  previous_ps4_input = input;
+  ps4_input_initialized = true;
+  ps4_last_diagnostic_ms = now_ms;
+}
+
+void updatePs4Controller() {
+  const bool connected = PS4.isConnected();
+  handlePs4Connection(connected);
+  if (!connected) return;
+  const uint32_t now_ms = millis();
+  if (ps4_input_initialized && now_ms - ps4_last_diagnostic_ms < kPs4DiagnosticIntervalMs) return;
+  processPs4Input(readPs4Input(), now_ms);
 }
 
 void pingLegServos() {
@@ -5424,15 +5492,7 @@ void handleSerialCommand() {
       break;
     case 'u':
     case 'U':
-      if (!test_system_ready) {
-        Serial.println("IGNORED: both motors are not initialized.");
-        break;
-      }
-      setBothTargetsToZero();
-      driver1.enable();
-      driver2.enable();
-      emergency_stop_active = false;
-      Serial.println("DRIVERS ENABLED: both targets remain 0.00 V.");
+      executeOperatorCommand(OperatorCommand::EnableDrivers);
       break;
     case 'p':
     case 'P':
@@ -5529,7 +5589,7 @@ void handleSerialCommand() {
       break;
     case 'g':
     case 'G':
-      cycleLqrTestMode();
+      executeOperatorCommand(OperatorCommand::CycleMode);
       break;
     case 'i':
     case 'I':
@@ -5537,7 +5597,7 @@ void handleSerialCommand() {
       break;
     case 't':
     case 'T':
-      startBalanceTest();
+      executeOperatorCommand(OperatorCommand::Start);
       break;
     case '>':
     case '<':
@@ -5546,7 +5606,7 @@ void handleSerialCommand() {
         Serial.println(
             "IGNORED: LQR drive commands are available only after AUTO START.");
       } else if (command == '.') {
-        requestLqrSoftStop();
+        executeOperatorCommand(OperatorCommand::SoftStop);
       } else if (!requestLqrDrive(
                      command == '>' ? kLqrDriveTestSpeed
                                     : -kLqrDriveTestSpeed,
@@ -5748,16 +5808,7 @@ void handleSerialCommand() {
       break;
     case 'd':
     case 'D':
-      if (stopBalanceTest()) {
-        printVelocityTrace();
-        printLoopTimingTrace();
-        printLqrControlTrace();
-        emergency_stop_active = true;
-        disableBothDrivers();
-        Serial.println(
-            "SAFETY STOP: mode=FULL_STOP reason=DISARM drivers=DISABLED balance=OFF");
-        disableLegServoTorqueForTestEnd("DISARM");
-      }
+      executeOperatorCommand(OperatorCommand::FullStop);
       break;
     case 'h':
     case 'H':
