@@ -36,7 +36,7 @@ uint8_t http_task_stack[kHttpTaskStackBytes]; StaticTask_t http_task_tcb;
 TaskHandle_t http_task_handle = nullptr;
 std::atomic<bool> http_task_ready{false};
 struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
-char http_trace_snapshot[20480];
+struct HttpTraceSnapshot {char data[10776];};
 QueueHandle_t http_status_queue = nullptr, http_command_queue = nullptr;
 bool http_filesystem_ready = false;
 bool fail_task = false, fail_mount = false, fail_mode=false;
@@ -150,7 +150,7 @@ void initializeRobotHardware(){
 '''
 
 code += '\n'.join(function(n) for n in
-                  ['printHttpStartupMemory','prepareI2cResources','publishStartupPhase','enforceStartupOutputGate','startupHardwareStepAllowed','advanceStartup','formatHttpResources', 'reportStartupFailure',
+                  ['printStartupMemoryResult','printHttpStartupMemory','prepareI2cResources','publishStartupPhase','enforceStartupOutputGate','startupHardwareStepAllowed','advanceStartup','formatHttpResources', 'reportStartupFailure',
                    'maybePrintStartupMenu', 'setupWifiLogServer', 'startWifiHttpServer',
                    'updateWifiLogServer'])
 code += r'''
@@ -190,7 +190,7 @@ int main(){
     assert(I2Cone.timeout==(failed==1?0:5) && I2Ctwo.timeout==(failed==2?0:5));
     assert((stages==std::vector<std::string>{"i2c0","i2c1"}));
     for(const char* stage:{"before_i2c0","after_i2c0","before_i2c1","after_i2c1"})
-      assert(Serial.text.find(String("stage=")+stage)!=String::npos);
+      assert((Serial.text.find(String("stage=")+stage)!=String::npos)==bool(HTTP_MEMORY_STAGE_DIAGNOSTICS));
     assert(Serial.text.find("rx_bytes=128 tx_bytes=128")!=String::npos);
     prepareI2cResources();assert(I2Cone.calls==1 && I2Ctwo.calls==1);
     setupWifiLogServer();connect();tick();
@@ -207,7 +207,7 @@ int main(){
   // A 6 KiB largest heap block is smaller than the reserved 8 KiB stack.
   setupWifiLogServer();assert(http_task_handle && http_task_ready.load());
   assert((stages==std::vector<std::string>{"task","fs","wifi"}));
-  assert(Serial.text.find("internal_largest=6000")!=String::npos);
+  assert(Serial.text.find("internal_largest=6000")!=String::npos || !HTTP_MEMORY_STAGE_DIAGNOSTICS);
   assert(Serial.text.find("api=static result=OK")!=String::npos);
   setupWifiLogServer();assert(creates==1);
   assert(help_count==0 && !wifi_log_server_started); // Task creation is not HTTP success.
@@ -235,6 +235,7 @@ int main(){
   connect();tick();
   assert(help_count==1 && startup_menu_printed && wifi_log_server_started && handled>0);
   assert(foc_calls==1 && startup_foc_ready && test_system_ready);
+  assert(Serial.text.find("STARTUP memory result=READY heap_free=20000 internal_free=18000 internal_largest=6000")!=String::npos);
   const auto done=Serial.text.find("接続完了");
   const auto ip=Serial.text.find("WiFi DHCP IP: 192.168.1.42");
   const auto url=Serial.text.find("HTTP access URL: http://192.168.1.42/");
@@ -262,6 +263,7 @@ int main(){
   for(int i=0;i<5;++i)tick();
   assert(help_count==0 && listen_attempts==0 && foc_calls==0 && !wheel_outputs_enabled);
   assert(Serial.text.find("stage=WIFI_TIMEOUT")!=String::npos);
+  assert(Serial.text.find("STARTUP memory result=WIFI_TIMEOUT")!=String::npos);
   assert(Serial.text.find("HTTP access URL:")==String::npos);
   // Link association with no DHCP address is not readiness.
   reset();setupWifiLogServer();WiFi.connection_status=WL_CONNECTED;
@@ -314,8 +316,10 @@ with tempfile.TemporaryDirectory(prefix='http-startup-') as directory:
     cpp = Path(directory) / 'test.cpp'
     binary = Path(directory) / 'test'
     cpp.write_text(code)
-    subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror', str(cpp), '-o', str(binary)], check=True)
-    subprocess.run([str(binary)], check=True)
+    for detailed in [0,1]:
+        subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
+                        '-DHTTP_MEMORY_STAGE_DIAGNOSTICS='+str(detailed),str(cpp), '-o', str(binary)], check=True)
+        subprocess.run([str(binary)], check=True)
 
 setup = function('setup')
 assert 'printHelp();' not in setup and 'setupWifiLogServer();' in setup
@@ -358,3 +362,5 @@ for name in ['printHttpStartupMemory', 'reportStartupFailure', 'prepareI2cResour
     assert 'Serial.printf' not in function(name)
     assert 'String(' not in function(name)
     assert 'snprintf(' in function(name)
+
+assert '#define HTTP_MEMORY_STAGE_DIAGNOSTICS 0' in source

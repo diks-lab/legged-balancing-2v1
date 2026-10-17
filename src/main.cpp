@@ -13,6 +13,8 @@
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <atomic>
+#include <cstdlib>
+#include <new>
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
@@ -181,6 +183,9 @@ constexpr uint32_t kBalanceWaitDiagnosticMs = 500;
 constexpr uint32_t kLqrStartupDiagnosticIntervalMs = 50;
 constexpr uint32_t kLqrStartupDiagnosticDurationMs = 1000;
 constexpr uint32_t kLqrRunDiagnosticIntervalMs = 100;
+#ifndef HTTP_MEMORY_STAGE_DIAGNOSTICS
+#define HTTP_MEMORY_STAGE_DIAGNOSTICS 0
+#endif
 constexpr bool kEnableLqrStartupDiagnostic = false;
 constexpr bool kEnableLqrRunDiagnostic = false;
 constexpr uint32_t kPolarityPulseTimeMs = 500;
@@ -741,6 +746,7 @@ void enforceStartupOutputGate();
 void publishStartupPhase(const char* stage);
 void reportStartupFailure(const char* stage);
 void printHttpStartupMemory(const char* stage);
+void printStartupMemoryResult(const char* result);
 void updateWifiLogServer();
 void serviceHttpRequests();
 void handleWifiStatusPage();
@@ -4517,7 +4523,8 @@ struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
 QueueHandle_t http_status_queue = nullptr;
 QueueHandle_t http_command_queue = nullptr;
 bool http_filesystem_ready = false;
-std::atomic<int> http_trace_request{0}; // 0 idle, 1 requested, 2 ready, -1 busy
+enum HttpTraceState { TraceIdle=0, TraceRequested=1, TraceReady=2, TraceBusy=-1, TraceCopying=3 };
+std::atomic<int> http_trace_request{TraceIdle};
 int http_trace_kind = 1; // Published by request.store; one HTTP handler at a time.
 struct HttpTraceSnapshot {
   // WebServer handles one download at a time. Only copy the requested CSV;
@@ -4529,7 +4536,16 @@ struct HttpTraceSnapshot {
   };
   size_t velocity_index, velocity_count, timing_index, timing_count;
   size_t control_index, control_count;
-} http_trace_snapshot{};
+};
+HttpTraceSnapshot* http_trace_snapshot = nullptr; // HTTP-owned, published by request.store().
+bool http_trace_abandoned = false; // HTTP task only; reaped after control-side acknowledgement.
+enum class HttpTraceFailure : uint8_t { Active, Allocation, Timeout, Pending, Disconnected };
+HttpTraceFailure http_trace_failure = HttpTraceFailure::Active;
+void releaseHttpTraceSnapshot();
+void reapHttpTraceSnapshot();
+struct HttpTraceLease {
+  ~HttpTraceLease() { releaseHttpTraceSnapshot(); }
+};
 void captureHttpStatus();
 void formatHttpResources(char* text, size_t capacity);
 
@@ -4544,26 +4560,28 @@ void serviceHttpRequests() {
       case 'i': cycleLqrSpeedSource(); break;
     }
   }
-  if (http_trace_request.load() == 1) {
+  int requested = TraceRequested;
+  if (http_trace_request.compare_exchange_strong(requested, TraceCopying)) {
+    // The HTTP owner cannot free a claimed payload until Ready/Busy is published.
     // Also exclude direct motor/polarity tests, not just balancing.
     if (lqr_direction_test_armed || balance_wait_active || polarity_test_active ||
         right_target_voltage != 0.0f || left_target_voltage != 0.0f) {
-      http_trace_request.store(-1);
+      http_trace_request.store(TraceBusy);
     } else {
       if (http_trace_kind == 1) {
-        memcpy(http_trace_snapshot.velocity, velocity_trace, sizeof(velocity_trace));
+        memcpy(http_trace_snapshot->velocity, velocity_trace, sizeof(velocity_trace));
       } else if (http_trace_kind == 2) {
-        memcpy(http_trace_snapshot.timing, loop_timing_trace, sizeof(loop_timing_trace));
+        memcpy(http_trace_snapshot->timing, loop_timing_trace, sizeof(loop_timing_trace));
       } else {
-        memcpy(http_trace_snapshot.control, lqr_control_trace, sizeof(lqr_control_trace));
+        memcpy(http_trace_snapshot->control, lqr_control_trace, sizeof(lqr_control_trace));
       }
-      http_trace_snapshot.velocity_index = velocity_trace_write_index;
-      http_trace_snapshot.velocity_count = velocity_trace_count;
-      http_trace_snapshot.timing_index = loop_timing_write_index;
-      http_trace_snapshot.timing_count = loop_timing_count;
-      http_trace_snapshot.control_index = lqr_control_trace_write_index;
-      http_trace_snapshot.control_count = lqr_control_trace_count;
-      http_trace_request.store(2);
+      http_trace_snapshot->velocity_index = velocity_trace_write_index;
+      http_trace_snapshot->velocity_count = velocity_trace_count;
+      http_trace_snapshot->timing_index = loop_timing_write_index;
+      http_trace_snapshot->timing_count = loop_timing_count;
+      http_trace_snapshot->control_index = lqr_control_trace_write_index;
+      http_trace_snapshot->control_count = lqr_control_trace_count;
+      http_trace_request.store(TraceReady); // Last access to the shared payload on this side.
     }
   }
   static uint32_t last_status_ms = 0;
@@ -4576,23 +4594,64 @@ void serviceHttpRequests() {
 //==================================================
 // Wi-Fi Trace Logger
 //==================================================
+void releaseHttpTraceSnapshot() {
+  if (!http_trace_snapshot) return;
+  int state = http_trace_request.load();
+  while (state == TraceRequested) {
+    if (http_trace_request.compare_exchange_strong(state, TraceIdle)) break;
+  }
+  if (state == TraceCopying) {
+    http_trace_abandoned = true;
+    return; // Control is using the payload. HTTP will reap its completion later.
+  }
+  // Ready/Busy acknowledge that the control loop has no further pointer access.
+  free(http_trace_snapshot);
+  http_trace_snapshot = nullptr;
+  http_trace_abandoned = false;
+  http_trace_request.store(TraceIdle);
+}
+
+void reapHttpTraceSnapshot() {
+  if (http_trace_abandoned && http_trace_request.load() != TraceCopying)
+    releaseHttpTraceSnapshot();
+}
+
 bool traceDownloadBlocked(int kind) {
-  // Finish an earlier timed-out request before changing its payload kind.
-  if (http_trace_request.load() == 1) return true;
+  reapHttpTraceSnapshot();
+  if (http_trace_snapshot) {
+    http_trace_failure = HttpTraceFailure::Pending;
+    return true;
+  }
+  http_trace_snapshot = static_cast<HttpTraceSnapshot*>(malloc(sizeof(HttpTraceSnapshot)));
+  if (!http_trace_snapshot) {
+    http_trace_failure = HttpTraceFailure::Allocation;
+    return true;
+  }
+  new (http_trace_snapshot) HttpTraceSnapshot; // Begin trivial object lifetime; no allocation.
   http_trace_kind = kind;
-  http_trace_request.store(1);
+  http_trace_request.store(TraceRequested);
   const uint32_t start = millis();
-  while (http_trace_request.load() == 1 && millis() - start < 500) {
+  int state = TraceRequested;
+  while (((state = http_trace_request.load()) == TraceRequested || state == TraceCopying) &&
+         millis() - start < 500 && wifi_log_server.client().connected()) {
     vTaskDelay(pdMS_TO_TICKS(1));
   }
-  // A timeout may race a copy, so leave the request for the loop to finish.
-  return http_trace_request.load() != 2;
+  if (!wifi_log_server.client().connected()) {
+    http_trace_failure = HttpTraceFailure::Disconnected;
+    return true;
+  }
+  if (state == TraceReady) return false;
+  http_trace_failure = state == TraceBusy ? HttpTraceFailure::Active : HttpTraceFailure::Timeout;
+  return true;
 }
 
 void sendTraceBusyResponse() {
-  wifi_log_server.send(
-      409, "text/plain",
-      "TRACE NOT AVAILABLE WHILE LQR TEST IS RUNNING\n");
+  const bool active = http_trace_failure == HttpTraceFailure::Active;
+  const char* reason = active ? "TRACE NOT AVAILABLE WHILE LQR TEST IS RUNNING\n" :
+      (http_trace_failure == HttpTraceFailure::Allocation ? "CSV SNAPSHOT ALLOCATION FAILED; ORIGINAL LOG RETAINED\n" :
+       (http_trace_failure == HttpTraceFailure::Pending ? "CSV COPY COMPLETION PENDING\n" :
+        (http_trace_failure == HttpTraceFailure::Disconnected ? "CSV CLIENT DISCONNECTED\n" : "CSV SNAPSHOT TIMEOUT\n")));
+  wifi_log_server.send(active ? 409 : 503, "text/plain", reason);
 }
 
 void beginCsvResponse(const char* filename) {
@@ -4604,6 +4663,7 @@ void beginCsvResponse(const char* filename) {
 }
 
 void handleVelocityTraceDownload() {
+  HttpTraceLease lease; // HTTP-only cleanup on success, failure, disconnect or timeout.
   if (traceDownloadBlocked(1)) {
     sendTraceBusyResponse();
     return;
@@ -4620,16 +4680,16 @@ void handleVelocityTraceDownload() {
       "LQR_speed,diag_speed_spike\n");
 
   const size_t first_index =
-      (http_trace_snapshot.velocity_index + kVelocityTraceSize -
-       http_trace_snapshot.velocity_count) %
+      (http_trace_snapshot->velocity_index + kVelocityTraceSize -
+       http_trace_snapshot->velocity_count) %
       kVelocityTraceSize;
   char line[320];
-  for (size_t i = 0; i < http_trace_snapshot.velocity_count; ++i) {
+  for (size_t i = 0; i < http_trace_snapshot->velocity_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
     }
     const VelocityTraceSample& sample =
-        http_trace_snapshot.velocity[(first_index + i) % kVelocityTraceSize];
+        http_trace_snapshot->velocity[(first_index + i) % kVelocityTraceSize];
     snprintf(
         line, sizeof(line),
         "%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
@@ -4650,6 +4710,7 @@ void handleVelocityTraceDownload() {
 }
 
 void handleLoopTimingTraceDownload() {
+  HttpTraceLease lease; // HTTP-only cleanup on success, failure, disconnect or timeout.
   if (traceDownloadBlocked(2)) {
     sendTraceBusyResponse();
     return;
@@ -4661,16 +4722,16 @@ void handleLoopTimingTraceDownload() {
       "mpu_update_us,motor_move_us\n");
 
   const size_t first_index =
-      (http_trace_snapshot.timing_index + kLoopTimingTraceSize -
-       http_trace_snapshot.timing_count) %
+      (http_trace_snapshot->timing_index + kLoopTimingTraceSize -
+       http_trace_snapshot->timing_count) %
       kLoopTimingTraceSize;
   char line[128];
-  for (size_t i = 0; i < http_trace_snapshot.timing_count; ++i) {
+  for (size_t i = 0; i < http_trace_snapshot->timing_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
     }
     const LoopTimingSample& sample =
-        http_trace_snapshot.timing[(first_index + i) % kLoopTimingTraceSize];
+        http_trace_snapshot->timing[(first_index + i) % kLoopTimingTraceSize];
     snprintf(line, sizeof(line), "%lu,%lu,%lu,%lu,%lu,%lu\n",
              static_cast<unsigned long>(sample.elapsed_ms),
              static_cast<unsigned long>(sample.whole_loop_us),
@@ -4684,6 +4745,7 @@ void handleLoopTimingTraceDownload() {
 }
 
 void handleLqrControlTraceDownload() {
+  HttpTraceLease lease; // HTTP-only cleanup on success, failure, disconnect or timeout.
   if (traceDownloadBlocked(3)) {
     sendTraceBusyResponse();
     return;
@@ -4698,16 +4760,16 @@ void handleLqrControlTraceDownload() {
       "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us\n");
 
   const size_t first_index =
-      (http_trace_snapshot.control_index + kLqrControlTraceSize -
-       http_trace_snapshot.control_count) %
+      (http_trace_snapshot->control_index + kLqrControlTraceSize -
+       http_trace_snapshot->control_count) %
       kLqrControlTraceSize;
   char line[512];
-  for (size_t i = 0; i < http_trace_snapshot.control_count; ++i) {
+  for (size_t i = 0; i < http_trace_snapshot->control_count; ++i) {
     if (!wifi_log_server.client().connected()) {
       break;
     }
     const LqrControlTraceSample& sample =
-        http_trace_snapshot.control[(first_index + i) % kLqrControlTraceSize];
+        http_trace_snapshot->control[(first_index + i) % kLqrControlTraceSize];
     snprintf(
         line, sizeof(line),
         "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
@@ -4840,6 +4902,7 @@ void httpTask(void*) {
   for (;;) {
     updateWifiLogServer();
     enforceStartupOutputGate();
+    reapHttpTraceSnapshot();
     serviceHttpPs4DiagnosticSerial();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -4909,18 +4972,33 @@ void formatHttpResources(char* text, size_t capacity) {
 }
 
 void printHttpStartupMemory(const char* stage) {
+#if HTTP_MEMORY_STAGE_DIAGNOSTICS
   constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   char text[384];
   snprintf(text, sizeof(text),
       "HTTP memory stage=%s heap_free=%lu internal_free=%lu internal_largest=%lu "
-      "stack_bytes=%lu tcb_bytes=%u status_bytes=%u trace_copy_bytes=%u\n",
+      "stack_bytes=%lu tcb_bytes=%u status_bytes=%u trace_copy_request_bytes=%u\n",
       stage, static_cast<unsigned long>(ESP.getFreeHeap()),
       static_cast<unsigned long>(heap_caps_get_free_size(caps)),
       static_cast<unsigned long>(heap_caps_get_largest_free_block(caps)),
       static_cast<unsigned long>(kHttpTaskStackBytes),
       static_cast<unsigned>(sizeof(http_task_tcb)),
       static_cast<unsigned>(sizeof(HttpStatus)),
-      static_cast<unsigned>(sizeof(http_trace_snapshot)));
+      static_cast<unsigned>(sizeof(HttpTraceSnapshot)));
+  Serial.print(text);
+#else
+  (void)stage;
+#endif
+}
+
+void printStartupMemoryResult(const char* result) {
+  constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+  char text[224];
+  snprintf(text, sizeof(text),
+      "STARTUP memory result=%s heap_free=%lu internal_free=%lu internal_largest=%lu\n",
+      result, static_cast<unsigned long>(ESP.getFreeHeap()),
+      static_cast<unsigned long>(heap_caps_get_free_size(caps)),
+      static_cast<unsigned long>(heap_caps_get_largest_free_block(caps)));
   Serial.print(text);
 }
 
@@ -4935,6 +5013,7 @@ void reportStartupFailure(const char* stage) {
       startup_menu_printed ? "ALREADY_PRINTED" : "SUPPRESSED",
       i2c0_resources_ready ? "READY" : "FAILED", i2c1_resources_ready ? "READY" : "FAILED");
   Serial.print(text);
+  printStartupMemoryResult(stage);
 }
 
 void maybePrintStartupMenu() {
@@ -4945,6 +5024,7 @@ void maybePrintStartupMenu() {
       !wifi_log_server.listening()) return;
   startup_menu_printed = true;
   Serial.println("STARTUP: state=READY foc=READY littlefs=READY wifi_ip=READY http=LISTENING");
+  printStartupMemoryResult("READY");
   printHelp(); // Static help text only; no actuator/controller state is read.
 }
 

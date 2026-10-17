@@ -1,5 +1,11 @@
 # I2C資源の先行確保と起動メモリー診断
 
+利用者の8e2dccb実機では両I2C資源の確保成功を確認したが、Wi-Fi接続はタイムアウト。
+`after_wifi` は internal_free=2308 / internal_largest=2036。
+現在は [CSVコピーの必要時確保](csv-snapshot-lifetime.md) で常駐領域を減らす。
+以下の詳細な段階別ログは `HTTP_MEMORY_STAGE_DIAGNOSTICS=1` の診断ビルドで有効。
+通常はOFFで、起動結果と `STARTUP memory result=...` の残量を常時表示する。
+
 ## ed9c4ed実機ログの評価
 
 利用者の実機では `after_wifi` が `heap_free=20888 internal_free=4236 internal_largest=3956`、

@@ -39,6 +39,9 @@ std::atomic<bool> http_task_ready{false};
 #include <vector>
 #include <cstring>
 #include <mutex>
+#include <condition_variable>
+#include <thread>
+#include <cstdlib>
 using portMUX_TYPE=std::mutex;
 #define portMUX_INITIALIZER_UNLOCKED {}
 void portENTER_CRITICAL(portMUX_TYPE* m){m->lock();}
@@ -74,16 +77,23 @@ struct File {
 struct { File file{}; int opens=0;
   File open(const char*,const char*) {++opens;return file;}
 } LittleFS;
+bool csvClientConnected=true;
+std::function<void()> onCsvContent,onCsvCopy;
+bool failCsvAllocation=false;
+int csvAllocs=0,csvFrees=0;
+void* csvMalloc(size_t size){if(failCsvAllocation)return nullptr;++csvAllocs;return std::malloc(size);}
+void csvFree(void* p){if(p)++csvFrees;std::free(p);}
+void copyCsvSnapshot(void* dst,const void* src,size_t n){if(onCsvCopy)onCsvCopy();memcpy(dst,src,n);}
 struct WebServer {
   bool _server=false;
   explicit WebServer(int) {}
   int status=0;std::string body;
-  struct Client {bool connected(){return true;}};
+  struct Client {bool connected(){return csvClientConnected;}};
   Client client(){return {};}
   void sendHeader(const char*,const String&){}
   void setContentLength(int){}
   void send(int code,const char*,const char* data){status=code;body=data;}
-  void sendContent(const char* data){body+=data;}
+  void sendContent(const char* data){body+=data;if(onCsvContent)onCsvContent();}
   void streamFile(File,const char*) {status=200;body="asset";}
 };
 struct {
@@ -142,7 +152,7 @@ names = [
     'clearVelocityTrace','clearLoopTimingTrace','clearLqrControlTrace',
     'captureFocOutputSnapshot','updateLqrControlTrace','captureLqrDriveSignTrace','captureLqrStopTrace',
     'resetLqrDriveSignTrace','resetLqrStopTrace','startLqrStopTrace','setStatusLed','printLqrStatus',
-    'stopForActualFall','traceDownloadBlocked','beginCsvResponse','sendTraceBusyResponse',
+    'stopForActualFall','releaseHttpTraceSnapshot','reapHttpTraceSnapshot','traceDownloadBlocked','beginCsvResponse','sendTraceBusyResponse',
     'handleVelocityTraceDownload','handleLoopTimingTraceDownload','handleLqrControlTraceDownload',
     'captureHttpStatus','serviceHttpRequests','handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','enqueueHttpCommand',
     'serveWebFile','cycleLqrSpeedSource','resetPs4MotionInput','executeOperatorCommand',
@@ -357,6 +367,7 @@ int main(){
   onSerialOutput={};
   assert(serialChecks>0 && right==0 && left==0);
   assert(std::string(last_stop_reason)=="TILT_STOP" && !traceDownloadBlocked(1));
+  releaseHttpTraceSnapshot();
   assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
   assert(lqr_control_trace[1].right_output==0 && lqr_control_trace[1].left_output==0);
   assert(lqr_control_trace[1].after_disable);
@@ -528,16 +539,70 @@ int main(){
   // Stable CSV copies remain independent if the robot starts after capture.
   setupCase();stopBalanceTest();velocity_trace_count=1;velocity_trace[0].elapsed_ms=876;
   assert(!traceDownloadBlocked(1));velocity_trace[0].elapsed_ms=999;
-  assert(http_trace_snapshot.velocity[0].elapsed_ms==876);
+  assert(http_trace_snapshot->velocity[0].elapsed_ms==876);
+  releaseHttpTraceSnapshot();
   loop_timing_trace[0].elapsed_ms=432;loop_timing_count=1;
   assert(!traceDownloadBlocked(2));loop_timing_trace[0].elapsed_ms=999;
-  assert(http_trace_snapshot.timing[0].elapsed_ms==432);
+  assert(http_trace_snapshot->timing[0].elapsed_ms==432);
+  releaseHttpTraceSnapshot();
   lqr_control_trace[0].elapsed_ms=654;lqr_control_trace_count=1;
   assert(!traceDownloadBlocked(3));lqr_control_trace[0].elapsed_ms=999;
-  assert(http_trace_snapshot.control[0].elapsed_ms==654);
-  http_trace_request.store(1);http_trace_kind=2;
-  assert(traceDownloadBlocked(3));assert(http_trace_kind==2);
-  http_trace_request.store(0);
+  assert(http_trace_snapshot->control[0].elapsed_ms==654);
+  releaseHttpTraceSnapshot();
+  assert(!http_trace_snapshot && csvAllocs==csvFrees);
+
+  // Allocation failures keep all original logs and return 503.
+  const auto velocity_before=velocity_trace_count,control_before=lqr_control_trace_count;
+  failCsvAllocation=true;
+  for(auto handler:{handleVelocityTraceDownload,handleLoopTimingTraceDownload,handleLqrControlTraceDownload}) {
+    handler();assert(wifi_log_server.status==503 && !http_trace_snapshot);
+  }
+  assert(velocity_trace_count==velocity_before && lqr_control_trace_count==control_before);
+  failCsvAllocation=false;
+  // A request not yet claimed can be cancelled immediately at timeout/disconnect.
+  onHttpYield={};handleLoopTimingTraceDownload();
+  assert(wifi_log_server.status==503 && !http_trace_snapshot && csvAllocs==csvFrees);
+  assert(http_trace_request==TraceIdle);
+  onHttpYield=[]{csvClientConnected=false;};handleVelocityTraceDownload();
+  assert(!http_trace_snapshot && csvAllocs==csvFrees);csvClientConnected=true;
+  // Real concurrent control copy: timeout must not free the in-use payload.
+  for(bool disconnectDuringCopy:{false,true}) {
+  std::mutex copyMutex;std::condition_variable copyCv;bool entered=false,finish=false;
+  std::thread copier;
+  onCsvCopy=[&]{std::unique_lock<std::mutex> lock(copyMutex);entered=true;copyCv.notify_all();
+    copyCv.wait(lock,[&]{return finish;});};
+  onHttpYield=[&]{if(!copier.joinable()){
+    copier=std::thread([]{serviceHttpRequests();});
+    std::unique_lock<std::mutex> lock(copyMutex);copyCv.wait(lock,[&]{return entered;});
+  } else if(disconnectDuringCopy) csvClientConnected=false;};
+  const auto frees_before=csvFrees;handleLqrControlTraceDownload();
+  assert(wifi_log_server.status==503 && http_trace_request==TraceCopying);
+  assert(http_trace_snapshot && http_trace_abandoned && csvFrees==frees_before);
+  assert(http_trace_failure==(disconnectDuringCopy?HttpTraceFailure::Disconnected:HttpTraceFailure::Timeout));
+  csvClientConnected=true;
+  // Another request cannot reuse/free/change the in-flight kind.
+  const auto old_kind=http_trace_kind;handleVelocityTraceDownload();
+  assert(wifi_log_server.status==503 && http_trace_kind==old_kind && csvFrees==frees_before);
+  {std::lock_guard<std::mutex> lock(copyMutex);finish=true;}copyCv.notify_all();copier.join();
+  onCsvCopy={};reapHttpTraceSnapshot();
+  assert(!http_trace_snapshot && csvAllocs==csvFrees);
+  }
+  // A ready copy remains immutable across an actual trial restart during send.
+  onHttpYield=[]{serviceHttpRequests();};
+  handleVelocityTraceDownload();assert(wifi_log_server.status==200);
+  const auto immutableCsv=wifi_log_server.body;
+  bool restarted=false;
+  onCsvContent=[&]{if(!restarted){restarted=true;assert(startBalanceTest());}};
+  handleVelocityTraceDownload();onCsvContent={};
+  assert(restarted && wifi_log_server.body==immutableCsv && !http_trace_snapshot);
+  stopBalanceTest();
+  // Disconnect after some sendContent calls still releases the ready snapshot.
+  onCsvContent=[]{csvClientConnected=false;};handleLqrControlTraceDownload();
+  onCsvContent={};csvClientConnected=true;
+  assert(!http_trace_snapshot && csvAllocs==csvFrees);
+  for(int i=0;i<30;++i){handleVelocityTraceDownload();handleLoopTimingTraceDownload();handleLqrControlTraceDownload();
+    assert(!http_trace_snapshot && http_trace_request==TraceIdle && csvAllocs==csvFrees);}
+
 
 
   // PS4 library init result and actual connection are distinct diagnostic facts.
@@ -715,10 +780,16 @@ int main(){
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
 with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     cpp=Path(directory)/'drive.cpp';binary=Path(directory)/'drive'
-    bodies = [function(n) for n in names]
+    bodies = [function(n).replace('malloc(sizeof(HttpTraceSnapshot))','csvMalloc(sizeof(HttpTraceSnapshot))')
+              .replace('free(http_trace_snapshot)','csvFree(http_trace_snapshot)')
+              .replace('memcpy(http_trace_snapshot->','copyCsvSnapshot(http_trace_snapshot->') for n in names]
     prototypes = '\n'.join(body[:body.index('{')]+';' for body in bodies)
     cpp.write_text(prelude+prefix+prototypes+stubs+'\n'.join(bodies)+'}\n'+checks)
+    sanitizer_flags = ['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('CSV_TEST_SANITIZERS') else []
     subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',
-                    '-Iinclude','-Itests/wheel_host','-I'+str(foc),str(cpp),
-                    str(foc/'common/pid.cpp'),str(foc/'common/base_classes/Sensor.cpp'),'-o',str(binary)],check=True)
+                    '-pthread','-Iinclude','-Itests/wheel_host','-I'+str(foc),str(cpp),
+                    str(foc/'common/pid.cpp'),str(foc/'common/base_classes/Sensor.cpp'),'-o',str(binary)]+sanitizer_flags,check=True)
     subprocess.run([str(binary)],check=True)
+
+for term in ['malloc(', 'free(', 'releaseHttpTraceSnapshot(', 'reapHttpTraceSnapshot(']:
+    assert term not in function('serviceHttpRequests')
