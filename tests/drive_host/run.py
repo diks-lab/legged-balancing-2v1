@@ -210,6 +210,20 @@ void start(float sign){
   assert(speed_direct_control==0); // preserve the old tilt-only drive profile
 }
 int main(){
+  // Resource reservation and post-Web sensor sampling stay separate.
+  {
+    TwoWire prepared_bus(0);
+    CheckedWheelSensor prepared_sensor(prepared_bus,gateWheelOutputsOff);
+    assert(prepared_bus.begin(19,18,400000));
+    assert(prepared_bus.requests==0 && !prepared_sensor.ready);
+    prepared_sensor.beginPreparedBus();
+    assert(prepared_sensor.ready && prepared_bus.begins==1 && prepared_bus.requests==4);
+    TwoWire bad_bus(1);bad_bus.nack=1;
+    CheckedWheelSensor bad_sensor(bad_bus,gateWheelOutputsOff);
+    assert(bad_bus.begin(23,5,400000));
+    bad_sensor.beginPreparedBus();
+    assert(!bad_sensor.ready && bad_sensor.fault && bad_bus.begins==1);
+  }
   http_status_queue=xQueueCreate(1,sizeof(HttpStatus));
   http_command_queue=xQueueCreate(1,sizeof(char));
   onHttpYield=[]{serviceHttpRequests();};

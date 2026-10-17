@@ -49,6 +49,7 @@ unsigned heap_caps_get_largest_free_block(uint32_t caps){assert(caps==3);return 
 unsigned uxTaskGetStackHighWaterMark(TaskHandle_t){return 4000;}
 struct {
   std::string text;
+  void print(const char* s){text+=s;}
   void println(const char* s){text+=s;text+='\n';}
   template<class... A> void printf(const char* f,A... args){
     char buf[1024];snprintf(buf,sizeof(buf),f,args...);text+=buf;
@@ -122,6 +123,16 @@ start = source.index('class CheckedHttpServer :')
 end = source.index('BLDCMotor motor1(', start)
 code += source[start:end]
 code += r'''
+constexpr unsigned I2C_BUFFER_LENGTH=128;
+struct Bus {
+  int index, calls=0; bool fail=false; unsigned timeout=0;
+  bool begin(int sda,int scl,unsigned hz){
+    assert(!wheel_outputs_enabled && wifi_calls==0 && creates==0);
+    assert(hz==400000 && sda==(index?23:19) && scl==(index?5:18));
+    stages.push_back(index?"i2c1":"i2c0");++calls;return !fail;
+  }
+  void setTimeOut(unsigned ms){timeout=ms;}
+} I2Cone{0},I2Ctwo{1};
 void captureHttpStatus(){++snapshots;}
 void enforceStartupOutputGate();
 void reportStartupFailure(const char*);
@@ -139,7 +150,7 @@ void initializeRobotHardware(){
 '''
 
 code += '\n'.join(function(n) for n in
-                  ['publishStartupPhase','enforceStartupOutputGate','startupHardwareStepAllowed','advanceStartup','formatHttpResources', 'printHttpStartupMemory', 'reportStartupFailure',
+                  ['printHttpStartupMemory','prepareI2cResources','publishStartupPhase','enforceStartupOutputGate','startupHardwareStepAllowed','advanceStartup','formatHttpResources', 'reportStartupFailure',
                    'maybePrintStartupMenu', 'setupWifiLogServer', 'startWifiHttpServer',
                    'updateWifiLogServer'])
 code += r'''
@@ -152,6 +163,8 @@ void reset(){
   kEnableWifiLogServer=true;startup_foc_ready.store(false);startup_menu_printed=false;
   startup_web_ready.store(false);startup_http_ready.store(false);
   foc_initialization_attempted=foc_initialization_failed=false;startup_phase="WEB_WAIT";
+  i2c_resources_attempted=false;i2c0_resources_ready=i2c1_resources_ready=true;
+  I2Cone.calls=I2Ctwo.calls=0;I2Cone.fail=I2Ctwo.fail=false;I2Cone.timeout=I2Ctwo.timeout=0;
   test_system_ready=emergency_stop_active=fail_foc=lose_preflight_during_foc=false;
   startup_foc_gate.store(StartupFocGate::Waiting);
   foc_calls=gates=snapshots=0;wheel_outputs_enabled=false;
@@ -167,6 +180,29 @@ void tick(){
 }
 void connect(uint32_t ip=0xc0a8012a){WiFi.connection_status=WL_CONNECTED;WiFi.ip.value=ip;}
 int main(){
+  for (int failed=0;failed<=2;++failed){
+    reset();i2c0_resources_ready=i2c1_resources_ready=false;
+    I2Cone.fail=failed==1;I2Ctwo.fail=failed==2;wheel_outputs_enabled=true;
+    prepareI2cResources();
+    assert(!wheel_outputs_enabled && i2c_resources_attempted);
+    assert(I2Cone.calls==1 && I2Ctwo.calls==1);
+    assert(i2c0_resources_ready==(failed!=1) && i2c1_resources_ready==(failed!=2));
+    assert(I2Cone.timeout==(failed==1?0:5) && I2Ctwo.timeout==(failed==2?0:5));
+    assert((stages==std::vector<std::string>{"i2c0","i2c1"}));
+    for(const char* stage:{"before_i2c0","after_i2c0","before_i2c1","after_i2c1"})
+      assert(Serial.text.find(String("stage=")+stage)!=String::npos);
+    assert(Serial.text.find("rx_bytes=128 tx_bytes=128")!=String::npos);
+    prepareI2cResources();assert(I2Cone.calls==1 && I2Ctwo.calls==1);
+    setupWifiLogServer();connect();tick();
+    if(failed){
+      assert(foc_calls==0 && help_count==0 && !wheel_outputs_enabled);
+      assert(wifi_log_server_started); // Web diagnostics survive bus reservation failure.
+      assert(!startupHardwareStepAllowed());
+      assert(String(startup_phase)==(failed==1?"I2C0_RESOURCES_FAILED":"I2C1_RESOURCES_FAILED"));
+      for(int i=0;i<3;++i) { tick(); }
+      assert(foc_calls==0);
+    }else assert(foc_calls==1 && help_count==1);
+  }
   reset();
   // A 6 KiB largest heap block is smaller than the reserved 8 KiB stack.
   setupWifiLogServer();assert(http_task_handle && http_task_ready.load());
@@ -284,6 +320,15 @@ with tempfile.TemporaryDirectory(prefix='http-startup-') as directory:
 setup = function('setup')
 assert 'printHelp();' not in setup and 'setupWifiLogServer();' in setup
 assert 'initFOC' not in setup and 'sensor1.begin' not in setup
+assert setup.index('prepareI2cResources();') < setup.index('setupPs4Controller();') < setup.index('setupWifiLogServer();')
+prepare=function('prepareI2cResources')
+assert 'Sensor' not in prepare and 'initFOC' not in prepare and 'beginTransmission' not in prepare
+assert 'setBufferSize' not in prepare and '.end()' not in prepare
+assert 'sensor1.beginPreparedBus();' in function('initializeRobotHardware')
+assert 'sensor2.beginPreparedBus();' in function('initializeRobotHardware')
+assert 'sensor1.begin(' not in function('initializeRobotHardware')
+assert 'sensor2.begin(' not in function('initializeRobotHardware')
+assert 'after_both_wheels_initialized' in function('initializeRobotHardware')
 hardware = function('initializeRobotHardware')
 assert hardware.count('return;') == hardware.count('reportStartupFailure(startup_stage);') + hardware.count('if (!startupHardwareStepAllowed()) return;')
 assert 'startup_foc_ready.store(true)' not in hardware
@@ -307,3 +352,9 @@ for name in ['httpTask', 'handleWifiStatusPage', 'serviceHttpPs4DiagnosticSerial
         assert hardware_access not in text, (name, hardware_access)
 for hardware_read in ['getAngle(', 'getVelocity(', 'beginTransmission(', 'requestFrom(', 'loopFOC(', 'initFOC(']:
     assert hardware_read not in function('captureHttpStatus')
+
+# Memory/failure reporting must still work when Print::printf cannot malloc.
+for name in ['printHttpStartupMemory', 'reportStartupFailure', 'prepareI2cResources']:
+    assert 'Serial.printf' not in function(name)
+    assert 'String(' not in function(name)
+    assert 'snprintf(' in function(name)

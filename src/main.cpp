@@ -287,6 +287,8 @@ std::atomic<bool> startup_http_ready{false};
 enum class StartupFocGate { Waiting, Initializing, Aborted, Ready };
 std::atomic<StartupFocGate> startup_foc_gate{StartupFocGate::Waiting};
 // Main-loop-owned startup state; HTTP only sees its queued text snapshot.
+bool i2c_resources_attempted = false;
+bool i2c0_resources_ready = false, i2c1_resources_ready = false;
 bool foc_initialization_attempted = false;
 bool foc_initialization_failed = false;
 const char* startup_phase = "WEB_WAIT";
@@ -731,6 +733,7 @@ void updateLqrRunDiagnostic(float right_output, float left_output);
 
 // Wi-Fi trace logger
 void setupWifiLogServer();
+void prepareI2cResources();
 void initializeRobotHardware();
 void advanceStartup();
 bool startupHardwareStepAllowed();
@@ -802,20 +805,59 @@ void setup() {
   sms_sts.pSerial = &Serial2;
   delay(1000);
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
+  prepareI2cResources(); // Buffers and bus drivers only; wheel EN remains LOW.
+  printHttpStartupMemory("before_ps4");
   setupPs4Controller(); // Connection is diagnostic, not an FOC prerequisite.
-  setupWifiLogServer(); // No motor/I2C initialization before Web readiness.
-  publishStartupPhase("WEB_WAIT");
+  printHttpStartupMemory("after_ps4");
+  setupWifiLogServer(); // No sensor reads, calibration or motor/FOC before Web readiness.
+  if (i2c0_resources_ready && i2c1_resources_ready) {
+    publishStartupPhase("WEB_WAIT");
+  } else {
+    const char* stage = !i2c0_resources_ready ? "I2C0_RESOURCES_FAILED" : "I2C1_RESOURCES_FAILED";
+    publishStartupPhase(stage);
+    reportStartupFailure(stage);
+  }
 }
 
 namespace {
+void prepareI2cResources() {
+  if (i2c_resources_attempted) return; // A failed reservation requires reboot.
+  i2c_resources_attempted = true;
+  gateWheelOutputsOff();
+  // Preserve the framework's default RX/TX size, pins, frequency and timeout.
+  // begin() reserves BOTH Wire buffers, locks and the IDF master driver.
+  char resource_result[160];
+  printHttpStartupMemory("before_i2c0");
+  i2c0_resources_ready = I2Cone.begin(19, 18, 400000);
+  if (i2c0_resources_ready) I2Cone.setTimeOut(5);
+  printHttpStartupMemory("after_i2c0");
+  snprintf(resource_result, sizeof(resource_result), "I2C resources bus=I2C_0 sda=19 scl=18 hz=400000 rx_bytes=%u tx_bytes=%u result=%s\n",
+      static_cast<unsigned>(I2C_BUFFER_LENGTH), static_cast<unsigned>(I2C_BUFFER_LENGTH),
+      i2c0_resources_ready ? "READY" : "FAILED");
+  Serial.print(resource_result);
+  printHttpStartupMemory("before_i2c1");
+  i2c1_resources_ready = I2Ctwo.begin(23, 5, 400000);
+  if (i2c1_resources_ready) I2Ctwo.setTimeOut(5);
+  printHttpStartupMemory("after_i2c1");
+  snprintf(resource_result, sizeof(resource_result), "I2C resources bus=I2C_1 sda=23 scl=5 hz=400000 rx_bytes=%u tx_bytes=%u result=%s\n",
+      static_cast<unsigned>(I2C_BUFFER_LENGTH), static_cast<unsigned>(I2C_BUFFER_LENGTH),
+      i2c1_resources_ready ? "READY" : "FAILED");
+  Serial.print(resource_result);
+  // No end()/retry: keep successful reservations for the post-Web sensor phase.
+  gateWheelOutputsOff();
+}
+
 void initializeRobotHardware() {
   const char* startup_stage = "WHEEL_ALIGN_TIMER";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
+  printHttpStartupMemory("before_wheel_align_timer");
   esp_timer_create_args_t alignArgs = {};
   alignArgs.callback = wheelAlignTimeout;
   alignArgs.name = "wheel_align_guard";
-  if (esp_timer_create(&alignArgs, &wheelAlignTimer) != ESP_OK) {
+  const esp_err_t align_timer_result = esp_timer_create(&alignArgs, &wheelAlignTimer);
+  printHttpStartupMemory("after_wheel_align_timer");
+  if (align_timer_result != ESP_OK) {
     disableBothDrivers();
     Serial.println("ERROR: wheel alignment timer unavailable; reboot required.");
     publishStartupPhase(startup_stage);
@@ -826,8 +868,8 @@ void initializeRobotHardware() {
   startup_stage = "WHEEL_SENSORS";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
-  sensor1.begin(19, 18);
-  sensor2.begin(23, 5);
+  sensor1.beginPreparedBus();
+  sensor2.beginPreparedBus();
   if (!wheelSensorsOK()) {
     disableBothDrivers();
     Serial.println("ERROR: wheel sensor initialization failed; reboot required.");
@@ -857,15 +899,20 @@ void initializeRobotHardware() {
     reportStartupFailure(startup_stage);
     return;
   }
+  printHttpStartupMemory("before_mpu6050");
   mpu6050.begin();
   calibrateMpu6050();
+  printHttpStartupMemory("after_mpu6050");
 
   driver1.voltage_power_supply = kWheelSupplyVoltage;
   driver1.voltage_limit = kWheelSupplyVoltage;
   startup_stage = "RIGHT_DRIVER";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
-  if (!driver1.init()) {
+  printHttpStartupMemory("before_right_driver");
+  const int right_driver_result = driver1.init();
+  printHttpStartupMemory("after_right_driver");
+  if (!right_driver_result) {
     Serial.println("ERROR: Right driver initialization failed.");
     disableBothDrivers();
     publishStartupPhase(startup_stage);
@@ -884,7 +931,10 @@ void initializeRobotHardware() {
   startup_stage = "RIGHT_MOTOR";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
-  if (!refreshWheelSensors() || !motor1.init() || !refreshWheelSensors()) {
+  printHttpStartupMemory("before_right_motor");
+  const bool right_motor_ready = refreshWheelSensors() && motor1.init() && refreshWheelSensors();
+  printHttpStartupMemory("after_right_motor");
+  if (!right_motor_ready) {
     Serial.println("ERROR: Right motor initialization failed.");
     disableBothDrivers();
     publishStartupPhase(startup_stage);
@@ -894,7 +944,9 @@ void initializeRobotHardware() {
   startup_stage = "RIGHT_FOC";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
+  printHttpStartupMemory("before_right_foc");
   const int motor1FocStatus = initializeWheelFoc(motor1);
+  printHttpStartupMemory("after_right_foc");
   Serial.printf("Right FOC initialization result: %d\n", motor1FocStatus);
   if (motor1FocStatus == 0) {
     Serial.println("ERROR: Right FOC initialization failed.");
@@ -921,7 +973,10 @@ void initializeRobotHardware() {
   startup_stage = "LEFT_DRIVER";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
-  if (!driver2.init()) {
+  printHttpStartupMemory("before_left_driver");
+  const int left_driver_result = driver2.init();
+  printHttpStartupMemory("after_left_driver");
+  if (!left_driver_result) {
     Serial.println("ERROR: Left driver initialization failed.");
     disableBothDrivers();
     publishStartupPhase(startup_stage);
@@ -940,7 +995,10 @@ void initializeRobotHardware() {
   startup_stage = "LEFT_MOTOR";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
-  if (!refreshWheelSensors() || !motor2.init() || !refreshWheelSensors()) {
+  printHttpStartupMemory("before_left_motor");
+  const bool left_motor_ready = refreshWheelSensors() && motor2.init() && refreshWheelSensors();
+  printHttpStartupMemory("after_left_motor");
+  if (!left_motor_ready) {
     Serial.println("ERROR: Left motor initialization failed.");
     disableBothDrivers();
     publishStartupPhase(startup_stage);
@@ -950,7 +1008,9 @@ void initializeRobotHardware() {
   startup_stage = "LEFT_FOC";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
+  printHttpStartupMemory("before_left_foc");
   const int motor2FocStatus = initializeWheelFoc(motor2);
+  printHttpStartupMemory("after_left_foc");
   Serial.printf("Left FOC initialization result: %d\n", motor2FocStatus);
   if (motor2FocStatus == 0) {
     Serial.println("ERROR: Left FOC initialization failed.");
@@ -988,6 +1048,7 @@ void initializeRobotHardware() {
   lqr_diagnostic_armed = false;
   lqr_direction_test_armed = false;
   balance_wait_active = false;
+  printHttpStartupMemory("after_both_wheels_initialized");
   Serial.println("OK: both motors initialized and stopped at 0.00 V.");
   // Sampling began while waiting for Web. Reapply the original first-packet
   // release guard so held startup inputs cannot become new motion commands.
@@ -1006,11 +1067,14 @@ void enforceStartupOutputGate() {
 }
 
 bool startupHardwareStepAllowed() {
-  if (startup_web_ready.load() && startup_foc_gate.load() != StartupFocGate::Aborted &&
+  if (i2c0_resources_ready && i2c1_resources_ready &&
+      startup_web_ready.load() && startup_foc_gate.load() != StartupFocGate::Aborted &&
       !emergency_stop_active) return true;
   test_system_ready = false;
   disableBothDrivers();
-  publishStartupPhase(emergency_stop_active ? "FOC_INHIBITED_FULL_STOP" : "WEB_LOST_DURING_FOC");
+  publishStartupPhase(!i2c0_resources_ready ? "I2C0_RESOURCES_FAILED" :
+      (!i2c1_resources_ready ? "I2C1_RESOURCES_FAILED" :
+       (emergency_stop_active ? "FOC_INHIBITED_FULL_STOP" : "WEB_LOST_DURING_FOC")));
   reportStartupFailure(startup_phase);
   return false;
 }
@@ -1019,6 +1083,7 @@ void advanceStartup() {
   // Only the main loop may admit FOC or use either I2C bus.
   if (foc_initialization_attempted || test_system_ready) return;
   gateWheelOutputsOff();
+  if (!i2c0_resources_ready || !i2c1_resources_ready) return;
   if (emergency_stop_active) {
     if (strcmp(startup_phase, "FOC_INHIBITED_FULL_STOP") != 0)
       publishStartupPhase("FOC_INHIBITED_FULL_STOP");
@@ -4697,6 +4762,7 @@ void captureHttpStatus() {
        (lqr_direction_test_armed ? "RUNNING" : "STOPPED"));
   snprintf(status.text, sizeof(status.text),
       "Startup phase: %s / Web prerequisite: %s / FOC=%s attempted=%d\n"
+      "I2C resources: I2C_0=%s I2C_1=%s RX/TX=%u/%u bytes per bus\n"
       "State: %s\nLast stop reason: %s\n"
       "Cached AngleY: %.6f deg\nReference: %.6f deg\nDelta: %.6f deg\n"
       "System initialized: %s\n"
@@ -4709,6 +4775,8 @@ void captureHttpStatus() {
       test_system_ready ? "READY" : (foc_initialization_failed ? "FAILED" :
           (foc_initialization_attempted ? "INITIALIZING" : "NOT_INITIALIZED")),
       static_cast<int>(foc_initialization_attempted),
+      i2c0_resources_ready ? "READY" : "FAILED", i2c1_resources_ready ? "READY" : "FAILED",
+      static_cast<unsigned>(I2C_BUFFER_LENGTH), static_cast<unsigned>(I2C_BUFFER_LENGTH),
       state, last_stop_reason, LQR_angle, angle_zeropoint,
       LQR_angle - angle_zeropoint, test_system_ready ? "yes" : "no",
       static_cast<int>(driver1_initialized), static_cast<int>(sensor1.ready),
@@ -4806,7 +4874,9 @@ void startWifiHttpServer() {
     });
     http_routes_registered = true;
   }
+  printHttpStartupMemory("before_http_listen");
   wifi_log_server.begin();
+  printHttpStartupMemory("after_http_listen");
   wifi_log_server_started = wifi_log_server.listening();
   startup_http_ready.store(wifi_log_server_started);
   if (!wifi_log_server_started) {
@@ -4840,7 +4910,8 @@ void formatHttpResources(char* text, size_t capacity) {
 
 void printHttpStartupMemory(const char* stage) {
   constexpr uint32_t caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-  Serial.printf(
+  char text[384];
+  snprintf(text, sizeof(text),
       "HTTP memory stage=%s heap_free=%lu internal_free=%lu internal_largest=%lu "
       "stack_bytes=%lu tcb_bytes=%u status_bytes=%u trace_copy_bytes=%u\n",
       stage, static_cast<unsigned long>(ESP.getFreeHeap()),
@@ -4850,16 +4921,20 @@ void printHttpStartupMemory(const char* stage) {
       static_cast<unsigned>(sizeof(http_task_tcb)),
       static_cast<unsigned>(sizeof(HttpStatus)),
       static_cast<unsigned>(sizeof(http_trace_snapshot)));
+  Serial.print(text);
 }
 
 void reportStartupFailure(const char* stage) {
-  Serial.printf(
-      "STARTUP: stage=%s state=FAILED foc=%s littlefs=%s wifi_ip=%s http=%s menu=%s\n",
+  char text[384];
+  snprintf(text, sizeof(text),
+      "STARTUP: stage=%s state=FAILED foc=%s littlefs=%s wifi_ip=%s http=%s menu=%s i2c0=%s i2c1=%s\n",
       stage, startup_foc_ready.load() ? "READY" : "NOT_READY",
       http_filesystem_ready ? "READY" : "NOT_READY",
       wifi_connection_ready ? "READY" : "NOT_READY",
       startup_http_ready.load() ? "LISTENING" : "NOT_READY",
-      startup_menu_printed ? "ALREADY_PRINTED" : "SUPPRESSED");
+      startup_menu_printed ? "ALREADY_PRINTED" : "SUPPRESSED",
+      i2c0_resources_ready ? "READY" : "FAILED", i2c1_resources_ready ? "READY" : "FAILED");
+  Serial.print(text);
 }
 
 void maybePrintStartupMenu() {
@@ -4882,7 +4957,10 @@ void setupWifiLogServer() {
 
   printHttpStartupMemory("before_queues");
   http_status_queue = xQueueCreate(1, sizeof(HttpStatus));
+  printHttpStartupMemory("after_status_queue");
+  printHttpStartupMemory("before_command_queue");
   http_command_queue = xQueueCreate(1, sizeof(char));
+  printHttpStartupMemory("after_command_queue");
   if (!http_status_queue || !http_command_queue) {
     if (http_status_queue) vQueueDelete(http_status_queue);
     if (http_command_queue) vQueueDelete(http_command_queue);
@@ -4909,6 +4987,7 @@ void setupWifiLogServer() {
     Serial.println("HTTP task unavailable; robot control continues without Web.");
     return;
   }
+  printHttpStartupMemory("before_filesystem");
   http_filesystem_ready = LittleFS.begin(false); // Never format on mount failure.
   if (!http_filesystem_ready) {
     Serial.println("LittleFS mount failed; no formatting performed.");
@@ -4917,8 +4996,11 @@ void setupWifiLogServer() {
     Serial.println("LittleFS mount: READY");
   }
   printHttpStartupMemory("after_filesystem");
+  printHttpStartupMemory("before_wifi_mode");
   if (!WiFi.mode(WIFI_STA)) reportStartupFailure("WIFI_MODE");
+  printHttpStartupMemory("after_wifi_mode");
   WiFi.setAutoReconnect(true);
+  printHttpStartupMemory("before_wifi_begin");
   WiFi.begin(SSID_NAME, SSID_KEY);
   Serial.printf("WiFi: connecting to SSID %s\n", SSID_NAME);
   printHttpStartupMemory("after_wifi");
@@ -4938,6 +5020,7 @@ void updateWifiLogServer() {
       const String ip_address = ip.toString();
       if (!wifi_connection_ready || wifi_announced_ip != ip_address) {
         // Print the numeric URL before attempting HTTP or optional mDNS.
+        printHttpStartupMemory("wifi_ip_ready");
         Serial.println("WiFi: 接続完了 (connected)");
         Serial.printf("WiFi DHCP IP: %s\n", ip_address.c_str());
         Serial.printf("HTTP access URL: http://%s/\n", ip_address.c_str());

@@ -137,3 +137,26 @@ PS4入力処理に間隔が空く。ビルド成功を実機の安全な起動�
 通知補正スクリプトを通常ビルド経路で適用してELF/firmware.binを生成した。
 既存ライブラリの非推奨API等の警告は残る。これは実機接続・HTTP待受成功の確認ではない。
 今回dataファイル・パーティションは未変更で、実機へのファーム/data書き込みは行っていない。
+
+## I2C資源を無線開始前に準備
+
+利用者のed9c4ed実機では、Web先行起動後にI2C_1 RX確保が失敗した。
+今回の変更は両バスの既定RX128 B/TX128 Bとマスタードライバー資源を
+Bluetooth/Wi-Fi前に確保し、センサー読み取り・モーター/FOCをWeb正常化後に分離する。
+[調査結果・起動ログ一覧](i2c-startup-memory.md)を参照。
+
+- `PLATFORMIO_CORE_DIR=/workspace/pio-core python3 tests/i2c_resources_host/run.py` 成功。
+  実Wireの確保/begin関数とアプリ準備関数で、両バスのRX/TX各失敗、mutex/driver失敗、
+  TX失敗後のRX解放、確保済みバスの再利用を確認。
+- `tests/http_startup_host/run.py` 成功。準備失敗でもWeb診断を起動し、FOC/メニューを抑止。
+  成功時もWebのLittleFS/IP/TCP待受が正常になるまでFOCを開始せず、既存の起動テストも通過。
+- `tests/drive_host/run.py` 成功。準備済みバスのセンサー初期化で再beginせず、従来の4回の
+  初期読み取りを維持。I2C NACKは従来どおりfaultにする。既存PS4/制御/停止/CSV回帰も成功。
+- PS4通知テスト、姿勢3系統、車輪51シナリオ、JavaScript構文、差分検査も成功。
+- ed9c4edと起動/状態表示・メモリーログ以外の115関数本文が同一。PID、FOCヘルパー、PS4、実行時停止経路を保持。
+- `pio run -e esp32dev` 成功（29.37秒）。RAM **115,268 B**、Flash **1,889,697 B**。
+  実行時ヒープを示す値ではない。スタック/バッファ容量・data・パーティションは変更なし。
+
+実機の新しい起動ログは未取得。実機で両I2C資源が確保できるか、Wi-Fi/IP/HTTPと
+両輪FOCまで成立するか、起動後の内部RAM余裕・制御周期・走行応答は未検証。
+実機へのファーム/data書き込みは実施していない。

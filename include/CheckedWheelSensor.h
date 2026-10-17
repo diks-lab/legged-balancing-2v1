@@ -17,6 +17,12 @@ class CheckedWheelSensor : public Sensor {
   void begin(int sda, int scl) {
     if (!bus_.begin(sda, scl, 400000)) { fail("BUS_INIT"); return; }
     bus_.setTimeOut(5);
+    beginPreparedBus();
+  }
+
+  // Caller must have checked TwoWire::begin() before entering this path.
+  // Keep bus buffers/driver allocated; perform sensor reads only after Web is ready.
+  void beginPreparedBus() {
     Sensor::init();
     ready = !fault;
   }
