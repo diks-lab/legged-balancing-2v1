@@ -19,6 +19,7 @@
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
+#include "Ps4ClassicBluetooth.h"
 #include "FocAlignmentObservation.h"
 
 #include "Servo_STS3032.h"
@@ -5499,7 +5500,17 @@ void setupPs4Controller() {
   PS4.attachOnDisconnect(onPs4Disconnect);
   PS4.attach(onPs4Input);
   ps4_diagnostics.init_attempted = true;
-  ps4_diagnostics.init_ok = PS4.begin(); // Preserve the existing pairing setup.
+  printHttpStartupMemory("before_classic_bt");
+  const auto classic = preparePs4ClassicBluetooth();
+  printHttpStartupMemory("after_classic_bt");
+  Serial.printf("PS4 Bluetooth startup: %s\n",
+      classic == Ps4ClassicStartup::Ready ? "CLASSIC_ONLY_READY" :
+      classic == Ps4ClassicStartup::AlreadyInitialized ? "FAILED_ALREADY_INITIALIZED; reboot required" :
+      classic == Ps4ClassicStartup::StartFailed ? "FAILED_CLASSIC_START; reboot required" :
+      "FAILED_NOT_ENABLED; reboot required");
+  // PS4.begin() sees the running Classic controller and skips default btStart().
+  // No MAC argument: preserve the existing pairing setup.
+  ps4_diagnostics.init_ok = classic == Ps4ClassicStartup::Ready && PS4.begin();
   ps4_diagnostics.dirty = true;
   ++ps4_diagnostics.revision;
   Serial.printf("PS4 library initialization: %s; controller connection is separate.\n",

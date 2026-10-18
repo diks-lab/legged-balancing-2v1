@@ -287,3 +287,28 @@ config_cfm→ps4ConnectEvent→ps4Enable→ps4_l2cap_send_hid:107という経路
 ビルド/ホストテスト成功は、PS4実機接続成功や実機での失敗時ヒープ量の確認ではない。
 失敗時の切断要求、遅いBT通知、再接続、通常操作と制御周期は実機未検証。
 PID・FOC・ペアリング・操作割り当て・停止条件を変更せず、実機書き込み/マージは行っていない。
+
+## Classic専用起動の単独変更
+
+[起動方式と実機確認項目](ps4-classic-startup.md)、
+[全パッチの対象版・理由・撤去条件](library-patches.md)を追加した。
+Arduino公開APIでClassic専用起動を行い、PS4/Arduinoへの新規パッチは追加しない。
+
+- `python3 tests/ps4_classic_host/run.py` 成功。アプリの実ヘルパーと使用中coreの
+  実btStartMode本文をコンパイルし、IDLE確認、BLE解放呼出→Classic cfg/init/enable、
+  二重初期化拒否、init/enable失敗を確認。解放バイト数の実測ではない。
+- `python3 tests/drive_host/run.py` 成功。Classic未成立時にPS4.beginへ進まないことを追加。
+  既存の初期化/接続区別、短い入力、一定保持、切断/再接続、停止優先、CSV/状態表示も回帰確認。
+- `tests/ps4_events_host/run.py`、`tests/ps4_l2cap_host/run.py` 成功。
+  既存FIFO/通知補正とHID確保失敗後の中断を維持した。
+- `tests/http_startup_host/run.py` は診断設定0/1で成功。
+  Web先行、FOC移行、停止/失敗/メニュー条件は変更しない。
+- FOC観測とパッチの8テストが成功。既存関数本文で変わったのはsetupPs4Controllerのみ。
+  PID/FOC/操作/停止経路、トレース、FIFO/Batch、タスクスタックを変更していない。
+- ESP32ビルド成功（96.99秒）。RAM **105,340 B**（前版比0 B）、Flash **1,892,961 B**。
+  Classic化の主目的である実行時ヒープ回収量は静的RAM表示とは別に評価する。
+
+PS4接続/入力/切断/再接続、Wi-Fi併用時の内部空き/最大連続領域は実機確認待ち。
+実機書き込み/マージは実施していない。確認完了までWebSocketは追加しない。
+後続の初期仕様は診断専用・1クライアント・20 Hz・ブラウザーグラフ/記録/CSVとし、
+100 Hz化・元トレース削減は別途判断する。

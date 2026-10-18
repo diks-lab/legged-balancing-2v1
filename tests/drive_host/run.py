@@ -98,6 +98,9 @@ struct WebServer {
   void sendContent(const char* data){body+=data;if(onCsvContent)onCsvContent();}
   void streamFile(File,const char*) {status=200;body="asset";}
 };
+enum class Ps4ClassicStartup { Ready, AlreadyInitialized, StartFailed, NotEnabled };
+Ps4ClassicStartup classicStartup=Ps4ClassicStartup::Ready;
+Ps4ClassicStartup preparePs4ClassicBluetooth(){return classicStartup;}
 struct {
   bool ok=false;int begins=0;
   void (*connect_cb)()=nullptr;void (*disconnect_cb)()=nullptr;void (*input_cb)()=nullptr;
@@ -144,6 +147,7 @@ void vTaskDelay(int ms){delay(ms);if(onHttpYield)onHttpYield();}
 bridge_start = source.index('struct HttpStatus {')
 bridge_end = source.index('void captureHttpStatus();', bridge_start)
 prefix += source[bridge_start:bridge_end]
+prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
 names = [
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
@@ -612,6 +616,12 @@ int main(){
   setupPs4Controller();assert(ps4_diagnostics.init_attempted && !ps4_diagnostics.init_ok);
   assert(!ps4_diagnostics.connected && PS4.begins==1);
   PS4.ok=true;setupPs4Controller();assert(ps4_diagnostics.init_ok && !ps4_diagnostics.connected);
+  const int begins_before_mode_failure=PS4.begins;
+  for (auto failure : {Ps4ClassicStartup::AlreadyInitialized, Ps4ClassicStartup::StartFailed, Ps4ClassicStartup::NotEnabled}) {
+    classicStartup=failure;setupPs4Controller();
+    assert(!ps4_diagnostics.init_ok && PS4.begins==begins_before_mode_failure);
+  }
+  classicStartup=Ps4ClassicStartup::Ready;setupPs4Controller();
   stopBalanceTest();test_system_ready=false;startup_foc_ready.store(false);
   ps4_was_connected=false;handlePs4Connection(true);
   assert(ps4_diagnostics.connected && ps4_diagnostics.connects==1);
