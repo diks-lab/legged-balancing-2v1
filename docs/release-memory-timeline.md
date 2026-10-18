@@ -101,3 +101,5 @@ PS4低層の観測フックは既存の1.1.1版/全体SHA照合パッチに追�
 
 Web初回配信の修正後は、最初の要求ルート/実ファイルサイズ/失敗段階をevent14〜16で記録する。
 [対応表と結果コード](bounded-web-files.md)を参照。既存リング容量は増やさない。
+
+正常Webファイル配信の終了記録event17–19は[continuing-http-files.md](continuing-http-files.md)を参照。既存32件リングを共用し、これらのfree/largest欄はメモリー値ではなく型別の送信計数です。

@@ -17,6 +17,7 @@
 #include <new>
 #include <lwip/sockets.h>
 #include "BoundedHttpResponse.h"
+#include "ContinuingHttpFile.h"
 #include "ReleaseMemoryObservation.h"
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
@@ -32,6 +33,7 @@ namespace {
 ReleaseMemoryObserver release_memory_observer;
 bool release_memory_serial_active=false;
 bool first_http_request=false;
+bool http_response_pending=false;
 uint16_t first_http_route=0;
 portMUX_TYPE release_memory_lock = portMUX_INITIALIZER_UNLOCKED;
 void serviceReleaseMemoryObservation();
@@ -40,9 +42,10 @@ struct HttpMemoryRequest {
     portENTER_CRITICAL(&release_memory_lock);
     first_http_request=release_memory_observer.requests==0;
     release_memory_observer.httpBegin();portEXIT_CRITICAL(&release_memory_lock);
-    if(first_http_request){first_http_route=route;observeReleaseMemory(MemHttpFirstRoute,route,0);}
+    first_http_route=route;
+    if(first_http_request)observeReleaseMemory(MemHttpFirstRoute,route,0);
   }
-  ~HttpMemoryRequest(){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpEnd();portEXIT_CRITICAL(&release_memory_lock);first_http_request=false;}
+  ~HttpMemoryRequest(){if(!http_response_pending){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpEnd();portEXIT_CRITICAL(&release_memory_lock);}first_http_request=false;}
 };
 void observeHttpStatusSend(bool ok){
   if(ok)return;
@@ -4993,7 +4996,37 @@ struct HttpResponseTransport {
       return result < 0 ? -errno : result;
     }
     void stop() { client.stop(); }
+    bool connected() { return client.connected(); }
 };
+
+ContinuingHttpFile<NetworkClient,File> http_file_response;
+static_assert(sizeof(http_file_response)<=512,"one bounded HTTP context");
+void serviceHttpFileResponse(){
+  if(!http_response_pending)return;
+  HttpResponseTransport transport{http_file_response.client()};
+  if(WiFi.status()!=WL_CONNECTED)http_file_response.finish(HttpFileEnd::WifiLost,millis());
+  else http_file_response.poll(transport);
+  if(!http_file_response.finished())return;
+  const auto& m=http_file_response.metrics();
+  observeHttpStatusSend(m.reason==HttpFileEnd::Complete);
+  // Three typed records reuse the existing fixed ring, without heap walks.
+  const uint32_t now=millis();
+  const uint16_t route=http_file_response.route;
+  const uint32_t end=uint32_t(m.reason)|(uint32_t(m.stage)<<8)|(uint32_t(m.calls)<<16)|(uint32_t(m.retries)<<24);
+  const ReleaseMemoryRecord records[]={
+      {now,m.elapsed,uint32_t(uint16_t(m.lastErrno)),MemHttpTxEnd,route,end},
+      {now,m.bodySent,m.bodyTotal,MemHttpTxBody,route,0},
+      {now,m.wireSent,m.wireTotal,MemHttpTxWire,route,0}};
+  portENTER_CRITICAL(&release_memory_lock);
+  for(const auto& r:records)release_memory_observer.push(r);
+  release_memory_observer.httpEnd();
+  portEXIT_CRITICAL(&release_memory_lock);
+  if(http_file_response.first)observeReleaseMemory(MemHttpFirstResult,route,
+      uint32_t(m.reason==HttpFileEnd::Complete?HttpSendResult::Complete:
+        m.stage==HttpFilePhase::Header?HttpSendResult::HeaderFailed:
+        m.reason==HttpFileEnd::ReadError?HttpSendResult::ReadFailed:HttpSendResult::BodyFailed)|(200u<<8));
+  http_file_response.acknowledge();http_response_pending=false;
+}
 
 void recordBoundedHttpResult(HttpSendResult result,int code){
   observeHttpStatusSend(result==HttpSendResult::Complete);
@@ -5066,8 +5099,11 @@ void serveWebFile(const char* path, const char* mime) {
   if(size>kMaxHttpWebFileBytes){
     file.close();sendSmallHttpResponse(503,"Web file exceeds bounded response limit.\n");return;
   }
-  auto client=wifi_log_server.client();HttpResponseTransport transport{client};
-  recordBoundedHttpResult(sendBoundedHttpFile(transport,file,mime),200);
+  auto client=wifi_log_server.client();
+  // Keep shared owners; WebServer may release its own client on handler return.
+  if(http_file_response.begin(client,file,mime,millis(),first_http_route,first_http_request))
+    http_response_pending=true;
+  else {file.close();client.stop();observeHttpStatusSend(false);}
 }
 
 void serviceReleaseMemoryObservation() {
@@ -5078,7 +5114,7 @@ void serviceReleaseMemoryObservation() {
   const uint32_t now=millis();
   static uint32_t last_sample=0,last_requests=UINT32_MAX;
   portENTER_CRITICAL(&release_memory_lock);
-  const uint32_t requests=release_memory_observer.requests;
+  const uint32_t requests=release_memory_observer.requests-release_memory_observer.active;
   portEXIT_CRITICAL(&release_memory_lock);
   if(requests!=last_requests || now-last_sample>=5000){
     const uint32_t f=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
@@ -5098,7 +5134,15 @@ void serviceReleaseMemoryObservation() {
     const bool have=(now-last_summary<5000) && release_memory_observer.pop(r);lost=release_memory_observer.dropped;
     portEXIT_CRITICAL(&release_memory_lock);
     int n=0;
-    if(have){
+    if(have && (r.event&255)==MemHttpTxEnd){
+      n=snprintf(line,sizeof(line),"HTTP_END ms=%lu route=%u reason=%u phase=%u elapsed=%lu calls=%u retry=%u errno=%lu lost=%lu\n",
+          (unsigned long)r.ms,unsigned(r.cid),unsigned(r.arg&255),unsigned((r.arg>>8)&255),
+          (unsigned long)r.free,unsigned((r.arg>>16)&255),unsigned(r.arg>>24),(unsigned long)r.largest,(unsigned long)lost);
+    }else if(have && ((r.event&255)==MemHttpTxBody || (r.event&255)==MemHttpTxWire)){
+      n=snprintf(line,sizeof(line),"HTTP_BYTES ms=%lu route=%u kind=%s sent=%lu total=%lu lost=%lu\n",
+          (unsigned long)r.ms,unsigned(r.cid),(r.event&255)==MemHttpTxBody?"body":"wire",
+          (unsigned long)r.free,(unsigned long)r.largest,(unsigned long)lost);
+    }else if(have){
       n=snprintf(line,sizeof(line),"MEM event=%u http_active=%u ms=%lu cid=%u arg=%lu free=%lu largest=%lu lost=%lu\n",
           unsigned(r.event&255),unsigned(r.event>>8),(unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.arg,
           (unsigned long)r.free,(unsigned long)r.largest,(unsigned long)lost);
@@ -5141,6 +5185,7 @@ void httpTask(void*) {
       if(foc_deferred_http_started){Serial.println("WiFi trace HTTP server started.");foc_deferred_http_started=false;}
     }
     serviceHttpPs4DiagnosticSerial();
+    serviceHttpFileResponse();
     serviceReleaseMemoryObservation();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -5377,7 +5422,7 @@ void updateWifiLogServer() {
   }
   if (wifi_log_server_started && WiFi.status() == WL_CONNECTED &&
       static_cast<uint32_t>(WiFi.localIP()) != 0) {
-    wifi_log_server.handleClient();
+    if(!http_response_pending)wifi_log_server.handleClient();
 
   }
 }

@@ -21,6 +21,7 @@ using portMUX_TYPE=std::mutex;
 ReleaseMemoryObserver release_memory_observer;
 bool release_memory_serial_active=false;
 bool first_http_request=false;
+bool http_response_pending=false;
 uint16_t first_http_route=0;
 size_t ps4_diagnostic_serial_offset=0,ps4_diagnostic_serial_size=0;
 portMUX_TYPE release_memory_lock;

@@ -93,6 +93,7 @@ struct {
   void setAutoReconnect(bool){}
   void begin(const char*,const char*){assert(http_task_handle);}
 } WiFi;
+bool http_response_pending=false;
 bool fail_listen=false;
 bool test_system_ready=false, emergency_stop_active=false, fail_foc=false, lose_preflight_during_foc=false;
 int foc_calls=0, gates=0, snapshots=0;
@@ -268,6 +269,12 @@ int main(){
   assert(done<ip && ip<url && url<listener && listener<menu);
   for(int i=0;i<4;++i)tick();
   assert(help_count==1 && listen_attempts==1);
+  // A continuing file response gates only new requests, not Wi-Fi monitoring.
+  http_response_pending=true;const int before_pending=handled;tick();
+  assert(handled==before_pending && startup_web_ready.load());
+  WiFi.connection_status=0;WiFi.ip.value=0;tick();
+  assert(handled==before_pending && !startup_web_ready.load());
+  http_response_pending=false;connect();tick();assert(handled>before_pending);
   // A same-IP reconnect during observation defers diagnostics until afterwards.
   WiFi.connection_status=0;WiFi.ip.value=0;tick();
   foc_alignment_observer.measuring=true;Serial.text.clear();connect();tick();
@@ -392,3 +399,11 @@ for name in ['printHttpStartupMemory', 'reportStartupFailure', 'prepareI2cResour
     assert 'snprintf(' in function(name)
 
 assert '#define HTTP_MEMORY_STAGE_DIAGNOSTICS 0' in source
+
+# Pending asset responses must not gate monitoring/diagnostic task services.
+http_task=function('httpTask')
+assert 'serviceHttpPs4DiagnosticSerial();' in http_task
+assert 'serviceHttpFileResponse();' in http_task
+assert http_task.index('updateWifiLogServer();') < http_task.index('serviceHttpFileResponse();')
+assert 'if(!http_response_pending)wifi_log_server.handleClient();' in function('updateWifiLogServer')
+assert 'http_response_pending' not in function('serviceHttpPs4DiagnosticSerial')

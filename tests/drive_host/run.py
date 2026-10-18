@@ -29,6 +29,7 @@ prelude = r'''
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
 #include "BoundedHttpResponse.h"
+#include "ContinuingHttpFile.h"
 #include "ReleaseMemoryObservation.h"
 ReleaseMemoryRecord memoryEvents[64]{};unsigned memoryEventCount=0;
 extern "C" void observeReleaseMemory(uint16_t e,uint16_t cid,uint32_t arg){
@@ -37,6 +38,7 @@ extern "C" void observeReleaseMemory(uint16_t e,uint16_t cid,uint32_t arg){
 void observeHttpStatusSend(bool){}
 bool release_memory_serial_active=false;
 bool first_http_request=false;
+bool http_response_pending=false;
 uint16_t first_http_route=0;
 using PGM_P=const char*;
 #include "FocAlignmentObservation.h"
@@ -56,6 +58,8 @@ std::atomic<bool> http_task_ready{false};
 #include <thread>
 #include <cstdlib>
 using portMUX_TYPE=std::mutex;
+ReleaseMemoryObserver release_memory_observer;
+portMUX_TYPE release_memory_lock;
 #define portMUX_INITIALIZER_UNLOCKED {}
 void portENTER_CRITICAL(portMUX_TYPE* m){m->lock();}
 void portEXIT_CRITICAL(portMUX_TYPE* m){m->unlock();}
@@ -180,9 +184,9 @@ bridge_start = source.index('struct HttpStatus {')
 bridge_end = source.index('void captureHttpStatus();', bridge_start)
 prefix += source[bridge_start:bridge_end]
 prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
-prefix += source[source.index('struct HttpResponseTransport {'):source.index('void recordBoundedHttpResult(')]
+prefix += source[source.index('struct HttpResponseTransport {'):source.index('void serviceHttpFileResponse()')]
 names = [
-    'recordBoundedHttpResult','sendSmallHttpResponse',
+    'serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -458,7 +462,9 @@ int main(){
   serveWebFile("/index.html","text/html");assert(wifi_log_server.status==404);
   assert(lqr_direction_test_armed && lqr_target_speed==0);
   LittleFS.file={true,false};first_http_request=true;first_http_route=1;memoryEventCount=0;
-  serveWebFile("/index.html","text/html");assert(wifi_log_server.status==200);
+  serveWebFile("/index.html","text/html");
+  while(http_response_pending){++nowMs;serviceHttpFileResponse();}
+  assert(wifi_log_server.status==200);
   assert(memoryEventCount==2 && memoryEvents[0].event==MemHttpFirstFile && memoryEvents[0].cid==1 && memoryEvents[0].arg==5);
   assert(memoryEvents[1].event==MemHttpFirstResult && memoryEvents[1].arg==(200u<<8));
   first_http_request=false;
@@ -831,6 +837,17 @@ int main(){
   PS4.input.cross=true;PS4.input_cb();updatePs4Controller();assert(emergency_stop_active);
   {std::lock_guard<std::mutex> lock(statusMutex);resume=true;}statusCv.notify_one();
   statusSender.join();onStatusSend={};
+
+  // Pending file ownership does not gate PS4 event draining or full stop.
+  setupCase();PS4.ok=true;setupPs4Controller();http_filesystem_ready=true;
+  LittleFS.file={true,false};csvClientConnected=true;
+  serveWebFile("/index.html","text/html");assert(http_response_pending);
+  serviceHttpFileResponse();assert(http_response_pending);
+  PS4.connect_cb();PS4.input={};PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
+  PS4.disconnect_cb();updatePs4Controller();assert(!ps4_was_connected);
+  PS4.connect_cb();PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
+  PS4.input.cross=true;PS4.input_cb();updatePs4Controller();assert(emergency_stop_active);
+  while(http_response_pending){++nowMs;serviceHttpFileResponse();}
 
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);

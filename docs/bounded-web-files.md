@@ -1,5 +1,8 @@
 # Webファイルと小さい応答の上限付き送信
 
+正常なHTML/CSS/JS配信は後続変更で継続型へ移行しました。現在の所有権・終了理由・RAMは
+[continuing-http-files.md](continuing-http-files.md)を参照してください。以下の同期ファイル送信/RAM値は9472ad2時点です。
+
 ## 対象と確認した原因
 
 利用者はf8b67deで http://<IP>/ を開き、最初の処理1件でerrno11が約10秒反復。
