@@ -28,6 +28,7 @@ prelude = r'''
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
+#include "BoundedHttpResponse.h"
 #include "FocAlignmentObservation.h"
 class Print { public: virtual ~Print()=default;virtual size_t write(uint8_t)=0; };
 #include "driver/gpio.h"
@@ -68,7 +69,7 @@ struct DriveSerial : FakeSerial {
 using String=std::string;
 constexpr int WL_CONNECTED=1, CONTENT_LENGTH_UNKNOWN=-1;
 struct { int status(){return WL_CONNECTED;}
-  struct IP { String toString(){return "127.0.0.1";} };
+  struct IP { String toString(){return "127.0.0.1";} int operator[](int i) const {return i==0?127:i==3?1:0;} };
   IP localIP(){return {};}
 } WiFi;
 struct File {
@@ -86,12 +87,27 @@ int csvAllocs=0,csvFrees=0;
 void* csvMalloc(size_t size){if(failCsvAllocation)return nullptr;++csvAllocs;return std::malloc(size);}
 void csvFree(void* p){if(p)++csvFrees;std::free(p);}
 void copyCsvSnapshot(void* dst,const void* src,size_t n){if(onCsvCopy)onCsvCopy();memcpy(dst,src,n);}
+struct NetworkClient {
+  int fd(){return 1;}
+  void stop(){}
+  bool connected(){return csvClientConnected;}
+};
+std::string* rawStatusBody=nullptr;
+bool rawStatusFirstWrite=true;
+int* rawStatusCode=nullptr;
+std::function<void()> onStatusSend;
+int send(int,const char* data,size_t size,int){
+  if(onStatusSend)onStatusSend();
+  if(rawStatusFirstWrite){rawStatusBody->clear();rawStatusFirstWrite=false;sscanf(data,"HTTP/1.1 %d",rawStatusCode);}
+  rawStatusBody->append(data,size);return static_cast<int>(size);
+}
+constexpr int MSG_DONTWAIT=1;
 struct WebServer {
   bool _server=false;
   explicit WebServer(int) {}
   int status=0;std::string body;
   struct Client {bool connected(){return csvClientConnected;}};
-  Client client(){return {};}
+  NetworkClient client(){rawStatusBody=&body;rawStatusCode=&status;rawStatusFirstWrite=true;return {};}
   void sendHeader(const char*,const String&){}
   void setContentLength(int){}
   void send(int code,const char*,const char* data){status=code;body=data;}
@@ -778,6 +794,21 @@ int main(){
   updatePs4Controller();assert(!balance_wait_active && !lqr_drive_start_pending);
   PS4.input={};PS4.input_cb();PS4.input.cross=true;PS4.input_cb();PS4.input.cross=false;PS4.input_cb();
   updatePs4Controller();assert(emergency_stop_active && !pins[27] && !pins[32]);
+
+  // A stalled HTTP sender owns only its copied status. Actual PS4 callbacks and
+  // control-side draining remain runnable while that sender is parked.
+  setupCase();PS4.ok=true;setupPs4Controller();captureHttpStatus();
+  std::mutex statusMutex;std::condition_variable statusCv;bool entered=false,resume=false;
+  onStatusSend=[&]{std::unique_lock<std::mutex> lock(statusMutex);
+    if(!entered){entered=true;statusCv.notify_one();statusCv.wait(lock,[&]{return resume;});}};
+  std::thread statusSender([]{handleWifiStatusPage();});
+  {std::unique_lock<std::mutex> lock(statusMutex);statusCv.wait(lock,[&]{return entered;});}
+  PS4.connect_cb();PS4.input={};PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
+  PS4.disconnect_cb();updatePs4Controller();assert(!ps4_was_connected);
+  PS4.connect_cb();PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
+  PS4.input.cross=true;PS4.input_cb();updatePs4Controller();assert(emergency_stop_active);
+  {std::lock_guard<std::mutex> lock(statusMutex);resume=true;}statusCv.notify_one();
+  statusSender.join();onStatusSend={};
 
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);

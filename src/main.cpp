@@ -15,6 +15,8 @@
 #include <atomic>
 #include <cstdlib>
 #include <new>
+#include <lwip/sockets.h>
+#include "BoundedHttpResponse.h"
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
@@ -4942,23 +4944,49 @@ void captureHttpStatus() {
 }
 
 void handleWifiStatusPage() {
+  // HTTP task only. Bypass allocating WebServer send/String/header helpers.
+  auto client = wifi_log_server.client();
+  struct StatusTransport {
+    NetworkClient& client;
+    uint32_t now() { return millis(); }
+    void yieldOnce() { vTaskDelay(1); }
+    int writeSome(const char* data, size_t size) {
+      const int fd = client.fd();
+      if (fd < 0) return -ENOTCONN;
+      const int result = ::send(fd, data, size, MSG_DONTWAIT);
+      return result < 0 ? -errno : result;
+    }
+    void stop() { client.stop(); }
+  } transport{client};
   HttpStatus status{};
-  if (xQueuePeek(http_status_queue, &status, 0) != pdTRUE) {
-    wifi_log_server.send(503, "text/plain", "Status initializing\n");
+  if (!http_status_queue || xQueuePeek(http_status_queue, &status, 0) != pdTRUE) {
+    const char unavailable[] = "Status initializing\n";
+    const HttpResponsePart part{unavailable, sizeof(unavailable)-1};
+    sendBoundedHttpResponse(transport, 503, &part, 1);
     return;
   }
-  wifi_log_server.sendHeader("Cache-Control", "no-store");
-  char resources[280];
+  status.text[sizeof(status.text)-1] = '\0';
+  char resources[280] = {};
   formatHttpResources(resources, sizeof(resources));
-  char preflight[160];
-  snprintf(preflight, sizeof(preflight),
+  resources[sizeof(resources)-1] = '\0';
+  const auto ip = WiFi.localIP();
+  char preflight[256];
+  const int length = snprintf(preflight, sizeof(preflight),
+      "WiFi: connected\nIP: %u.%u.%u.%u\n"
       "Web preflight: LittleFS=%s WiFi_IP=%s HTTP=%s mDNS=DISABLED\n",
+      static_cast<unsigned>(ip[0]), static_cast<unsigned>(ip[1]),
+      static_cast<unsigned>(ip[2]), static_cast<unsigned>(ip[3]),
       http_filesystem_ready ? "READY" : "FAILED",
       wifi_connection_ready.load() ? "READY" : "WAITING",
       startup_http_ready.load() ? "LISTENING" : "NOT_READY");
-  const String network_status = String("WiFi: connected\nIP: ") +
-      WiFi.localIP().toString() + "\n" + preflight + status.text + resources;
-  wifi_log_server.send(200, "text/plain; charset=utf-8", network_status.c_str());
+  if (length < 0 || static_cast<size_t>(length) >= sizeof(preflight)) {
+    client.stop();
+    return;
+  }
+  const HttpResponsePart parts[] = {
+      {preflight, static_cast<size_t>(length)},
+      {status.text, strlen(status.text)}, {resources, strlen(resources)}};
+  sendBoundedHttpResponse(transport, 200, parts, 3);
 }
 
 void serveWebFile(const char* path, const char* mime) {
