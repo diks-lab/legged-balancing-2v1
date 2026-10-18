@@ -258,9 +258,12 @@ PlatformIO実行および実機は未検証。PCの実ファイルの原因を�
 
 [実機報告・ELF照合状況・失敗処理・Windows確認コマンド](ps4-l2cap-allocation.md)。
 ae0c84dの実機で報告されたPS4接続時のStoreProhibitedに対し、低層のNULL継続と
-接続中断処理を修正する。障害ELF先頭316041d836927826とこちらのELF先頭35079f6dは
-不一致のため、障害アドレスの確定解析は保存済みWindows ELFの出力待ちである。
-別ELFのaddr2line結果を確定解析として扱っていない。
+接続中断処理を修正する。2026-10-18に利用者提供の保存済みWindows ELFのSHA-256
+`316041d836927826472eba20f96f4ef56c945ec6594ee732edcbece507a5eed5` と
+addr2line結果を確認。クラッシュログのSHA先頭と一致する。
+config_cfm→ps4ConnectEvent→ps4Enable→ps4_l2cap_send_hid:107という経路で、
+最初のenable用HID送信の確保失敗後に停止したことを確定した。LED送信より前である。
+別ELF（こちらの35079f6d…）で代用していない。失敗時のヒープ残量や消費内訳は未確定。
 
 - `python3 tests/ps4_l2cap_host/run.py` 成功。実送信/設定/切断関数と実enable/LED/通知関数で、
   最初/2番目/接続後の確保失敗、後続送信抑止、状態中断、古い入力拒否、再接続、

@@ -11,7 +11,27 @@ Bluetooth接続処理自体の追加消費があるため、起動完了値だ�
 `35079f6d64a4683f708efdd0117bdde633b35763db382f0206b34b69cf115acc`。
 報告SHAと異なるため、このELFで元バックトレースの関数/行を確定していない。
 同じGitコミットでもビルド環境・パス等によりELFが変わり得る。
-Windows側で保存済みの `firmware-crash-20261018.elf` の一致確認・解析結果は確認待ち。
+2026-10-18に利用者が保存済み `firmware-crash-20261018.elf` のSHAとaddr2line出力を共有。
+SHA-256は `316041d836927826472eba20f96f4ef56c945ec6594ee732edcbece507a5eed5`。
+クラッシュログの先頭16桁と一致し、このELFによる以下の解析を確定記録とする。
+ローカルPCの絶対パスは省略した。
+
+| アドレス | 関数 / ソース位置 |
+|---|---|
+| 0x400d88bb | ps4_l2cap_send_hid / ps4_l2cap.c:107 |
+| 0x400d8633 | ps4Enable / ps4.c:109 |
+| 0x400d867f | ps4ConnectEvent / ps4.c:268 |
+| 0x400d87f9 | ps4_l2cap_config_cfm_cback / ps4_l2cap.c:233 |
+| 0x4015133f | l2c_csm_execute / 行情報なし |
+| 0x40153e08 | l2c_rcv_acl_data / 行情報なし |
+| 0x4014393c | btu_hci_msg_process / btu_task.c.obj、行情報なし |
+| 0x4015e629 | osi_thread_run / thread.c.obj、行情報なし |
+| 0x400972b6 | vPortTaskWrapper / port.c:162 |
+
+接続設定確認→ps4ConnectEvent→ps4Enableの最初のenable用HID送信で停止した。
+続くLED送信より前である。ps4_l2cap.c:107はNULLチェック後のバッファ書き込み位置に対応する。
+確保失敗ログとEXCVADDR=4を合わせ、確保失敗後のNULL参照という修正対象を裏付ける。
+確保失敗を引き起こした実行時消費の内訳・失敗時の空き量はこの解析からは確定しない。
 
 保存したELFのあるフォルダーで実行する読み取り専用PowerShellコマンド：
 
@@ -34,7 +54,7 @@ SHA先頭が報告値と一致したELFの出力だけを確定解析に用い�
 PS4_Controller_Host **1.1.1** の `ps4_l2cap_send_hid()` は、
 `osi_malloc(BT_DEFAULT_BUFFER_SIZE)` がNULLでもログだけで処理を続け、
 `BT_HDR` のlength/offsetへ書き込んでいた。NULL参照が存在することはソースで確定している。
-EXCVADDR=4はoffsetの配置と整合するが、障害PCの命令位置の確定は一致ELF待ちである。
+EXCVADDR=4はoffsetの配置と整合し、一致ELFの解析でもNULLチェック直後の書き込み位置を確認した。
 
 呼び出しは `config_cfm → ps4ConnectEvent(true) → ps4Enable()`。
 ps4Enableはenable（4 BのHID内容）を送り、続けてps4SetLed→ps4Cmd（79 B）を送る。
