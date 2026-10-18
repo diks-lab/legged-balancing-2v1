@@ -253,3 +253,34 @@ ELFシンボルでサイズ不変を確認した。追加I2Cトランザクシ�
 Windowsのコードページと改行をLinux上で再現して検証したもので、ネイティブWindowsの
 PlatformIO実行および実機は未検証。PCの実ファイルの原因を文字コードだけと断定しない。
 実機への書き込み・PRマージは行っていない。
+
+## PS4 HID確保失敗の修正
+
+[実機報告・ELF照合状況・失敗処理・Windows確認コマンド](ps4-l2cap-allocation.md)。
+ae0c84dの実機で報告されたPS4接続時のStoreProhibitedに対し、低層のNULL継続と
+接続中断処理を修正する。障害ELF先頭316041d836927826とこちらのELF先頭35079f6dは
+不一致のため、障害アドレスの確定解析は保存済みWindows ELFの出力待ちである。
+別ELFのaddr2line結果を確定解析として扱っていない。
+
+- `python3 tests/ps4_l2cap_host/run.py` 成功。実送信/設定/切断関数と実enable/LED/通知関数で、
+  最初/2番目/接続後の確保失敗、後続送信抑止、状態中断、古い入力拒否、再接続、
+  接続応答/確認と設定要求/応答/確認の失敗、切断要求失敗、DataWrite失敗/輻輳と所有権を確認。
+  LF/CRLF各々の未適用/再適用/未知ソース拒否も確認。
+- `ASAN_OPTIONS=detect_leaks=0 PS4_L2CAP_SANITIZERS=1 python3 tests/ps4_l2cap_host/run.py` 成功。
+  AddressSanitizer/UBSanでNULL後の書き込みや二重解放がないことを確認。
+  LeakSanitizerは既述の環境制約で無効。所有権は専用live領域/解放カウンターでも検査した。
+- 既存 `tests/ps4_events_host/run.py`、`tests/drive_host/run.py` 成功。
+  通知FIFO・短いボタン・保持入力・切断/再接続・開始/停止・CSV/状態表示の回帰を確認。
+- `tests/foc_patch_host/run.py`（8テスト）と `tests/foc_observation_host/run.py` 成功。
+  `src/`、`include/`、`data/`はae0c84dから差分なし。platformio.iniはpreスクリプト1行追加だけ。
+- ESP32ビルド成功（最終21.50秒）。RAM **105,340 B**、Flash **1,892,661 B**。
+  ae0c84d比でRAM **16 B増**（data28,164 B不変、bss77,160→77,176 B）。
+  nmで追加は1 Bの状態フラグ3個だけ、既存の静的シンボルはサイズ変更/削除なし。
+  残り13 Bはセクション内/末尾の配置差。タスク・スタック・FIFOの予約量変更なし。
+- 実コンパイルコマンドのプリプロセス出力で `osi_malloc(size)=malloc((size))`、
+  `BT_DEFAULT_BUFFER_SIZE=(4096+16)` とMALLOC_CAP_DEFAULT/INTERNAL/8BITを確認した。
+  バッファ容量・メモリー属性を変更していない。失敗直後の残量だけを追加記録する。
+
+ビルド/ホストテスト成功は、PS4実機接続成功や実機での失敗時ヒープ量の確認ではない。
+失敗時の切断要求、遅いBT通知、再接続、通常操作と制御周期は実機未検証。
+PID・FOC・ペアリング・操作割り当て・停止条件を変更せず、実機書き込み/マージは行っていない。
