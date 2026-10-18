@@ -31,11 +31,18 @@
 namespace {
 ReleaseMemoryObserver release_memory_observer;
 bool release_memory_serial_active=false;
+bool first_http_request=false;
+uint16_t first_http_route=0;
 portMUX_TYPE release_memory_lock = portMUX_INITIALIZER_UNLOCKED;
 void serviceReleaseMemoryObservation();
 struct HttpMemoryRequest {
-  HttpMemoryRequest(){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpBegin();portEXIT_CRITICAL(&release_memory_lock);}
-  ~HttpMemoryRequest(){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpEnd();portEXIT_CRITICAL(&release_memory_lock);}
+  explicit HttpMemoryRequest(uint16_t route=0){
+    portENTER_CRITICAL(&release_memory_lock);
+    first_http_request=release_memory_observer.requests==0;
+    release_memory_observer.httpBegin();portEXIT_CRITICAL(&release_memory_lock);
+    if(first_http_request){first_http_route=route;observeReleaseMemory(MemHttpFirstRoute,route,0);}
+  }
+  ~HttpMemoryRequest(){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpEnd();portEXIT_CRITICAL(&release_memory_lock);first_http_request=false;}
 };
 void observeHttpStatusSend(bool ok){
   if(ok)return;
@@ -4758,13 +4765,15 @@ bool traceDownloadBlocked(int kind) {
   return true;
 }
 
+void sendSmallHttpResponse(int code,const char* text);
+
 void sendTraceBusyResponse() {
   const bool active = http_trace_failure == HttpTraceFailure::Active;
   const char* reason = active ? "TRACE NOT AVAILABLE WHILE LQR TEST IS RUNNING\n" :
       (http_trace_failure == HttpTraceFailure::Allocation ? "CSV SNAPSHOT ALLOCATION FAILED; ORIGINAL LOG RETAINED\n" :
        (http_trace_failure == HttpTraceFailure::Pending ? "CSV COPY COMPLETION PENDING\n" :
         (http_trace_failure == HttpTraceFailure::Disconnected ? "CSV CLIENT DISCONNECTED\n" : "CSV SNAPSHOT TIMEOUT\n")));
-  wifi_log_server.send(active ? 409 : 503, "text/plain", reason);
+  sendSmallHttpResponse(active ? 409 : 503,reason);
 }
 
 void beginCsvResponse(const char* filename) {
@@ -4909,14 +4918,14 @@ void handleLqrControlTraceDownload() {
 
 void enqueueHttpCommand(char command) {
   if (command == 't' && !startup_foc_ready.load()) {
-    wifi_log_server.send(409, "text/plain", "FOC NOT INITIALIZED; START REJECTED\n");
+    sendSmallHttpResponse(409, "FOC NOT INITIALIZED; START REJECTED\n");
     return;
   }
   if (xQueueSend(http_command_queue, &command, 0) != pdTRUE) {
-    wifi_log_server.send(409, "text/plain", "Command pending\n");
+    sendSmallHttpResponse(409, "Command pending\n");
     return;
   }
-  wifi_log_server.send(202, "text/plain", "Command queued; check status for result\n");
+  sendSmallHttpResponse(202, "Command queued; check status for result\n");
 }
 void handleCycleLqrTestMode() { enqueueHttpCommand('g'); }
 void handleCycleLqrSpeedSource() { enqueueHttpCommand('i'); }
@@ -4973,10 +4982,7 @@ void captureHttpStatus() {
   xQueueOverwrite(http_status_queue, &status);
 }
 
-void handleWifiStatusPage() {
-  // HTTP task only. Bypass allocating WebServer send/String/header helpers.
-  auto client = wifi_log_server.client();
-  struct StatusTransport {
+struct HttpResponseTransport {
     NetworkClient& client;
     uint32_t now() { return millis(); }
     void yieldOnce() { vTaskDelay(1); }
@@ -4987,12 +4993,33 @@ void handleWifiStatusPage() {
       return result < 0 ? -errno : result;
     }
     void stop() { client.stop(); }
-  } transport{client};
+};
+
+void recordBoundedHttpResult(HttpSendResult result,int code){
+  observeHttpStatusSend(result==HttpSendResult::Complete);
+  if(first_http_request)observeReleaseMemory(MemHttpFirstResult,first_http_route,
+      uint32_t(result)|(uint32_t(code)<<8));
+}
+
+void sendSmallHttpResponse(int code,const char* text){
+  auto client=wifi_log_server.client();HttpResponseTransport transport{client};
+  size_t length=0;
+  if(text)while(length<4096 && text[length])++length;
+  const HttpResponsePart part{text,length};
+  HttpSendResult result=HttpSendResult::Invalid;
+  sendBoundedHttpResponse(transport,code,&part,1,&result);
+  recordBoundedHttpResult(result,code);
+}
+
+void handleWifiStatusPage() {
+  // HTTP task only. Bypass allocating WebServer send/String/header helpers.
+  auto client = wifi_log_server.client();
+  HttpResponseTransport transport{client};
   HttpStatus status{};
   if (!http_status_queue || xQueuePeek(http_status_queue, &status, 0) != pdTRUE) {
-    const char unavailable[] = "Status initializing\n";
-    const HttpResponsePart part{unavailable, sizeof(unavailable)-1};
-    observeHttpStatusSend(sendBoundedHttpResponse(transport, 503, &part, 1));
+    const HttpResponsePart part{"Status initializing\n",20};
+    HttpSendResult result;
+    sendBoundedHttpResponse(transport,503,&part,1,&result);recordBoundedHttpResult(result,503);
     return;
   }
   status.text[sizeof(status.text)-1] = '\0';
@@ -5011,27 +5038,36 @@ void handleWifiStatusPage() {
       startup_http_ready.load() ? "LISTENING" : "NOT_READY");
   if (length < 0 || static_cast<size_t>(length) >= sizeof(preflight)) {
     client.stop();
-    observeHttpStatusSend(false);
+    recordBoundedHttpResult(HttpSendResult::Invalid,200);
     return;
   }
   const HttpResponsePart parts[] = {
       {preflight, static_cast<size_t>(length)},
       {status.text, strlen(status.text)}, {resources, strlen(resources)}};
-  observeHttpStatusSend(sendBoundedHttpResponse(transport, 200, parts, 3));
+  HttpSendResult result;
+  sendBoundedHttpResponse(transport,200,parts,3,&result);recordBoundedHttpResult(result,200);
 }
 
 void serveWebFile(const char* path, const char* mime) {
   if (!http_filesystem_ready) {
-    wifi_log_server.send(503, "text/plain", "LittleFS unavailable; motor control is independent.\n");
+    if(first_http_request)observeReleaseMemory(MemHttpFirstFile,first_http_route,0);
+    sendSmallHttpResponse(503,"LittleFS unavailable; motor control is independent.\n");
     return;
   }
-  File file = LittleFS.open(path, "r");
-  if (!file || file.isDirectory()) {
-    wifi_log_server.send(404, "text/plain", "Web file missing. Upload data with uploadfs.\n");
+  File file=LittleFS.open(path,"r");
+  if(!file || file.isDirectory()){
+    file.close();
+    if(first_http_request)observeReleaseMemory(MemHttpFirstFile,first_http_route,0);
+    sendSmallHttpResponse(404,"Web file missing. Upload data with uploadfs.\n");
     return;
   }
-  const size_t expected=file.size();
-  observeHttpStatusSend(wifi_log_server.streamFile(file, mime)==expected);
+  const size_t size=file.size();
+  if(first_http_request)observeReleaseMemory(MemHttpFirstFile,first_http_route,size);
+  if(size>kMaxHttpWebFileBytes){
+    file.close();sendSmallHttpResponse(503,"Web file exceeds bounded response limit.\n");return;
+  }
+  auto client=wifi_log_server.client();HttpResponseTransport transport{client};
+  recordBoundedHttpResult(sendBoundedHttpFile(transport,file,mime),200);
 }
 
 void serviceReleaseMemoryObservation() {
@@ -5116,26 +5152,26 @@ void startWifiHttpServer() {
   }
 
   if (!http_routes_registered) {
-    wifi_log_server.on("/", HTTP_GET, []() { HttpMemoryRequest observed; serveWebFile("/index.html", "text/html; charset=utf-8"); });
-    wifi_log_server.on("/style.css", HTTP_GET, []() { HttpMemoryRequest observed; serveWebFile("/style.css", "text/css"); });
-    wifi_log_server.on("/app.js", HTTP_GET, []() { HttpMemoryRequest observed; serveWebFile("/app.js", "application/javascript"); });
-    wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed;handleWifiStatusPage();});
+    wifi_log_server.on("/", HTTP_GET, []() { HttpMemoryRequest observed{1}; serveWebFile("/index.html", "text/html; charset=utf-8"); });
+    wifi_log_server.on("/style.css", HTTP_GET, []() { HttpMemoryRequest observed{2}; serveWebFile("/style.css", "text/css"); });
+    wifi_log_server.on("/app.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/app.js", "application/javascript"); });
+    wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
-                       [](){HttpMemoryRequest observed;handleVelocityTraceDownload();});
+                       [](){HttpMemoryRequest observed{5};handleVelocityTraceDownload();});
     wifi_log_server.on("/trace/loop.csv", HTTP_GET,
-                       [](){HttpMemoryRequest observed;handleLoopTimingTraceDownload();});
+                       [](){HttpMemoryRequest observed{6};handleLoopTimingTraceDownload();});
     wifi_log_server.on("/trace/lqr.csv", HTTP_GET,
-                       [](){HttpMemoryRequest observed;handleLqrControlTraceDownload();});
+                       [](){HttpMemoryRequest observed{7};handleLqrControlTraceDownload();});
     wifi_log_server.on("/control/mode", HTTP_POST,
-                       [](){HttpMemoryRequest observed;handleCycleLqrTestMode();});
+                       [](){HttpMemoryRequest observed{8};handleCycleLqrTestMode();});
     wifi_log_server.on("/control/speed-source", HTTP_POST,
-                       [](){HttpMemoryRequest observed;handleCycleLqrSpeedSource();});
+                       [](){HttpMemoryRequest observed{9};handleCycleLqrSpeedSource();});
     wifi_log_server.on("/control/start", HTTP_POST,
-                       [](){HttpMemoryRequest observed;handleStartBalanceTest();});
+                       [](){HttpMemoryRequest observed{10};handleStartBalanceTest();});
     wifi_log_server.on("/control/stop", HTTP_POST,
-                       [](){HttpMemoryRequest observed;handleStopBalanceTest();});
-    wifi_log_server.onNotFound([]() { HttpMemoryRequest observed;
-      wifi_log_server.send(404, "text/plain", "NOT FOUND\n");
+                       [](){HttpMemoryRequest observed{11};handleStopBalanceTest();});
+    wifi_log_server.onNotFound([]() { HttpMemoryRequest observed{12};
+      sendSmallHttpResponse(404, "NOT FOUND\n");
     });
     http_routes_registered = true;
   }

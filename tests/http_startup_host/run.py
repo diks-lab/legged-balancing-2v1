@@ -103,7 +103,8 @@ void disableBothDrivers(){gateWheelOutputsOff();}
 int listen_attempts=0, route_count=0, handled=0, help_count=0;
 constexpr int HTTP_GET=1,HTTP_POST=2;
 using PGM_P=const char*;
-struct HttpMemoryRequest {~HttpMemoryRequest(){}};
+struct HttpMemoryRequest {explicit HttpMemoryRequest(uint16_t=0){} ~HttpMemoryRequest(){}};
+void sendSmallHttpResponse(int,const char*){}
 void observeHttpStatusSend(bool){}
 struct ObserverStub {void httpAfter(uint32_t,uint32_t){}}release_memory_observer;
 int release_memory_lock;

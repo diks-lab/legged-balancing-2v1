@@ -30,9 +30,14 @@ prelude = r'''
 #include "Ps4EventInbox.h"
 #include "BoundedHttpResponse.h"
 #include "ReleaseMemoryObservation.h"
-extern "C" void observeReleaseMemory(uint16_t,uint16_t,uint32_t){}
+ReleaseMemoryRecord memoryEvents[64]{};unsigned memoryEventCount=0;
+extern "C" void observeReleaseMemory(uint16_t e,uint16_t cid,uint32_t arg){
+ if(memoryEventCount<64)memoryEvents[memoryEventCount++]={0,0,0,e,cid,arg};
+}
 void observeHttpStatusSend(bool){}
 bool release_memory_serial_active=false;
+bool first_http_request=false;
+uint16_t first_http_route=0;
 using PGM_P=const char*;
 #include "FocAlignmentObservation.h"
 class Print { public: virtual ~Print()=default;virtual size_t write(uint8_t)=0; };
@@ -82,6 +87,9 @@ struct File {
   explicit operator bool() const {return exists;}
   bool isDirectory() const {return directory;}
   size_t size() const {return 5;}
+  size_t position=0;
+  int read(uint8_t* out,size_t n){if(n>5-position)n=5-position;memcpy(out,"asset"+position,n);position+=n;return int(n);}
+  void close(){}
 };
 struct { File file{}; int opens=0;
   File open(const char*,const char*) {++opens;return file;}
@@ -172,7 +180,9 @@ bridge_start = source.index('struct HttpStatus {')
 bridge_end = source.index('void captureHttpStatus();', bridge_start)
 prefix += source[bridge_start:bridge_end]
 prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
+prefix += source[source.index('struct HttpResponseTransport {'):source.index('void recordBoundedHttpResult(')]
 names = [
+    'recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -447,7 +457,11 @@ int main(){
   http_filesystem_ready=true;LittleFS.file={false,false};
   serveWebFile("/index.html","text/html");assert(wifi_log_server.status==404);
   assert(lqr_direction_test_armed && lqr_target_speed==0);
-  LittleFS.file={true,false};serveWebFile("/index.html","text/html");assert(wifi_log_server.status==200);
+  LittleFS.file={true,false};first_http_request=true;first_http_route=1;memoryEventCount=0;
+  serveWebFile("/index.html","text/html");assert(wifi_log_server.status==200);
+  assert(memoryEventCount==2 && memoryEvents[0].event==MemHttpFirstFile && memoryEvents[0].cid==1 && memoryEvents[0].arg==5);
+  assert(memoryEvents[1].event==MemHttpFirstResult && memoryEvents[1].arg==(200u<<8));
+  first_http_request=false;
   for(auto mode:{LqrTestMode::Full,LqrTestMode::AttitudeSpeed}){
     for(float sign:{-1.0f,1.0f}){
       setupCase(mode);start(sign);requestLqrSoftStop();step(sign*.2f);

@@ -20,6 +20,8 @@ using portMUX_TYPE=std::mutex;
 #define portEXIT_CRITICAL(x) ((x)->unlock())
 ReleaseMemoryObserver release_memory_observer;
 bool release_memory_serial_active=false;
+bool first_http_request=false;
+uint16_t first_http_route=0;
 size_t ps4_diagnostic_serial_offset=0,ps4_diagnostic_serial_size=0;
 portMUX_TYPE release_memory_lock;
 constexpr int MALLOC_CAP_INTERNAL=1,MALLOC_CAP_8BIT=2;
@@ -50,7 +52,7 @@ int main(){
  local.push({30000,1,1,MemDisconnected,0,0});local.push({30001,1,1,MemConnectStart,10,17});
  assert(!local.due(50000,delay));
  // HTTP request active state and failed writes are counted without per-request records.
- {HttpMemoryRequest request;assert(release_memory_observer.requests==1&&release_memory_observer.active==1);
+ {HttpMemoryRequest request(1);assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpFirstRoute&&r.cid==1);assert(release_memory_observer.requests==1&&release_memory_observer.active==1);
   observeHttpStatusSend(true);observeHttpStatusSend(false);
   observeReleaseMemory(MemHidBefore,10,244);assert(release_memory_observer.pop(r)&&(r.event>>8)==1);}
  assert(release_memory_observer.active==0&&release_memory_observer.send_failures==1&&release_memory_observer.count==0);
