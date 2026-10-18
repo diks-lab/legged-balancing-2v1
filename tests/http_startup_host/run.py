@@ -102,7 +102,16 @@ void gateWheelOutputsOffFrom(FocGateSource){gateWheelOutputsOff();}
 void disableBothDrivers(){gateWheelOutputsOff();}
 int listen_attempts=0, route_count=0, handled=0, help_count=0;
 constexpr int HTTP_GET=1,HTTP_POST=2;
+using PGM_P=const char*;
+struct HttpMemoryRequest {~HttpMemoryRequest(){}};
+void observeHttpStatusSend(bool){}
+struct ObserverStub {void httpAfter(uint32_t,uint32_t){}}release_memory_observer;
+int release_memory_lock;
+#define portENTER_CRITICAL(x) ((void)0)
+#define portEXIT_CRITICAL(x) ((void)0)
 struct WebServer {
+ virtual size_t _currentClientWrite(const char*,size_t n){return n;}
+ virtual size_t _currentClientWrite_P(const char*,size_t n){return n;}
   explicit WebServer(int){}
   bool _server=false;
   template<class F> void on(const char*,int,F){++route_count;}

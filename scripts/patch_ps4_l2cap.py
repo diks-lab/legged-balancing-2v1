@@ -1,9 +1,10 @@
-"""Fail-closed PS4_Controller_Host 1.1.1 L2CAP allocation/session repair."""
+"""PS4 1.1.1 safety repair and bounded, output-free memory observations."""
 from pathlib import Path
 import hashlib
 
 ORIGINAL_SHA256 = 'e87932d6613987b8afb1e42983306c3d6a6e94f0db3730c098fddd83f3a1c016'
-PATCHED_SHA256 = '51b2eada6cbcd4f0b2722411a8ed742508aa7d3fb911110c97739d7b0fd58683'
+LEGACY_PATCHED_SHA256 = '51b2eada6cbcd4f0b2722411a8ed742508aa7d3fb911110c97739d7b0fd58683'
+PATCHED_SHA256 = '363d95460de7e014e9cbfa154db30891a80a3afe3139ce0761008cf031bd9d05'
 CHANGES = [('uint16_t l2cap_interrupt_channel = 0;',
   'uint16_t l2cap_interrupt_channel = 0;\n'
   '\n'
@@ -194,7 +195,38 @@ CHANGES = [('uint16_t l2cap_interrupt_channel = 0;',
   '      (l2cap_cid != l2cap_control_channel && l2cap_cid != l2cap_interrupt_channel)) return;\n'
   '  if (!p_cfg) { ps4_l2cap_abort(); return; }\n'
   '  p_cfg->result = L2CAP_CFG_OK;\n'
-  '  if (!L2CA_ConfigRsp(l2cap_cid, p_cfg)) ps4_l2cap_abort();')]
+  '  if (!L2CA_ConfigRsp(l2cap_cid, p_cfg)) ps4_l2cap_abort();'),
+ ('#include "ps4.h"', '#include "ps4.h"\n#include "ReleaseMemoryObservation.h"'),
+ ('  BT_HDR *p_buf = (BT_HDR *)osi_malloc(BT_DEFAULT_BUFFER_SIZE);',
+  '  observeReleaseMemory(MemHidBefore,l2cap_control_channel,hid_cmd->identifier);\n'
+  '  BT_HDR *p_buf = (BT_HDR *)osi_malloc(BT_DEFAULT_BUFFER_SIZE);'),
+ ('  if (!p_buf) {\n    // Failure-only,',
+  '  if (!p_buf) {\n'
+  '    observeReleaseMemory(MemHidAllocationFailed,l2cap_control_channel,hid_cmd->identifier);\n'
+  '    // Failure-only,'),
+ ('  const uint8_t result = L2CA_DataWrite(l2cap_control_channel, p_buf);',
+  '  const uint8_t result = L2CA_DataWrite(l2cap_control_channel, p_buf);\n'
+  '  observeReleaseMemory(MemHidAfter,l2cap_control_channel,(uint32_t)hid_cmd->identifier | '
+  '((uint32_t)result<<16));'),
+ ('  ESP_LOGI(PS4_TAG, "[%s] incoming HID channel", __func__);',
+  '  observeReleaseMemory(MemConnectStart,l2cap_cid,psm);\n'
+  '  ESP_LOGI(PS4_TAG, "[%s] incoming HID channel", __func__);'),
+ ('    is_connected = true;\n    ps4ConnectEvent(true);',
+  '    is_connected = true;\n'
+  '    observeReleaseMemory(MemConfigReady,l2cap_cid,0);\n'
+  '    ps4ConnectEvent(true);'),
+ ('void ps4_l2cap_disconnect_ind_cback(uint16_t l2cap_cid, bool ack_needed) {',
+  'void ps4_l2cap_disconnect_ind_cback(uint16_t l2cap_cid, bool ack_needed) {\n'
+  '  observeReleaseMemory(MemDisconnectNotice,l2cap_cid,ack_needed);\n'
+  '  if (!ack_needed) observeReleaseMemory(MemChannelReleased,l2cap_cid,0);'),
+ ('  if (ack_needed) L2CA_DisconnectRsp(l2cap_cid);',
+  '  if (ack_needed) {\n'
+  '    const bool ack_result=L2CA_DisconnectRsp(l2cap_cid);\n'
+  '    observeReleaseMemory(MemDisconnectAck,l2cap_cid,ack_result);\n'
+  '  }'),
+ ('static void ps4_l2cap_disconnect_cfm_cback(uint16_t l2cap_cid, uint16_t result) {',
+  'static void ps4_l2cap_disconnect_cfm_cback(uint16_t l2cap_cid, uint16_t result) {\n'
+  '  observeReleaseMemory(MemChannelReleased,l2cap_cid,result);')]
 
 
 def patch(path):
@@ -205,6 +237,12 @@ def patch(path):
     # Full SHA, not anchor-only matching. Explicit UTF-8, binary writes.
     if digest == PATCHED_SHA256:
         return False
+    if digest == LEGACY_PATCHED_SHA256:
+        text = normalized.decode('utf-8')
+        for before, after in reversed(CHANGES):
+            text = text.replace(after, before, 1)
+        normalized = text.encode('utf-8')
+        digest = hashlib.sha256(normalized).hexdigest()
     if digest != ORIGINAL_SHA256:
         raise RuntimeError('Unexpected PS4 1.1.1 L2CAP source SHA-256=' + digest + '; refusing unverified patch')
     text = normalized.decode('utf-8')
@@ -228,4 +266,5 @@ if env is not None:
     root = Path(env.subst('$PROJECT_LIBDEPS_DIR')) / env.subst('$PIOENV') / 'PS4_Controller_Host'
     if 'version=1.1.1' not in (root / 'library.properties').read_bytes().decode('utf-8').splitlines():
         raise RuntimeError('Unexpected PS4 library version; refusing L2CAP patch')
+    env.Append(CPPPATH=[env.subst('$PROJECT_INCLUDE_DIR')])
     patch(root / 'src/ps4_l2cap.c')

@@ -20,7 +20,7 @@ def function(name):
         pos += 1
     return source[start:pos] + '\n'
 
-prefix = source[source.index('namespace {'):source.index('}  // namespace\n\nvoid setup()')]
+prefix = source[source.index('namespace {\n//=================================================='):source.index('}  // namespace\n\nvoid setup()')]
 prefix = prefix.replace('BLDCMotor motor', 'DriveTestMotor motor').replace('BLDCDriver3PWM driver', 'DriveTestDriver driver')
 prelude = r'''
 #include "Arduino.h"
@@ -29,6 +29,11 @@ prelude = r'''
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
 #include "BoundedHttpResponse.h"
+#include "ReleaseMemoryObservation.h"
+extern "C" void observeReleaseMemory(uint16_t,uint16_t,uint32_t){}
+void observeHttpStatusSend(bool){}
+bool release_memory_serial_active=false;
+using PGM_P=const char*;
 #include "FocAlignmentObservation.h"
 class Print { public: virtual ~Print()=default;virtual size_t write(uint8_t)=0; };
 #include "driver/gpio.h"
@@ -76,6 +81,7 @@ struct File {
   bool exists=false, directory=false;
   explicit operator bool() const {return exists;}
   bool isDirectory() const {return directory;}
+  size_t size() const {return 5;}
 };
 struct { File file{}; int opens=0;
   File open(const char*,const char*) {++opens;return file;}
@@ -112,7 +118,9 @@ struct WebServer {
   void setContentLength(int){}
   void send(int code,const char*,const char* data){status=code;body=data;}
   void sendContent(const char* data){body+=data;if(onCsvContent)onCsvContent();}
-  void streamFile(File,const char*) {status=200;body="asset";}
+  size_t streamFile(File,const char*) {status=200;body="asset";return 5;}
+  virtual size_t _currentClientWrite(const char*,size_t n){return n;}
+  virtual size_t _currentClientWrite_P(const char*,size_t n){return n;}
 };
 enum class Ps4ClassicStartup { Ready, AlreadyInitialized, StartFailed, NotEnabled };
 Ps4ClassicStartup classicStartup=Ps4ClassicStartup::Ready;

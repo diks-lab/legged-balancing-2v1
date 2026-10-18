@@ -17,6 +17,7 @@
 #include <new>
 #include <lwip/sockets.h>
 #include "BoundedHttpResponse.h"
+#include "ReleaseMemoryObservation.h"
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
@@ -26,6 +27,26 @@
 
 #include "Servo_STS3032.h"
 #include "ssid.h"
+
+namespace {
+ReleaseMemoryObserver release_memory_observer;
+bool release_memory_serial_active=false;
+portMUX_TYPE release_memory_lock = portMUX_INITIALIZER_UNLOCKED;
+void serviceReleaseMemoryObservation();
+struct HttpMemoryRequest {
+  HttpMemoryRequest(){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpBegin();portEXIT_CRITICAL(&release_memory_lock);}
+  ~HttpMemoryRequest(){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpEnd();portEXIT_CRITICAL(&release_memory_lock);}
+};
+void observeHttpStatusSend(bool ok){
+  if(ok)return;
+  portENTER_CRITICAL(&release_memory_lock);++release_memory_observer.send_failures;portEXIT_CRITICAL(&release_memory_lock);
+}
+}
+extern "C" void observeReleaseMemory(uint16_t event,uint16_t cid,uint32_t arg){
+  const ReleaseMemoryRecord r{millis(),heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
+      heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),event,cid,arg};
+  portENTER_CRITICAL(&release_memory_lock);release_memory_observer.push(r);portEXIT_CRITICAL(&release_memory_lock);
+}
 
 namespace {
 //==================================================
@@ -303,6 +324,13 @@ class CheckedHttpServer : public WebServer {
  public:
   using WebServer::WebServer;
   bool listening() { return static_cast<bool>(_server); }
+ protected:
+  size_t _currentClientWrite(const char* data,size_t size) override {
+    const size_t sent=WebServer::_currentClientWrite(data,size);observeHttpStatusSend(sent==size);return sent;
+  }
+  size_t _currentClientWrite_P(PGM_P data,size_t size) override {
+    const size_t sent=WebServer::_currentClientWrite_P(data,size);observeHttpStatusSend(sent==size);return sent;
+  }
 };
 CheckedHttpServer wifi_log_server(80);
 std::atomic<bool> startup_foc_ready{false};
@@ -841,8 +869,10 @@ void setup() {
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
   prepareI2cResources(); // Buffers and bus drivers only; wheel EN remains LOW.
   printHttpStartupMemory("before_ps4");
+  observeReleaseMemory(MemPs4Before,0,0);
   setupPs4Controller(); // Connection is diagnostic, not an FOC prerequisite.
   printHttpStartupMemory("after_ps4");
+  observeReleaseMemory(MemPs4Ready,0,ps4_diagnostics.init_ok);
   setupWifiLogServer(); // No sensor reads, calibration or motor/FOC before Web readiness.
   if (i2c0_resources_ready && i2c1_resources_ready) {
     publishStartupPhase("WEB_WAIT");
@@ -4962,7 +4992,7 @@ void handleWifiStatusPage() {
   if (!http_status_queue || xQueuePeek(http_status_queue, &status, 0) != pdTRUE) {
     const char unavailable[] = "Status initializing\n";
     const HttpResponsePart part{unavailable, sizeof(unavailable)-1};
-    sendBoundedHttpResponse(transport, 503, &part, 1);
+    observeHttpStatusSend(sendBoundedHttpResponse(transport, 503, &part, 1));
     return;
   }
   status.text[sizeof(status.text)-1] = '\0';
@@ -4981,12 +5011,13 @@ void handleWifiStatusPage() {
       startup_http_ready.load() ? "LISTENING" : "NOT_READY");
   if (length < 0 || static_cast<size_t>(length) >= sizeof(preflight)) {
     client.stop();
+    observeHttpStatusSend(false);
     return;
   }
   const HttpResponsePart parts[] = {
       {preflight, static_cast<size_t>(length)},
       {status.text, strlen(status.text)}, {resources, strlen(resources)}};
-  sendBoundedHttpResponse(transport, 200, parts, 3);
+  observeHttpStatusSend(sendBoundedHttpResponse(transport, 200, parts, 3));
 }
 
 void serveWebFile(const char* path, const char* mime) {
@@ -4999,7 +5030,63 @@ void serveWebFile(const char* path, const char* mime) {
     wifi_log_server.send(404, "text/plain", "Web file missing. Upload data with uploadfs.\n");
     return;
   }
-  wifi_log_server.streamFile(file, mime);
+  const size_t expected=file.size();
+  observeHttpStatusSend(wifi_log_server.streamFile(file, mime)==expected);
+}
+
+void serviceReleaseMemoryObservation() {
+  if(foc_alignment_observer.active())return;
+  static char line[192];
+  static size_t size=0,offset=0;
+  static uint32_t last_line=0,last_summary=0;
+  const uint32_t now=millis();
+  static uint32_t last_sample=0,last_requests=UINT32_MAX;
+  portENTER_CRITICAL(&release_memory_lock);
+  const uint32_t requests=release_memory_observer.requests;
+  portEXIT_CRITICAL(&release_memory_lock);
+  if(requests!=last_requests || now-last_sample>=5000){
+    const uint32_t f=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    const uint32_t l=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
+    portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpAfter(f,l);portEXIT_CRITICAL(&release_memory_lock);
+    last_sample=now;last_requests=requests;
+  }
+  uint32_t delay=0;
+  portENTER_CRITICAL(&release_memory_lock);
+  const bool due=release_memory_observer.due(now,delay);
+  portEXIT_CRITICAL(&release_memory_lock);
+  if(due)observeReleaseMemory(MemAfterDisconnect,0,delay);
+  if(offset==size && ps4_diagnostic_serial_offset<ps4_diagnostic_serial_size)return;
+  if(offset==size && now-last_line>=100){
+    ReleaseMemoryRecord r{};uint32_t lost=0;
+    portENTER_CRITICAL(&release_memory_lock);
+    const bool have=(now-last_summary<5000) && release_memory_observer.pop(r);lost=release_memory_observer.dropped;
+    portEXIT_CRITICAL(&release_memory_lock);
+    int n=0;
+    if(have){
+      n=snprintf(line,sizeof(line),"MEM event=%u http_active=%u ms=%lu cid=%u arg=%lu free=%lu largest=%lu lost=%lu\n",
+          unsigned(r.event&255),unsigned(r.event>>8),(unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.arg,
+          (unsigned long)r.free,(unsigned long)r.largest,(unsigned long)lost);
+    }else if(now-last_summary>=5000){
+      uint32_t total,active,failed,f,l,min;
+      portENTER_CRITICAL(&release_memory_lock);
+      total=release_memory_observer.requests;active=release_memory_observer.active;
+      failed=release_memory_observer.send_failures;f=release_memory_observer.after_free;
+      l=release_memory_observer.after_largest;min=release_memory_observer.min_free;
+      portEXIT_CRITICAL(&release_memory_lock);
+      n=snprintf(line,sizeof(line),"MEM HTTP ms=%lu requests=%lu active=%lu send_failed=%lu after_free=%lu after_largest=%lu min_free=%lu lost=%lu\n",
+          (unsigned long)now,(unsigned long)total,(unsigned long)active,(unsigned long)failed,
+          (unsigned long)f,(unsigned long)l,(unsigned long)min,(unsigned long)lost);
+      last_summary=now;
+    }
+    size=n>0?static_cast<size_t>(n):0;if(size>=sizeof(line))size=sizeof(line)-1;
+    offset=0;last_line=now;release_memory_serial_active=size!=0;
+  }
+  if(offset<size){
+    const int room=Serial.availableForWrite();
+    if(room>0){size_t n=size-offset;if(n>48)n=48;if(n>static_cast<size_t>(room))n=room;
+      offset+=Serial.write(reinterpret_cast<const uint8_t*>(line+offset),n);}
+    if(offset==size)release_memory_serial_active=false;
+  }
 }
 
 void httpTask(void*) {
@@ -5018,6 +5105,7 @@ void httpTask(void*) {
       if(foc_deferred_http_started){Serial.println("WiFi trace HTTP server started.");foc_deferred_http_started=false;}
     }
     serviceHttpPs4DiagnosticSerial();
+    serviceReleaseMemoryObservation();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -5028,25 +5116,25 @@ void startWifiHttpServer() {
   }
 
   if (!http_routes_registered) {
-    wifi_log_server.on("/", HTTP_GET, []() { serveWebFile("/index.html", "text/html; charset=utf-8"); });
-    wifi_log_server.on("/style.css", HTTP_GET, []() { serveWebFile("/style.css", "text/css"); });
-    wifi_log_server.on("/app.js", HTTP_GET, []() { serveWebFile("/app.js", "application/javascript"); });
-    wifi_log_server.on("/api/status", HTTP_GET, handleWifiStatusPage);
+    wifi_log_server.on("/", HTTP_GET, []() { HttpMemoryRequest observed; serveWebFile("/index.html", "text/html; charset=utf-8"); });
+    wifi_log_server.on("/style.css", HTTP_GET, []() { HttpMemoryRequest observed; serveWebFile("/style.css", "text/css"); });
+    wifi_log_server.on("/app.js", HTTP_GET, []() { HttpMemoryRequest observed; serveWebFile("/app.js", "application/javascript"); });
+    wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed;handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
-                       handleVelocityTraceDownload);
+                       [](){HttpMemoryRequest observed;handleVelocityTraceDownload();});
     wifi_log_server.on("/trace/loop.csv", HTTP_GET,
-                       handleLoopTimingTraceDownload);
+                       [](){HttpMemoryRequest observed;handleLoopTimingTraceDownload();});
     wifi_log_server.on("/trace/lqr.csv", HTTP_GET,
-                       handleLqrControlTraceDownload);
+                       [](){HttpMemoryRequest observed;handleLqrControlTraceDownload();});
     wifi_log_server.on("/control/mode", HTTP_POST,
-                       handleCycleLqrTestMode);
+                       [](){HttpMemoryRequest observed;handleCycleLqrTestMode();});
     wifi_log_server.on("/control/speed-source", HTTP_POST,
-                       handleCycleLqrSpeedSource);
+                       [](){HttpMemoryRequest observed;handleCycleLqrSpeedSource();});
     wifi_log_server.on("/control/start", HTTP_POST,
-                       handleStartBalanceTest);
+                       [](){HttpMemoryRequest observed;handleStartBalanceTest();});
     wifi_log_server.on("/control/stop", HTTP_POST,
-                       handleStopBalanceTest);
-    wifi_log_server.onNotFound([]() {
+                       [](){HttpMemoryRequest observed;handleStopBalanceTest();});
+    wifi_log_server.onNotFound([]() { HttpMemoryRequest observed;
       wifi_log_server.send(404, "text/plain", "NOT FOUND\n");
     });
     http_routes_registered = true;
@@ -5254,6 +5342,7 @@ void updateWifiLogServer() {
   if (wifi_log_server_started && WiFi.status() == WL_CONNECTED &&
       static_cast<uint32_t>(WiFi.localIP()) != 0) {
     wifi_log_server.handleClient();
+
   }
 }
 
@@ -5753,7 +5842,7 @@ void servicePs4DiagnosticSerial() {
 }
 
 void serviceHttpPs4DiagnosticSerial() {
-  if(foc_alignment_observer.active())return;
+  if(foc_alignment_observer.active() || release_memory_serial_active)return;
   const uint32_t now = millis();
   if (ps4_diagnostic_serial_offset == ps4_diagnostic_serial_size &&
       now - ps4_diagnostic_serial_last_ms >= kPs4ObservationIntervalMs) {
@@ -6045,8 +6134,8 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
 
 // These callbacks run in the library's Bluetooth task, not an ISR. Reading
 // its already-copied input and submitting a bounded record are their only jobs.
-void onPs4Connect() { ps4_event_inbox.connect(millis()); }
-void onPs4Disconnect() { ps4_event_inbox.disconnect(millis()); }
+void onPs4Connect() { ps4_event_inbox.connect(millis()); observeReleaseMemory(MemConnected,0,0); }
+void onPs4Disconnect() { ps4_event_inbox.disconnect(millis()); observeReleaseMemory(MemDisconnected,0,0); }
 void onPs4Input() { ps4_event_inbox.input(readPs4Input(), millis()); }
 
 void raisePs4ControlBarrier(uint32_t sequence) {

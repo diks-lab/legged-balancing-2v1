@@ -7,7 +7,7 @@ p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
 lib=Path('.pio/libdeps/esp32dev/PS4_Controller_Host/src')
 raw=(lib/'ps4_l2cap.c').read_bytes().replace(b'\r\n',b'\n')
 original=raw.decode('utf-8')
-if hashlib.sha256(raw).hexdigest()==p.PATCHED_SHA256:
+if hashlib.sha256(raw).hexdigest()in (p.PATCHED_SHA256,p.LEGACY_PATCHED_SHA256):
     for before,after in reversed(p.CHANGES): original=original.replace(after,before,1)
 assert hashlib.sha256(original.encode()).hexdigest()==p.ORIGINAL_SHA256
 with tempfile.TemporaryDirectory() as td:
@@ -22,6 +22,14 @@ with tempfile.TemporaryDirectory() as td:
         except RuntimeError: pass
         else: raise AssertionError('unknown source accepted')
         assert target.read_bytes()==expected+b'// unexpected\n'
+    legacy=original
+    for before,after in p.CHANGES:
+        legacy=legacy.replace(before,after,1)
+        if hashlib.sha256(legacy.encode()).hexdigest()==p.LEGACY_PATCHED_SHA256: break
+    assert hashlib.sha256(legacy.encode()).hexdigest()==p.LEGACY_PATCHED_SHA256
+    for eol in ['\n','\r\n']:
+        target.write_bytes(legacy.replace('\n',eol).encode());assert p.patch(target)
+        assert hashlib.sha256(target.read_bytes().replace(b'\r\n',b'\n')).hexdigest()==p.PATCHED_SHA256
     target.write_bytes(original.encode()); p.patch(target)
     source=target.read_text(encoding='utf-8')
     callers=(lib/'ps4.c').read_text(encoding='utf-8')
@@ -39,6 +47,9 @@ with tempfile.TemporaryDirectory() as td:
 #include <vector>
 #include <string>
 #include <algorithm>
+#include "ReleaseMemoryObservation.h"
+std::vector<int> observations;
+extern "C" void observeReleaseMemory(uint16_t e,uint16_t,uint32_t){observations.push_back(e);}
 using BD_ADDR=uint8_t[6];
 struct BT_HDR {uint16_t event,length,offset,layer_specific;uint8_t data[1];};
 struct tL2CAP_CFG_INFO {int result=0;bool mtu_present=false;int mtu=0;};
@@ -72,7 +83,7 @@ void* osi_malloc(size_t n){assert(n==4112);++allocations;if(allocations==fail_at
 void osi_free(void*q){auto it=std::find(live.begin(),live.end(),q);assert(it!=live.end());live.erase(it);free(q);++frees;}
 int L2CA_DataWrite(uint16_t cid,BT_HDR*q){assert(cid && q);++writes;lengths.push_back(q->length);osi_free(q);return write_result;}
 bool L2CA_DisconnectReq(uint16_t cid){close_requests.push_back(cid);return disconnect_accept;}
-void L2CA_DisconnectRsp(uint16_t cid){acks.push_back(cid);}
+bool L2CA_DisconnectRsp(uint16_t cid){acks.push_back(cid);return true;}
 #define L2CA_CONNECT_RSP(...) connect_rsp_accept
 bool L2CA_ConfigReq(uint16_t,tL2CAP_CFG_INFO*){return cfg_accept;}
 #define L2CA_CONFIG_REQ L2CA_ConfigReq
@@ -98,7 +109,7 @@ void ps4Cmd(ps4_cmd_t);void ps4PacketEvent(ps4_t,ps4_event_t);
 void reset(){assert(live.empty());l2cap_control_channel=l2cap_interrupt_channel=0;
  is_connected=control_configured=interrupt_configured=session_aborted=is_active=false;
  allocations=frees=writes=fail_at=packets=connects=disconnects=0;write_result=1;connect_rsp_accept=config_rsp_accept=cfg_accept=disconnect_accept=true;
- close_requests.clear();acks.clear();lengths.clear();logs.clear();}
+ close_requests.clear();acks.clear();lengths.clear();logs.clear();observations.clear();}
 void incoming(int cid,int psm){BD_ADDR bd{};ps4_l2cap_connect_ind_cback(bd,cid,psm,1);}
 void setup_channels(){incoming(10,17);incoming(11,19);}
 void config(int cid,int result=0){tL2CAP_CFG_INFO c;c.result=result;ps4_l2cap_config_cfm_cback(cid,&c);}
@@ -108,9 +119,14 @@ int main(){
  // First enable allocation fails: no dereference, LED retry, write, or activation.
  reset();fail_at=1;start();assert(allocations==1&&writes==0&&session_aborted&&!is_connected&&!is_active);
  assert(close_requests.size()==2&&logs.size()==1);assert(logs[0].find("requested=%u")!=std::string::npos);
+ assert(std::count(observations.begin(),observations.end(),MemHidBefore)==1);
+ assert(std::count(observations.begin(),observations.end(),MemHidAllocationFailed)==1);
+ assert(std::count(observations.begin(),observations.end(),MemHidAfter)==0);
  input();config(11);ps4Enable();assert(allocations==1&&packets==0&&connects==0);
  // Actual enable succeeds, then LED fails; abort without false connection.
  reset();fail_at=2;start();assert(allocations==2&&writes==1&&lengths[0]==4&&session_aborted);
+ assert(std::count(observations.begin(),observations.end(),MemHidBefore)==2);
+ assert(std::count(observations.begin(),observations.end(),MemHidAfter)==1);
  input();assert(!is_active&&connects==0&&live.empty());
  // Both reports succeed; first accepted input drives existing active notification.
  reset();start();assert(writes==2&&lengths[0]==4&&lengths[1]==79&&is_connected);
@@ -145,5 +161,5 @@ int main(){
     cpp=root/'test.cpp';cpp.write_text(code,encoding='utf-8')
     exe=root/'test'
     sanitizer_flags = ['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('PS4_L2CAP_SANITIZERS') else []
-    subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Wno-unused-parameter','-Wno-unused-function','-Wno-missing-field-initializers',str(cpp),'-o',str(exe)]+sanitizer_flags,check=True)
+    subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Wno-unused-parameter','-Iinclude','-Wno-unused-function','-Wno-missing-field-initializers',str(cpp),'-o',str(exe)]+sanitizer_flags,check=True)
     subprocess.run([str(exe)],check=True)
