@@ -18,6 +18,7 @@ prefix=r'''
 using portMUX_TYPE=std::mutex;
 #define portENTER_CRITICAL(x) ((x)->lock())
 #define portEXIT_CRITICAL(x) ((x)->unlock())
+void sampleAllocationDiagnosticHeap(uint32_t,uint32_t,uint32_t){}
 ReleaseMemoryObserver release_memory_observer;
 bool release_memory_serial_active=false;
 bool first_http_request=false;

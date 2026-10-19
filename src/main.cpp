@@ -18,6 +18,7 @@
 #include <lwip/sockets.h>
 #include "BoundedHttpResponse.h"
 #include "ContinuingHttpFile.h"
+#include "UartAllocationDiagnostics.h"
 #include "ReleaseMemoryObservation.h"
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
@@ -876,6 +877,7 @@ void setup() {
   Serial2.begin(1000000, SERIAL_8N1, 16, 17);
   sms_sts.pSerial = &Serial2;
   delay(1000);
+  initializeUartAllocationDiagnostics();
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
   prepareI2cResources(); // Buffers and bus drivers only; wheel EN remains LOW.
   printHttpStartupMemory("before_ps4");
@@ -5120,6 +5122,7 @@ void serviceReleaseMemoryObservation() {
     const uint32_t f=heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
     const uint32_t l=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT);
     portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpAfter(f,l);portEXIT_CRITICAL(&release_memory_lock);
+    sampleAllocationDiagnosticHeap(now,f,l);
     last_sample=now;last_requests=requests;
   }
   uint32_t delay=0;
