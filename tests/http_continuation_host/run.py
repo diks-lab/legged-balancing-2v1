@@ -53,7 +53,7 @@ struct NetworkClient {
 struct IOState {
  char output[20000]{};size_t used=0;unsigned sends=0;
  uint32_t tick=0;bool peer=true;int maxWrite=512;
- int script[80]{};unsigned scriptSize=0,scriptPosition=0;
+ int script[256]{};unsigned scriptSize=0,scriptPosition=0;
  size_t bodyBytes()const{const char*p=strstr(output,"\r\n\r\n");return p?used-size_t(p-output)-4:0;}
 } ;
 struct FileImpl {
@@ -110,7 +110,7 @@ void step(Response&r,IOState&io){
  r.poll(t);assert(io.sends-sends<=1&&stats.reads-reads<=1);
  assert(!((io.sends-sends)&&(stats.reads-reads))); // No send/read loop in one task iteration.
 }
-void pump(Response&r,IOState&io,unsigned increment=1){for(int i=0;i<1000&&r.active();++i){step(r,io);io.tick+=increment;}assert(r.finished());}
+void pump(Response&r,IOState&io,unsigned increment=1){for(int i=0;i<5000&&r.active();++i){step(r,io);io.tick+=increment;}assert(r.finished());}
 void released(){assert(stats.socketCloses==1&&stats.socketDeaths==1&&stats.rxDeaths==1&&stats.fileCloses==1&&stats.fileDeaths==1);failAllocation=false;}
 int main(){
  for(unsigned i=0;i<6;++i){Response r;IOState io;start(r,io,assets[i]);pump(r,io);
@@ -124,13 +124,47 @@ int main(){
  {Response r;IOState io;io.script[0]=-EAGAIN;io.script[1]=17;io.script[2]=512;io.script[3]=-EAGAIN;io.scriptSize=4;
   start(r,io,assets[0]);step(r,io);assert(r.active()&&io.used==0&&io.sends==1); // EAGAIN returns, does not retry inline.
   pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().retries==2);released();}
- {Response r;IOState io;int script[]={-EAGAIN,512,-EAGAIN,256,-EAGAIN};memcpy(io.script,script,sizeof(script));io.scriptSize=5;
-  start(r,io,assets[0]);pump(r,io);assert(r.metrics().reason==HttpFileEnd::RetryLimit&&r.metrics().retries==3&&r.metrics().calls==5&&r.metrics().bodySent==256);released();}
- {Response r;IOState io;start(r,io,assets[0]);step(r,io);io.tick=50;step(r,io);
-  assert(r.metrics().reason==HttpFileEnd::Deadline&&r.metrics().elapsed==50&&r.metrics().bodySent==0&&r.metrics().calls==1);released();}
- {Response r;IOState io;io.script[0]=512;io.script[1]=17;io.scriptSize=2;start(r,io,assets[0]);step(r,io);step(r,io);step(r,io);
-  io.tick=51;step(r,io);assert(r.metrics().reason==HttpFileEnd::Deadline&&r.metrics().bodySent==17&&r.metrics().stage==HttpFilePhase::Body);released();}
- {Response r;IOState io;io.maxWrite=1;start(r,io,assets[0]);pump(r,io,0);assert(r.metrics().reason==HttpFileEnd::CallLimit&&r.metrics().calls==64);released();}
+
+ // Slow service intervals must no longer fail the former 50 ms budget.
+ for(unsigned gap:{10u,30u,100u}){Response r;IOState io;start(r,io,assets[1]);pump(r,io,gap);
+  assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().bodySent==1253);
+  assert(r.metrics().maxPollGap==gap&&r.metrics().elapsed>=100&&r.metrics().polls==11);
+  assert(r.metrics().firstProgressMs==0&&r.metrics().lastProgressMs==r.metrics().elapsed);released();}
+ // All 64 retries accumulate even with progress between them; offsets are retained.
+ {Response r;IOState io;for(unsigned i=0;i<64;++i){io.script[2*i]=1;io.script[2*i+1]=-EAGAIN;}io.scriptSize=128;
+  start(r,io,assets[0]);pump(r,io);
+  assert(r.metrics().reason==HttpFileEnd::RetryLimit&&r.metrics().retries==64&&r.metrics().calls==128);
+  assert(r.metrics().wireSent==64&&r.metrics().retryWaitMs==630);released();}
+ // Full response deadline never resets on forward progress.
+ {Response r;IOState io;io.maxWrite=1;start(r,io,assets[0]);
+  for(unsigned ms=0;ms<=1800;ms+=300){io.tick=ms;step(r,io);assert(r.active());}
+  io.tick=2000;step(r,io);assert(r.metrics().reason==HttpFileEnd::Deadline&&r.metrics().elapsed==2000);
+  assert(r.metrics().lastProgressMs==1800&&r.metrics().noProgressMs==200&&r.metrics().calls==7);released();}
+ // Idle expiry is separate, measured from positive send (not read or retry).
+ {Response r;IOState io;start(r,io,assets[0]);step(r,io);io.tick=499;step(r,io);assert(r.active()&&stats.reads==1);
+  io.tick=500;step(r,io);assert(r.metrics().reason==HttpFileEnd::NoProgress&&r.metrics().calls==1&&r.metrics().bodySent==0);released();}
+ {Response r;IOState io;io.script[0]=512;io.script[1]=17;io.script[2]=-EAGAIN;io.scriptSize=3;start(r,io,assets[0]);step(r,io);step(r,io);
+  io.tick=100;step(r,io);io.tick=599;step(r,io);assert(r.active()&&r.metrics().bodySent==17);
+  io.tick=600;step(r,io);assert(r.metrics().reason==HttpFileEnd::NoProgress&&r.metrics().noProgressMs==500&&r.metrics().bodySent==17);released();}
+ {Response r;IOState io;io.maxWrite=1;start(r,io,assets[0]);pump(r,io,0);assert(r.metrics().reason==HttpFileEnd::CallLimit&&r.metrics().calls==128&&r.metrics().wireSent==128);released();}
+ // Backoff is at least 10 ms. Returning early consumes neither reads nor send calls.
+ {Response r;IOState io;io.script[0]=-EAGAIN;io.scriptSize=1;start(r,io,assets[0]);step(r,io);
+  for(unsigned t=1;t<10;++t){io.tick=t;step(r,io);assert(io.sends==1&&stats.reads==0&&r.active());}
+  io.tick=10;step(r,io);assert(io.sends==2&&r.metrics().retryWaitMs==10);
+  pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete);released();}
+ // A normal TCP busy interval survives >3 EAGAINs; permanent busy expires idle.
+ {Response r;IOState io;for(unsigned i=0;i<20;++i)io.script[i]=-EAGAIN;io.scriptSize=20;start(r,io,assets[0]);pump(r,io,2);
+  assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().retries==20&&r.metrics().retryWaitMs==200);released();}
+ {Response r;IOState io;for(unsigned i=0;i<100;++i)io.script[i]=-EAGAIN;io.scriptSize=100;start(r,io,assets[0]);pump(r,io,2);
+  assert(r.metrics().reason==HttpFileEnd::NoProgress&&r.metrics().elapsed==500&&r.metrics().calls==50);
+  assert(r.metrics().retries==50&&r.metrics().retryWaitMs==500&&r.metrics().noProgressMs==500);released();}
+ // Disconnect is checked even while a retry is waiting; no send/read follows it.
+ {Response r;IOState io;io.script[0]=-EAGAIN;io.scriptSize=1;start(r,io,assets[0]);step(r,io);io.tick=3;io.peer=false;step(r,io);
+  assert(r.metrics().reason==HttpFileEnd::Disconnected&&io.sends==1&&r.metrics().retryWaitMs==3);released();}
+ // The backoff comparison and interval/progress accounting survive clock wrap.
+ {Response r;IOState io;io.tick=UINT32_MAX-4;io.script[0]=-EAGAIN;io.scriptSize=1;start(r,io,assets[0]);step(r,io);
+  io.tick+=9;step(r,io);assert(io.sends==1);++io.tick;step(r,io);assert(io.sends==2&&r.metrics().firstProgressMs==10);
+  pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete);released();}
  {Response r;IOState io;start(r,io,assets[0]);io.peer=false;step(r,io);assert(r.metrics().reason==HttpFileEnd::Disconnected&&stats.reads==0);released();}
  for(int error:{-ENOMEM,-ECONNRESET,-EPIPE,0}){Response r;IOState io;io.script[0]=512;io.script[1]=error;io.scriptSize=2;
   start(r,io,assets[0]);pump(r,io);assert(r.metrics().reason==(error?HttpFileEnd::SocketError:HttpFileEnd::Disconnected));
@@ -158,7 +192,7 @@ int main(){
   assert(!r.begin(extra,f,"text/html",0,2,false)&&r.route==1&&r.active()&&stats.socketCloses==0);
   extra.stop();f.close();r.finish(HttpFileEnd::Cancelled,2);assert(stats.socketCloses==2&&stats.fileCloses==2);}
  {Response r;IOState io;io.tick=UINT32_MAX-8;start(r,io,assets[0]);pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete);released();}
- puts("PASS: LF/CRLF assets, actual core stop/copy lifetime after WebServer reference release, no allocation/read-ahead, partial/EAGAIN continuation, all budgets/reasons, disconnect/WiFi/cancel, single slot/reuse and release");
+ puts("PASS: LF/CRLF assets, actual core stop/copy lifetime after WebServer reference release, no allocation/read-ahead, slow polls/partial/EAGAIN >=10ms backoff, 2s/500ms/128calls/64errors budgets, timing/progress, disconnect/WiFi/cancel, single slot/reuse and release");
 }
 '''
 with tempfile.TemporaryDirectory() as td:

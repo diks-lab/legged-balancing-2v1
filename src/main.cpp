@@ -5011,14 +5011,16 @@ void serviceHttpFileResponse(){
   if(!http_file_response.finished())return;
   const auto& m=http_file_response.metrics();
   observeHttpStatusSend(m.reason==HttpFileEnd::Complete);
-  // Three typed records reuse the existing fixed ring, without heap walks.
+  // Five typed records reuse the existing fixed ring, without heap walks.
   const uint32_t now=millis();
   const uint16_t route=http_file_response.route;
   const uint32_t end=uint32_t(m.reason)|(uint32_t(m.stage)<<8)|(uint32_t(m.calls)<<16)|(uint32_t(m.retries)<<24);
   const ReleaseMemoryRecord records[]={
       {now,m.elapsed,uint32_t(uint16_t(m.lastErrno)),MemHttpTxEnd,route,end},
       {now,m.bodySent,m.bodyTotal,MemHttpTxBody,route,0},
-      {now,m.wireSent,m.wireTotal,MemHttpTxWire,route,0}};
+      {now,m.wireSent,m.wireTotal,MemHttpTxWire,route,0},
+      {now,m.polls,m.maxPollGap,MemHttpTxTiming,route,m.retryWaitMs},
+      {now,m.firstProgressMs,m.lastProgressMs,MemHttpTxProgress,route,m.noProgressMs}};
   portENTER_CRITICAL(&release_memory_lock);
   for(const auto& r:records)release_memory_observer.push(r);
   release_memory_observer.httpEnd();
@@ -5145,6 +5147,14 @@ void serviceReleaseMemoryObservation() {
       n=snprintf(line,sizeof(line),"HTTP_BYTES ms=%lu route=%u kind=%s sent=%lu total=%lu lost=%lu\n",
           (unsigned long)r.ms,unsigned(r.cid),(r.event&255)==MemHttpTxBody?"body":"wire",
           (unsigned long)r.free,(unsigned long)r.largest,(unsigned long)lost);
+    }else if(have && (r.event&255)==MemHttpTxTiming){
+      n=snprintf(line,sizeof(line),"HTTP_TIMING ms=%lu route=%u polls=%lu max_gap_ms=%lu retry_wait_ms=%lu lost=%lu\n",
+          (unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.free,(unsigned long)r.largest,
+          (unsigned long)r.arg,(unsigned long)lost);
+    }else if(have && (r.event&255)==MemHttpTxProgress){
+      n=snprintf(line,sizeof(line),"HTTP_PROGRESS ms=%lu route=%u first_ms=%lu last_ms=%lu idle_ms=%lu lost=%lu\n",
+          (unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.free,(unsigned long)r.largest,
+          (unsigned long)r.arg,(unsigned long)lost);
     }else if(have){
       n=snprintf(line,sizeof(line),"MEM event=%u http_active=%u ms=%lu cid=%u arg=%lu free=%lu largest=%lu lost=%lu\n",
           unsigned(r.event&255),unsigned(r.event>>8),(unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.arg,

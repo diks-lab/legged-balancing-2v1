@@ -114,7 +114,9 @@ std::string* rawStatusBody=nullptr;
 bool rawStatusFirstWrite=true;
 int* rawStatusCode=nullptr;
 std::function<void()> onStatusSend;
+int forcedHttpEagain=0,httpSendCalls=0;
 int send(int,const char* data,size_t size,int){
+  ++httpSendCalls;if(forcedHttpEagain){--forcedHttpEagain;errno=EAGAIN;return -1;}
   if(onStatusSend)onStatusSend();
   if(rawStatusFirstWrite){rawStatusBody->clear();rawStatusFirstWrite=false;sscanf(data,"HTTP/1.1 %d",rawStatusCode);}
   rawStatusBody->append(data,size);return static_cast<int>(size);
@@ -838,15 +840,21 @@ int main(){
   {std::lock_guard<std::mutex> lock(statusMutex);resume=true;}statusCv.notify_one();
   statusSender.join();onStatusSend={};
 
-  // Pending file ownership does not gate PS4 event draining or full stop.
+  // An actual EAGAIN backoff does not gate PS4 events, diagnostics or full stop.
   setupCase();PS4.ok=true;setupPs4Controller();http_filesystem_ready=true;
-  LittleFS.file={true,false};csvClientConnected=true;
+  LittleFS.file={true,false};csvClientConnected=true;forcedHttpEagain=1;
   serveWebFile("/index.html","text/html");assert(http_response_pending);
   serviceHttpFileResponse();assert(http_response_pending);
+  const int sendsBeforeBackoff=httpSendCalls;
   PS4.connect_cb();PS4.input={};PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
   PS4.disconnect_cb();updatePs4Controller();assert(!ps4_was_connected);
   PS4.connect_cb();PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
   PS4.input.cross=true;PS4.input_cb();updatePs4Controller();assert(emergency_stop_active);
+  ps4_diagnostic_serial_offset=ps4_diagnostic_serial_size=0;
+  ps4_diagnostic_serial_last_ms=nowMs-1000;Serial.room=128;
+  captureHttpStatus();const auto diagnosticBefore=Serial.output.size();
+  serviceHttpPs4DiagnosticSerial();assert(Serial.output.size()>diagnosticBefore);
+  ++nowMs;serviceHttpFileResponse();assert(httpSendCalls==sendsBeforeBackoff&&http_response_pending);
   while(http_response_pending){++nowMs;serviceHttpFileResponse();}
 
   // Trace sum and status report selected contributions, not unused speed PID.
