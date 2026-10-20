@@ -21,12 +21,14 @@ std::atomic<uint32_t> allocation_claimed[2]{};
 std::atomic<uint32_t> allocation_sample_seq{0},allocation_sample_ms{0};
 std::atomic<uint32_t> allocation_sample_free{0},allocation_sample_largest{0};
 uint32_t allocation_boot=0;
+AllocationResponseObserver allocation_response_observer;
 static_assert(ATOMIC_INT_LOCK_FREE==2,"failure callback requires lock-free word atomics");
 
 void IRAM_ATTR allocationFailed(size_t size,uint32_t caps,const char* function){
   (void)function; // Do not dereference flash strings or preserve pointers in RTC.
   const unsigned core=xPortGetCoreID();
   if(core>=2)return;
+  allocation_response_observer.record(core,uint32_t(size),caps);
   uint32_t expected=0;
   if(!allocation_claimed[core].compare_exchange_strong(expected,1,std::memory_order_relaxed))return;
   AllocationFailureRecord r{};
@@ -55,6 +57,9 @@ bool diagnosticReset(esp_reset_reason_t reason){
       reason==ESP_RST_TASK_WDT || reason==ESP_RST_WDT;
 }
 }
+
+void beginAllocationResponse(){allocation_response_observer.begin();}
+AllocationResponseSummary finishAllocationResponse(){return allocation_response_observer.finish();}
 
 void sampleAllocationDiagnosticHeap(uint32_t ms,uint32_t free,uint32_t largest){
   allocation_sample_seq.fetch_add(1,std::memory_order_acq_rel);

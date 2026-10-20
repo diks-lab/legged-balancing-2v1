@@ -103,11 +103,45 @@ int main(){
  // Generation wrap remains nonzero. Record belongs only to immediately prior boot.
  allocation_failure_rtc.boot=UINT32_MAX;allocation_failure_rtc.check=UINT32_MAX^kAllocRtcMagic;
  reset(ESP_RST_PANIC);assert(allocation_boot==1);
- puts("PASS: actual observer/preflight, no callback allocation/output/wait/heap walk, per-core first OOM, concurrent slots, checksums/session/reset gating/consume, interrupted samples, exact request vs preceding heap, public UART/SDK log before wireless");
+
+ // The live window continues to count even after the persistent first-RTC slot is claimed.
+ fail(0);const auto rtcBefore=allocation_failure_rtc.records[0];
+ beginAllocationResponse();fail(0,1492,0x1000);fail(0,24,0x1000);fail(1,84,0x804);
+ auto summary=finishAllocationResponse();
+ assert(summary.core[0].countFlags==2&&summary.core[0].firstSize==1492&&summary.core[0].firstCaps==0x1000);
+ assert(summary.core[1].countFlags==1&&summary.core[1].firstSize==84);
+ assert(!memcmp(&rtcBefore,&allocation_failure_rtc.records[0],sizeof rtcBefore));
+ fail(0,999,1);beginAllocationResponse();summary=finishAllocationResponse();
+ assert(summary.core[0].countFlags==0&&summary.core[1].countFlags==0); // Outside-window failure excluded.
+ beginAllocationResponse();
+ std::thread c([]{for(int i=0;i<1000;++i)fail(0,100,0x1000);});
+ std::thread d([]{for(int i=0;i<1000;++i)fail(1,200,0x804);});c.join();d.join();
+ summary=finishAllocationResponse();assert(summary.core[0].countFlags==1000&&summary.core[1].countFlags==1000);
+ beginAllocationResponse();allocation_response_observer.slots_[0].guard=1;
+ fail(0);summary=finishAllocationResponse();
+ assert(summary.core[0].countFlags==(kAllocationUnavailable|kAllocationDropped));
+ allocation_response_observer.slots_[0].guard=0;
+ beginAllocationResponse();fail(0);summary=finishAllocationResponse();assert(summary.core[0].countFlags==1);
+ allocation_response_observer.slots_[0].guard=1;beginAllocationResponse();allocation_response_observer.slots_[0].guard=0;
+ summary=finishAllocationResponse();assert(summary.core[0].countFlags==kAllocationDropped);
+ beginAllocationResponse();fail(0,1492,0x1000);
+ allocation_response_observer.slots_[0].countFlags=kAllocationCountMask;fail(0);
+ summary=finishAllocationResponse();assert(summary.core[0].countFlags==(kAllocationCountMask|kAllocationSaturated));
+ allocation_response_observer.next_=UINT32_MAX;
+ beginAllocationResponse();summary=finishAllocationResponse();assert(summary.core[0].countFlags==0); // No stale count at epoch wrap.
+ beginAllocationResponse();
+ std::thread writer([]{for(int i=0;i<10000;++i)fail(0);});
+ auto boundary=finishAllocationResponse();writer.join();
+ assert((boundary.core[0].countFlags&kAllocationUnavailable)||((boundary.core[0].countFlags&kAllocationCountMask)<=10000));
+ beginAllocationResponse();summary=finishAllocationResponse();assert(summary.core[0].countFlags==0);
+ puts("PASS: actual observer/preflight, no callback allocation/output/wait/heap walk, per-response counts/drop/unavailable/saturation/wrap and RTC unchanged, per-core first OOM, concurrent slots, checksums/session/reset gating/consume, interrupted samples, exact request vs preceding heap, public UART/SDK log before wireless");
 }
 '''
 with tempfile.TemporaryDirectory() as td:
  p=Path(td);(p/'common.h').write_text(common)
+ (p/'UartAllocationDiagnostics.h').write_text(Path('include/UartAllocationDiagnostics.h').read_text())
+ # Expose fields ONLY in the test copy to inject in-flight publication and saturation.
+ (p/'AllocationResponseObserver.h').write_text(Path('include/AllocationResponseObserver.h').read_text().replace('class AllocationResponseObserver {','struct AllocationResponseObserver {'))
  for h in ['Arduino.h','esp_attr.h','esp_heap_caps.h','esp_system.h','esp_log.h','esp_cpu.h','freertos/FreeRTOS.h','freertos/task.h']:
   f=p/h;f.parent.mkdir(exist_ok=True,parents=True);f.write_text('#include "common.h"\n')
  cpp=p/'test.cpp';cpp.write_text(source+'\n'+checks);exe=p/'test'

@@ -22,3 +22,7 @@ FIFO/Batchは通知を制御ループへ渡すアプリ側の仕組みであり�
 
 解放時系列の観測フック・固定RAM量・実機比較手順は[解放時系列](release-memory-timeline.md)を参照。
 調査完了後は観測フックだけを撤去できる。安全補正の撤去条件は上表のままとする。
+
+## HTTP送信用のRX参照アダプター（coreは未変更）
+
+HttpTransmitClientはArduino core 3.0.3のprotected _rxBufferへ依存します。共有socketを保持し、解析済みファイルGETの不要な受信キャッシュだけを早期回収する目的です。scripts/check_http_client_core.pyがNetworkClient.h/cpp全体のLF正規化SHAとversionを読み取り専用で検証し、未知版ではビルドを停止します。SDK/coreへのソースパッチではありません。上流で同等の公開APIが提供された時、または解析/所有権の置換時に撤去・再評価します。詳細は[http-rx-allocation-observation.md](http-rx-allocation-observation.md)。TCP内部の観測やSDK再ビルドは今回含めません。

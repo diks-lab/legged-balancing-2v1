@@ -9,6 +9,10 @@ def fn(name):
  return source[m.start():i]
 prefix=r'''
 #include "ReleaseMemoryObservation.h"
+#include "AllocationResponseObserver.h"
+int allocationBegins=0,allocationEnds=0;
+void beginAllocationResponse(){++allocationBegins;}
+AllocationResponseSummary finishAllocationResponse(){++allocationEnds;return {};}
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -38,7 +42,7 @@ struct {
 } Serial;
 '''
 a=source.index('struct HttpMemoryRequest {');b=source.index('\n}\nextern "C"',a)
-code=prefix+source[a:b]+'\n'+fn('observeReleaseMemory')+'\n'+fn('serviceReleaseMemoryObservation')+r'''
+code=prefix+fn('finishHttpAllocationObservation')+'\n'+source[a:b]+'\n'+fn('observeReleaseMemory')+'\n'+fn('serviceReleaseMemoryObservation')+r'''
 int main(){
  static_assert(sizeof(ReleaseMemoryObserver)<768,"bounded observer");
  ReleaseMemoryObserver local;ReleaseMemoryRecord r{};
@@ -57,7 +61,16 @@ int main(){
  {HttpMemoryRequest request(1);assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpFirstRoute&&r.cid==1);assert(release_memory_observer.requests==1&&release_memory_observer.active==1);
   observeHttpStatusSend(true);observeHttpStatusSend(false);
   observeReleaseMemory(MemHidBefore,10,244);assert(release_memory_observer.pop(r)&&(r.event>>8)==1);}
- assert(release_memory_observer.active==0&&release_memory_observer.send_failures==1&&release_memory_observer.count==0);
+ assert(release_memory_observer.active==0&&release_memory_observer.send_failures==1&&release_memory_observer.count==2);
+ assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpAllocCore0);
+ assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpAllocCore1);
+ assert(allocationBegins==1&&allocationEnds==1);
+ {HttpMemoryRequest pending(2);http_response_pending=true;}
+ assert(allocationBegins==2&&allocationEnds==1&&release_memory_observer.active==1);
+ finishHttpAllocationObservation(2);http_response_pending=false;release_memory_observer.httpEnd();
+ assert(allocationEnds==2&&release_memory_observer.active==0);
+ assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpAllocCore0&&r.cid==2);
+ assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpAllocCore1&&r.cid==2);
  observeReleaseMemory(MemChannelReleased,42,9);assert(Serial.used==0);
  assert(release_memory_observer.pop(r)&&r.cid==42&&r.arg==9&&r.free==9000&&r.largest==7000);
  // A callback never outputs; overflow does not wait for UART or allocate.
@@ -68,15 +81,19 @@ int main(){
  for(int i=0;i<500;++i){clock_ms+=10;serviceReleaseMemoryObservation();}
  assert(Serial.max_write<=20&&strstr(Serial.output,"MEM event=")&&strstr(Serial.output,"lost=8"));
  for(int i=0;i<500;++i){clock_ms+=10;serviceReleaseMemoryObservation();}
- assert(strstr(Serial.output,"MEM HTTP")&&strstr(Serial.output,"requests=1 active=0 send_failed=1"));
+ assert(strstr(Serial.output,"MEM HTTP")&&strstr(Serial.output,"requests=2 active=0 send_failed=1"));
  // Terminal summaries decode 128/64 counters and timing/progress without heap labels.
  release_memory_observer.push({clock_ms,500,11,MemHttpTxEnd,1,11u|(3u<<8)|(128u<<16)|(64u<<24)});
  release_memory_observer.push({clock_ms,101,30,MemHttpTxTiming,1,200});
+ release_memory_observer.push({clock_ms,1492,0x1000,MemHttpAllocCore0,1,2u|kAllocationDropped});
+ release_memory_observer.push({clock_ms,0,0,MemHttpAllocCore1,1,kAllocationUnavailable|kAllocationSaturated});
  release_memory_observer.push({clock_ms,10,450,MemHttpTxProgress,1,50});
  for(int i=0;i<300;++i){clock_ms+=10;serviceReleaseMemoryObservation();}
  assert(strstr(Serial.output,"reason=11 phase=3 elapsed=500 calls=128 retry=64 errno=11"));
  assert(strstr(Serial.output,"polls=101 max_gap_ms=30 retry_wait_ms=200"));
  assert(strstr(Serial.output,"first_ms=10 last_ms=450 idle_ms=50"));
+ assert(strstr(Serial.output,"core=0 count=2 first_size=1492 first_caps=0x1000 saturated=0 unavailable=0 dropped=1"));
+ assert(strstr(Serial.output,"core=1 count=0 first_size=0 first_caps=0x0 saturated=1 unavailable=1 dropped=0"));
  const size_t before=Serial.used;foc_alignment_observer.measuring=true;
  observeReleaseMemory(MemHidBefore,10,244);clock_ms+=10000;serviceReleaseMemoryObservation();assert(Serial.used==before);
  // The shared recorder is exercised with the same caller-side lock discipline.

@@ -19,6 +19,7 @@
 #include "BoundedHttpResponse.h"
 #include "ContinuingHttpFile.h"
 #include "UartAllocationDiagnostics.h"
+#include "HttpTransmitClient.h"
 #include "ReleaseMemoryObservation.h"
 #include "CheckedWheelSensor.h"
 #include "LqrMotorVoltage.h"
@@ -38,15 +39,17 @@ bool http_response_pending=false;
 uint16_t first_http_route=0;
 portMUX_TYPE release_memory_lock = portMUX_INITIALIZER_UNLOCKED;
 void serviceReleaseMemoryObservation();
+void finishHttpAllocationObservation(uint16_t route);
 struct HttpMemoryRequest {
   explicit HttpMemoryRequest(uint16_t route=0){
     portENTER_CRITICAL(&release_memory_lock);
     first_http_request=release_memory_observer.requests==0;
     release_memory_observer.httpBegin();portEXIT_CRITICAL(&release_memory_lock);
     first_http_route=route;
+    beginAllocationResponse();
     if(first_http_request)observeReleaseMemory(MemHttpFirstRoute,route,0);
   }
-  ~HttpMemoryRequest(){if(!http_response_pending){portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpEnd();portEXIT_CRITICAL(&release_memory_lock);}first_http_request=false;}
+  ~HttpMemoryRequest(){if(!http_response_pending){finishHttpAllocationObservation(first_http_route);portENTER_CRITICAL(&release_memory_lock);release_memory_observer.httpEnd();portEXIT_CRITICAL(&release_memory_lock);}first_http_request=false;}
 };
 void observeHttpStatusSend(bool ok){
   if(ok)return;
@@ -5001,6 +5004,17 @@ struct HttpResponseTransport {
     bool connected() { return client.connected(); }
 };
 
+void finishHttpAllocationObservation(uint16_t route){
+  const auto summary=finishAllocationResponse();
+  const uint32_t now=millis();
+  const ReleaseMemoryRecord records[]={
+      {now,summary.core[0].firstSize,summary.core[0].firstCaps,MemHttpAllocCore0,route,summary.core[0].countFlags},
+      {now,summary.core[1].firstSize,summary.core[1].firstCaps,MemHttpAllocCore1,route,summary.core[1].countFlags}};
+  portENTER_CRITICAL(&release_memory_lock);
+  for(const auto& r:records)release_memory_observer.push(r);
+  portEXIT_CRITICAL(&release_memory_lock);
+}
+
 ContinuingHttpFile<NetworkClient,File> http_file_response;
 static_assert(sizeof(http_file_response)<=512,"one bounded HTTP context");
 void serviceHttpFileResponse(){
@@ -5009,6 +5023,7 @@ void serviceHttpFileResponse(){
   if(WiFi.status()!=WL_CONNECTED)http_file_response.finish(HttpFileEnd::WifiLost,millis());
   else http_file_response.poll(transport);
   if(!http_file_response.finished())return;
+  finishHttpAllocationObservation(http_file_response.route);
   const auto& m=http_file_response.metrics();
   observeHttpStatusSend(m.reason==HttpFileEnd::Complete);
   // Five typed records reuse the existing fixed ring, without heap walks.
@@ -5103,7 +5118,7 @@ void serveWebFile(const char* path, const char* mime) {
   if(size>kMaxHttpWebFileBytes){
     file.close();sendSmallHttpResponse(503,"Web file exceeds bounded response limit.\n");return;
   }
-  auto client=wifi_log_server.client();
+  HttpTransmitClient client(wifi_log_server.client());
   // Keep shared owners; WebServer may release its own client on handler return.
   if(http_file_response.begin(client,file,mime,millis(),first_http_route,first_http_request))
     http_response_pending=true;
@@ -5155,6 +5170,12 @@ void serviceReleaseMemoryObservation() {
       n=snprintf(line,sizeof(line),"HTTP_PROGRESS ms=%lu route=%u first_ms=%lu last_ms=%lu idle_ms=%lu lost=%lu\n",
           (unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.free,(unsigned long)r.largest,
           (unsigned long)r.arg,(unsigned long)lost);
+    }else if(have && ((r.event&255)==MemHttpAllocCore0 || (r.event&255)==MemHttpAllocCore1)){
+      n=snprintf(line,sizeof(line),"HTTP_ALLOC ms=%lu route=%u core=%u count=%lu first_size=%lu first_caps=0x%lx saturated=%u unavailable=%u dropped=%u ring_lost=%lu\n",
+          (unsigned long)r.ms,unsigned(r.cid),unsigned((r.event&255)==MemHttpAllocCore1),
+          (unsigned long)(r.arg&kAllocationCountMask),(unsigned long)r.free,(unsigned long)r.largest,
+          unsigned(bool(r.arg&kAllocationSaturated)),unsigned(bool(r.arg&kAllocationUnavailable)),
+          unsigned(bool(r.arg&kAllocationDropped)),(unsigned long)lost);
     }else if(have){
       n=snprintf(line,sizeof(line),"MEM event=%u http_active=%u ms=%lu cid=%u arg=%lu free=%lu largest=%lu lost=%lu\n",
           unsigned(r.event&255),unsigned(r.event>>8),(unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.arg,

@@ -8,7 +8,7 @@ enum ReleaseMemoryEvent {
   MemDisconnectNotice, MemDisconnectAck, MemChannelReleased, MemDisconnected,
   MemHidBefore, MemHidAfter, MemHidAllocationFailed, MemAfterDisconnect,
   MemHttpFirstRoute, MemHttpFirstFile, MemHttpFirstResult,
-  MemHttpTxEnd, MemHttpTxBody, MemHttpTxWire, MemHttpTxTiming, MemHttpTxProgress
+  MemHttpTxEnd, MemHttpTxBody, MemHttpTxWire, MemHttpTxTiming, MemHttpTxProgress, MemHttpAllocCore0, MemHttpAllocCore1
 };
 void observeReleaseMemory(uint16_t event, uint16_t cid, uint32_t arg);
 #ifdef __cplusplus

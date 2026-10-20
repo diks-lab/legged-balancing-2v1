@@ -29,3 +29,5 @@ sampleはatomicの世代付きで公開します。コールバックは一度�
 tests/uart_allocation_host/run.pyは実装本文をコンパイルし、ターゲットのPS読出し命令だけを置換します。公開API準備順、出力/確保/ヒープ走査禁止、task/ISR、並行core、先着保持、checksum/部分適用/version/core/世代不一致、各reset理由、消費/再起動/世代折返し、途中sampleを検証します。malloc/calloc/realloc/newにもコールバック禁止assertを入れています。ASan/UBSanと既存の起動/操作/HTTP集計の回帰も成功しました。
 
 ESP32ビルド成功。静的DRAMは106604→106636 B（32 B増、28 Bの状態＋配置差4 B）。RTC_NOINITは別途124 B追加（2×56 B＋12 B）。コールバック本体はIRAM 275 Bで、リテラル48 BもIRAMに配置します（計323 B、配置調整前）。Flash1900753 B。事前準備のVFS mutexは実行時に84 B＋管理分を確保するため、この動的分は静的DRAM差分に含みません。新しいタスク/スタック予約はありません。実機のVFS準備成功、失敗記録のRTC保持、再接続/併用時のヒープ、ppTaskログでのabort解消は未確認です。PID/FOC/PS4操作/停止条件、FIFO、全トレース、タスクスタックは変更しません。
+
+後続の応答単位ライブ集計は[http-rx-allocation-observation.md](http-rx-allocation-observation.md)を参照。既存RTCの記録/消費は維持し、稼働中の非致命的な失敗は別の固定長状態で集計します。

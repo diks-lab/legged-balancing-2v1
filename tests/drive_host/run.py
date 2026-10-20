@@ -31,6 +31,10 @@ prelude = r'''
 #include "BoundedHttpResponse.h"
 #include "ContinuingHttpFile.h"
 #include "ReleaseMemoryObservation.h"
+#include "AllocationResponseObserver.h"
+#include <memory>
+AllocationResponseObserver liveAllocations;
+AllocationResponseSummary finishAllocationResponse(){return liveAllocations.finish();}
 ReleaseMemoryRecord memoryEvents[64]{};unsigned memoryEventCount=0;
 extern "C" void observeReleaseMemory(uint16_t e,uint16_t cid,uint32_t arg){
  if(memoryEventCount<64)memoryEvents[memoryEventCount++]={0,0,0,e,cid,arg};
@@ -106,17 +110,19 @@ void* csvMalloc(size_t size){if(failCsvAllocation)return nullptr;++csvAllocs;ret
 void csvFree(void* p){if(p)++csvFrees;std::free(p);}
 void copyCsvSnapshot(void* dst,const void* src,size_t n){if(onCsvCopy)onCsvCopy();memcpy(dst,src,n);}
 struct NetworkClient {
+  std::shared_ptr<int> _rxBuffer;
   int fd(){return 1;}
   void stop(){}
   bool connected(){return csvClientConnected;}
 };
+#include "HttpTransmitClient.h"
 std::string* rawStatusBody=nullptr;
 bool rawStatusFirstWrite=true;
 int* rawStatusCode=nullptr;
 std::function<void()> onStatusSend;
 int forcedHttpEagain=0,httpSendCalls=0;
 int send(int,const char* data,size_t size,int){
-  ++httpSendCalls;if(forcedHttpEagain){--forcedHttpEagain;errno=EAGAIN;return -1;}
+  ++httpSendCalls;if(forcedHttpEagain){--forcedHttpEagain;liveAllocations.record(0,1492,0x1000);errno=EAGAIN;return -1;}
   if(onStatusSend)onStatusSend();
   if(rawStatusFirstWrite){rawStatusBody->clear();rawStatusFirstWrite=false;sscanf(data,"HTTP/1.1 %d",rawStatusCode);}
   rawStatusBody->append(data,size);return static_cast<int>(size);
@@ -842,7 +848,7 @@ int main(){
 
   // An actual EAGAIN backoff does not gate PS4 events, diagnostics or full stop.
   setupCase();PS4.ok=true;setupPs4Controller();http_filesystem_ready=true;
-  LittleFS.file={true,false};csvClientConnected=true;forcedHttpEagain=1;
+  LittleFS.file={true,false};csvClientConnected=true;forcedHttpEagain=1;liveAllocations.begin();
   serveWebFile("/index.html","text/html");assert(http_response_pending);
   serviceHttpFileResponse();assert(http_response_pending);
   const int sendsBeforeBackoff=httpSendCalls;
@@ -856,6 +862,12 @@ int main(){
   serviceHttpPs4DiagnosticSerial();assert(Serial.output.size()>diagnosticBefore);
   ++nowMs;serviceHttpFileResponse();assert(httpSendCalls==sendsBeforeBackoff&&http_response_pending);
   while(http_response_pending){++nowMs;serviceHttpFileResponse();}
+
+  bool haveAllocation=false;ReleaseMemoryRecord allocationRecord{};
+  while(release_memory_observer.pop(allocationRecord)){
+    if((allocationRecord.event&255)==MemHttpAllocCore0&&allocationRecord.arg==1&&allocationRecord.free==1492&&allocationRecord.largest==0x1000)haveAllocation=true;
+  }
+  assert(haveAllocation); // Actual async completion emits this window's failed request.
 
   // Trace sum and status report selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);

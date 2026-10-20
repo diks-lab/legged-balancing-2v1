@@ -54,3 +54,5 @@ ESP32ビルド成功。ELFのコンテキスト実サイズは**400 B**（7ea05d
 今回の継続型は正常なHTML/CSS/JSファイル応答です。状態API・404/503・操作受付・CSV拒否は従来の固定長/上限付き同期小応答を保持します。正常CSVのcoreヘッダー/sendContent/chunk終端とcore要求解析は旧経路のままです。経路一覧は[bounded-web-files.md](bounded-web-files.md)を参照してください。
 
 PID・FOC・PS4操作・停止条件・トレース・FIFO・スタックは変更しません。WebSocket未追加。トップページ完送、CSS/JS/状態更新、PS4併用/再接続、実内部RAM/最大連続領域、制御周期とTCP回収時期は実機未検証です。ビルド成功は実機通信成功を意味しません。マージ・実機書き込みは行いません。
+
+後続変更で解析済みファイルGETのRX参照をTXコピーから外し、応答単位の確保失敗を集計しました。[http-rx-allocation-observation.md](http-rx-allocation-observation.md)に寿命・互換性チェック・集計範囲/欠落・最新RAM値を記載します。期限やTCP容量は変更しません。

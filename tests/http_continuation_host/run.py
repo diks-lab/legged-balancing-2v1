@@ -3,6 +3,8 @@ from pathlib import Path
 import os,re,subprocess,tempfile
 core=Path(os.environ.get('PLATFORMIO_CORE_DIR','/workspace/pio-core'))/'packages/framework-arduinoespressif32'
 net=(core/'libraries/Network/src/NetworkClient.cpp').read_text()
+rx=net[net.index('class NetworkClientRxBuffer {'):net.index('class NetworkClientSocketHandle {')]
+rx=rx.replace('~NetworkClientRxBuffer() {','~NetworkClientRxBuffer() { ++stats.rxDeaths;')
 methods=net[net.index('NetworkClient::NetworkClient()'):net.index('int NetworkClient::connect(IPAddress')]
 fs=(core/'libraries/FS/src/FS.cpp').read_text()
 a=fs.index('void File::close()');b=fs.index('\nFile::operator bool()',a)
@@ -39,7 +41,12 @@ struct NetworkClientSocketHandle {
  ~NetworkClientSocketHandle(){close();++stats.socketDeaths;}
  int fd(){return socket;}
 };
-struct NetworkClientRxBuffer {explicit NetworkClientRxBuffer(int){}~NetworkClientRxBuffer(){++stats.rxDeaths;}};
+constexpr int FIONREAD=1,MSG_DONTWAIT=1;
+#define ESP_IDF_VERSION_MAJOR 5
+int lwip_ioctl(int,int,int* n){*n=1;return 0;}
+int recv(int,uint8_t* data,size_t,int){*data='G';return 1;}
+#define log_e(...) ((void)0)
+'''+rx+r'''
 constexpr int WIFI_CLIENT_DEF_CONN_TIMEOUT_MS=3000;
 struct NetworkClient {
  std::shared_ptr<NetworkClientSocketHandle> clientSocketHandle;
@@ -50,6 +57,7 @@ struct NetworkClient {
  int fd(){return clientSocketHandle?clientSocketHandle->fd():-1;}
 };
 '''+methods+r'''
+#include "HttpTransmitClient.h"
 struct IOState {
  char output[20000]{};size_t used=0;unsigned sends=0;
  uint32_t tick=0;bool peer=true;int maxWrite=512;
@@ -98,11 +106,17 @@ const char* assets[]={
 };
 void start(Response&r,IOState&io,const char*data,const char*mime="text/html; charset=utf-8",size_t size=0){
  assert(!failAllocation);stats=Stats{};
- NetworkClient server(7);File local(data,size?size:strlen(data),&io);
- assert(r.begin(server,local,mime,io.tick,1,true));
+ NetworkClient server(7);uint8_t request;assert(server._rxBuffer->read(&request,1)==1);
+ File local(data,size?size:strlen(data),&io);
+ {
+  HttpTransmitClient transmit(server);
+  assert(transmit.fd()==server.fd()&&!transmit._rxBuffer&&server._rxBuffer);
+  assert(stats.socketCloses==0&&stats.rxDeaths==0);
+  assert(r.begin(transmit,local,mime,io.tick,1,true));
+ }
  // Actual core copy ownership: WebServer drops its reference after handler return.
  server=NetworkClient();local=File();
- if(r.active())assert(stats.socketCloses==0&&stats.fileCloses==0&&stats.rxDeaths==0);
+ if(r.active())assert(stats.socketCloses==0&&stats.fileCloses==0&&stats.rxDeaths==1);
  failAllocation=true;assert(malloc(1)==nullptr); // Continuation itself must allocate nothing.
 }
 void step(Response&r,IOState&io){
@@ -172,14 +186,14 @@ int main(){
  {Response r;IOState io;start(r,io,assets[0]);step(r,io);io.peer=false;step(r,io);assert(r.metrics().reason==HttpFileEnd::Disconnected&&stats.reads==0);released();}
  {Response r;IOState io;start(r,io,assets[0]);r.finish(HttpFileEnd::WifiLost,12);assert(r.metrics().reason==HttpFileEnd::WifiLost);released();}
  {Response r;IOState io;stats=Stats{};NetworkClient server(7);File f(assets[0],strlen(assets[0]),&io);f._p->failRead=2;
-  assert(r.begin(server,f,"text/html",0,1,true));server=NetworkClient();f=File();failAllocation=true;
+  assert(r.begin(HttpTransmitClient(server),f,"text/html",0,1,true));server=NetworkClient();f=File();failAllocation=true;
   pump(r,io);assert(r.metrics().reason==HttpFileEnd::ReadError&&r.metrics().bodySent==256&&stats.reads==2);released();}
  {Response r;IOState io;start(r,io,"");pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete&&stats.reads==0&&r.metrics().bodyTotal==0);released();}
  {Response r;IOState io;stats=Stats{};NetworkClient server(7);File f(assets[0],strlen(assets[0]),&io);f._p->shortRead=100;
-  assert(r.begin(server,f,"text/html",0,1,true));server=NetworkClient();f=File();failAllocation=true;
+  assert(r.begin(HttpTransmitClient(server),f,"text/html",0,1,true));server=NetworkClient();f=File();failAllocation=true;
   pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete&&stats.reads>5);released();}
  {Response r;IOState io;stats=Stats{};NetworkClient server(7);File f(assets[0],strlen(assets[0]),&io);f._p->oversize=true;
-  assert(r.begin(server,f,"text/html",0,1,true));server=NetworkClient();f=File();failAllocation=true;
+  assert(r.begin(HttpTransmitClient(server),f,"text/html",0,1,true));server=NetworkClient();f=File();failAllocation=true;
   pump(r,io);assert(r.metrics().reason==HttpFileEnd::ReadError);released();}
  {Response r;IOState io;char mime[300];memset(mime,'x',sizeof(mime));mime[299]=0;start(r,io,assets[0],mime);
   assert(r.finished()&&r.metrics().reason==HttpFileEnd::Invalid);released();}
@@ -192,7 +206,7 @@ int main(){
   assert(!r.begin(extra,f,"text/html",0,2,false)&&r.route==1&&r.active()&&stats.socketCloses==0);
   extra.stop();f.close();r.finish(HttpFileEnd::Cancelled,2);assert(stats.socketCloses==2&&stats.fileCloses==2);}
  {Response r;IOState io;io.tick=UINT32_MAX-8;start(r,io,assets[0]);pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete);released();}
- puts("PASS: LF/CRLF assets, actual core stop/copy lifetime after WebServer reference release, no allocation/read-ahead, slow polls/partial/EAGAIN >=10ms backoff, 2s/500ms/128calls/64errors budgets, timing/progress, disconnect/WiFi/cancel, single slot/reuse and release");
+ puts("PASS: LF/CRLF assets, actual core stop/TX-only shared socket/RX release after WebServer reference release, no allocation/read-ahead, slow polls/partial/EAGAIN >=10ms backoff, 2s/500ms/128calls/64errors budgets, timing/progress, disconnect/WiFi/cancel, single slot/reuse and release");
 }
 '''
 with tempfile.TemporaryDirectory() as td:
