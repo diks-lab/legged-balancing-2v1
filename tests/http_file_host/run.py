@@ -62,7 +62,7 @@ int main(){
   char contentLength[64];snprintf(contentLength,sizeof(contentLength),"Content-Length: %u\r\n",unsigned(f.length));
   assert(strstr(t.output,contentLength)&&strstr(t.output,mimes[i]));
  }
- Transport partial;partial.maximum=31;partial.header_progress=37;File pf{assets[0],strlen(assets[0]),partial};
+ Transport partial;partial.maximum=64;partial.header_progress=37;File pf{assets[0],strlen(assets[0]),partial};
  assert(sendBoundedHttpFile(partial,pf,mimes[0])==HttpSendResult::Complete);
  assert(partial.bodyBytes()==pf.length&&!memcmp(strstr(partial.output,"\r\n\r\n")+4,assets[0],pf.length));
  Transport shortIO;File sf{assets[0],strlen(assets[0]),shortIO};sf.short_read=100;

@@ -20,6 +20,7 @@ for name in ['index.html','style.css','app.js']:
 code=r'''
 #include "ContinuingHttpFile.h"
 #include <cassert>
+#include <algorithm>
 #include <cstdlib>
 #include <new>
 #include <memory>
@@ -133,17 +134,20 @@ int main(){
   assert(r.metrics().wireSent==r.metrics().wireTotal&&io.used==r.metrics().wireTotal);released();
   r.acknowledge();assert(!r.active()&&!r.finished());
  }
- assert(strlen(assets[0])==1243&&strlen(assets[1])==1253);
+ assert(strlen(assets[1])==strlen(assets[0])+std::count(assets[0],assets[0]+strlen(assets[0]),'\n'));
  {Response r;IOState io;io.maxWrite=127;start(r,io,assets[1]);pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete);released();}
  {Response r;IOState io;io.script[0]=-EAGAIN;io.script[1]=17;io.script[2]=512;io.script[3]=-EAGAIN;io.scriptSize=4;
   start(r,io,assets[0]);step(r,io);assert(r.active()&&io.used==0&&io.sends==1); // EAGAIN returns, does not retry inline.
   pump(r,io);assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().retries==2);released();}
 
  // Slow service intervals must no longer fail the former 50 ms budget.
- for(unsigned gap:{10u,30u,100u}){Response r;IOState io;start(r,io,assets[1]);pump(r,io,gap);
-  assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().bodySent==1253);
-  assert(r.metrics().maxPollGap==gap&&r.metrics().elapsed>=100&&r.metrics().polls==11);
+ for(unsigned gap:{10u,30u,100u}){Response r;IOState io;start(r,io,assets[3]);pump(r,io,gap);
+  assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().bodySent==strlen(assets[3]));
+  assert(r.metrics().maxPollGap==gap&&r.metrics().elapsed>=40&&r.metrics().polls==5);
   assert(r.metrics().firstProgressMs==0&&r.metrics().lastProgressMs==r.metrics().elapsed);released();}
+ // Larger HTML must still respect the unchanged 2-second response budget.
+ for(unsigned gap:{10u,30u,100u}){Response r;IOState io;start(r,io,assets[1]);pump(r,io,gap);
+  assert(r.metrics().reason==(gap==100?HttpFileEnd::Deadline:HttpFileEnd::Complete));released();}
  // All 64 retries accumulate even with progress between them; offsets are retained.
  {Response r;IOState io;for(unsigned i=0;i<64;++i){io.script[2*i]=1;io.script[2*i+1]=-EAGAIN;}io.scriptSize=128;
   start(r,io,assets[0]);pump(r,io);
