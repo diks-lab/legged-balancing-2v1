@@ -26,3 +26,12 @@ FIFO/Batchは通知を制御ループへ渡すアプリ側の仕組みであり�
 ## HTTP送信用のRX参照アダプター（coreは未変更）
 
 HttpTransmitClientはArduino core 3.0.3のprotected _rxBufferへ依存します。共有socketを保持し、解析済みファイルGETの不要な受信キャッシュだけを早期回収する目的です。scripts/check_http_client_core.pyがNetworkClient.h/cpp全体のLF正規化SHAとversionを読み取り専用で検証し、未知版ではビルドを停止します。SDK/coreへのソースパッチではありません。上流で同等の公開APIが提供された時、または解析/所有権の置換時に撤去・再評価します。詳細は[http-rx-allocation-observation.md](http-rx-allocation-observation.md)。TCP内部の観測やSDK再ビルドは今回含めません。
+
+## 有限・協調型のHTTP要求解析
+
+Arduino core 3.0.3のParsing.cppを版・LF正規化SHAで照合し、ビルド領域のoverlayをコンパイルする。
+対象はscripts/bounded_http_request_overlay.py。RX失敗後のStream待機ループによるIdle飢餓、
+不完全要求の受理を防ぐためで、インストール済みcore/SDKやTCP内部は変更しない。
+ELFで置換parserのリンクも検査する。撤去条件は上流が有限な全体期限・エラー終了・
+Idleへの譲渡を提供し、同等の故障注入試験と実機比較が通ること。
+詳細・制限は[HTTP要求解析のWDT対策](http-request-watchdog.md)。

@@ -42,7 +42,7 @@ struct {
 } Serial;
 '''
 a=source.index('struct HttpMemoryRequest {');b=source.index('\n}\nextern "C"',a)
-code=prefix+fn('finishHttpAllocationObservation')+'\n'+source[a:b]+'\n'+fn('observeReleaseMemory')+'\n'+fn('serviceReleaseMemoryObservation')+r'''
+code=prefix+fn('finishHttpAllocationObservation')+'\n'+source[a:b]+'\n'+fn('observeHttpRequestBegin')+'\n'+fn('observeHttpRequestEnd')+'\n'+fn('observeReleaseMemory')+'\n'+fn('serviceReleaseMemoryObservation')+r'''
 int main(){
  static_assert(sizeof(ReleaseMemoryObserver)<768,"bounded observer");
  ReleaseMemoryObserver local;ReleaseMemoryRecord r{};
@@ -57,6 +57,13 @@ int main(){
  assert(local.due(9949,delay)&&delay==10000&&!local.due(20000,delay));
  local.push({30000,1,1,MemDisconnected,0,0});local.push({30001,1,1,MemConnectStart,10,17});
  assert(!local.due(50000,delay));
+ // Parser allocation windows are separate from response/request handler counters.
+ observeHttpRequestBegin();clock_ms=200;observeHttpRequestEnd(2,19,200);
+ assert(allocationBegins==1&&allocationEnds==1&&release_memory_observer.requests==0);
+ assert(release_memory_observer.pop(r)&&r.event==MemHttpRequestEnd&&r.arg==2&&r.free==19&&r.largest==200);
+ assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpAllocCore0&&r.cid==0);
+ assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpAllocCore1&&r.cid==0);
+ allocationBegins=allocationEnds=0;
  // HTTP request active state and failed writes are counted without per-request records.
  {HttpMemoryRequest request(1);assert(release_memory_observer.pop(r)&&(r.event&255)==MemHttpFirstRoute&&r.cid==1);assert(release_memory_observer.requests==1&&release_memory_observer.active==1);
   observeHttpStatusSend(true);observeHttpStatusSend(false);

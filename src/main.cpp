@@ -56,6 +56,12 @@ void observeHttpStatusSend(bool ok){
   portENTER_CRITICAL(&release_memory_lock);++release_memory_observer.send_failures;portEXIT_CRITICAL(&release_memory_lock);
 }
 }
+extern "C" void observeHttpRequestBegin(){beginAllocationResponse();}
+extern "C" void observeHttpRequestEnd(uint32_t reason,uint32_t bytes,uint32_t elapsed){
+  const ReleaseMemoryRecord r{millis(),bytes,elapsed,MemHttpRequestEnd,0,reason};
+  portENTER_CRITICAL(&release_memory_lock);release_memory_observer.push(r);portEXIT_CRITICAL(&release_memory_lock);
+  finishHttpAllocationObservation(0); // Parse-stage window, before route-handler response window.
+}
 extern "C" void observeReleaseMemory(uint16_t event,uint16_t cid,uint32_t arg){
   const ReleaseMemoryRecord r{millis(),heap_caps_get_free_size(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),
       heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT),event,cid,arg};
@@ -5176,6 +5182,9 @@ void serviceReleaseMemoryObservation() {
           (unsigned long)(r.arg&kAllocationCountMask),(unsigned long)r.free,(unsigned long)r.largest,
           unsigned(bool(r.arg&kAllocationSaturated)),unsigned(bool(r.arg&kAllocationUnavailable)),
           unsigned(bool(r.arg&kAllocationDropped)),(unsigned long)lost);
+    }else if(have && (r.event&255)==MemHttpRequestEnd){
+      n=snprintf(line,sizeof(line),"HTTP_REQUEST ms=%lu reason=%lu bytes=%lu elapsed_ms=%lu ring_lost=%lu\n",
+          (unsigned long)r.ms,(unsigned long)r.arg,(unsigned long)r.free,(unsigned long)r.largest,(unsigned long)lost);
     }else if(have){
       n=snprintf(line,sizeof(line),"MEM event=%u http_active=%u ms=%lu cid=%u arg=%lu free=%lu largest=%lu lost=%lu\n",
           unsigned(r.event&255),unsigned(r.event>>8),(unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.arg,
