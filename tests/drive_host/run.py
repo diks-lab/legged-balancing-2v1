@@ -30,6 +30,7 @@ prelude = r'''
 #include "Ps4EventInbox.h"
 #include "BoundedHttpResponse.h"
 #include "DiagnosticTelemetry.h"
+#include "BootAutoStart.h"
 #include "DiagnosticWebSocket.h"
 #define SERIAL_DIAGNOSTICS 1
 #include "ContinuingHttpFile.h"
@@ -197,7 +198,7 @@ prefix += source[bridge_start:bridge_end]
 prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
 prefix += source[source.index('struct HttpResponseTransport {'):source.index('void serviceHttpFileResponse()')]
 names = [
-    'serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'bootAutoPoseAllowed','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -253,6 +254,7 @@ void nearAt(float x,float y,int line){if(!(std::fabs(x-y)<1e-5f))fprintf(stderr,
 #define near(x,y) nearAt(x,y,__LINE__)
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
+  boot_auto_start=BootAutoStart{};
   resetLqrTestState(); cancelBalanceWait();
   lqr_test_mode=mode;
   test_system_ready=true; startup_foc_ready.store(true); emergency_stop_active=false;
@@ -781,6 +783,69 @@ int main(){
   PS4.connect_cb();PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
   PS4.input.cross=true;PS4.input_cb();updatePs4Controller();assert(emergency_stop_active&&!pins[27]&&!pins[32]);
   ws.disconnect(wsio);assert(!wsio.open);
+
+  // Boot-only auto start: actual shared start/wait path, no fabricated reference.
+  auto bootFixture=[&](){
+    setupCase(LqrTestMode::Full);
+    sensor1.begin(19,18);sensor2.begin(23,5);
+    lqr_diagnostic_armed=lqr_direction_test_armed=false;lqr_zero_set=false;
+    last_stop_reason="NONE";diagnostic_startup_failed.store(false);
+    diagnostic_imu_initialized.store(true);diagnostic_imu_calibrating.store(false);
+    LQR_angle=0.8f;LQR_gyro=0.2f;LQR_speed=0;
+  };
+  auto bootFrame=[&](){
+    nowMs+=10;noteImuMeasurement();serviceBootAutoStart();
+    updateLqrDiagnostic();updateBalanceWait();
+  };
+  bootFixture();test_system_ready=false;
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active&&!lqr_direction_test_armed);
+  test_system_ready=true;startup_foc_ready.store(false);
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  startup_foc_ready.store(false);test_system_ready=false;diagnostic_startup_failed.store(true);
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  diagnostic_startup_failed.store(false);test_system_ready=true;startup_foc_ready.store(true);diagnostic_imu_initialized.store(false);
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  diagnostic_imu_initialized.store(true);LQR_angle=12;
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active&&!lqr_zero_set);
+  LQR_angle=0.8f;LQR_gyro=3;
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  LQR_gyro=0.2f;diagnostic_imu_calibrating.store(true);
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  diagnostic_imu_calibrating.store(false);
+  for(int n=0;n<160;++n)bootFrame();
+  assert(balance_wait_active&&!lqr_direction_test_armed&&!lqr_zero_set);
+  assert(boot_auto_start.phase==BootAutoStart::Phase::Preparing);
+  LQR_angle=12;
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!lqr_direction_test_armed&&!lqr_zero_set);
+  LQR_angle=0.8f;
+  for(int n=0;n<400;++n)bootFrame();
+  assert(lqr_direction_test_armed&&lqr_zero_set&&!balance_wait_active);
+  near(angle_zeropoint,0.8f);assert(lqr_test_mode==LqrTestMode::Full);
+  assert(boot_auto_start.phase==BootAutoStart::Phase::Finished);
+  stopBalanceTest();
+  for(int n=0;n<1000;++n) { bootFrame(); }
+  assert(!balance_wait_active&&!lqr_direction_test_armed);
+  assert(executeOperatorCommand(OperatorCommand::Start));
+  for(int n=0;n<400;++n) { bootFrame(); }
+  assert(lqr_direction_test_armed&&lqr_zero_set);
+  float bootRight=0.1f,bootLeft=0.1f;stopForActualFall(bootRight,bootLeft);
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!lqr_direction_test_armed);
+  bootFixture();assert(executeOperatorCommand(OperatorCommand::FullStop));
+  emergency_stop_active=false;
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  bootFixture();sensor2.fault=true;assert(stopOnWheelFault());
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!lqr_direction_test_armed);
 
   // Latest telemetry reports selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);

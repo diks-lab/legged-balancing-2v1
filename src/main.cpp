@@ -18,6 +18,7 @@
 #include <lwip/sockets.h>
 #include "BoundedHttpResponse.h"
 #include "DiagnosticTelemetry.h"
+#include "BootAutoStart.h"
 #include "DiagnosticWebSocket.h"
 #include "SerialDiagnostics.h"
 #include <fcntl.h>
@@ -401,11 +402,13 @@ float right_target_voltage = 0.0f;
 float left_target_voltage = 0.0f;
 bool test_system_ready = false;
 bool emergency_stop_active = false;
+BootAutoStart boot_auto_start;
 const char* last_stop_reason = "NONE";
 char diagnostic_stop_reason[64]="NONE";
 uint32_t diagnostic_stop_ms=0;
 void recordDiagnosticStop(const char* reason){
   if(!strcmp(reason,"NONE"))return;
+  boot_auto_start.cancel();
   size_t i=0;for(;reason[i]&&i+1<sizeof(diagnostic_stop_reason);++i)diagnostic_stop_reason[i]=reason[i];
   diagnostic_stop_reason[i]=0;diagnostic_stop_ms=millis();
 }
@@ -720,6 +723,8 @@ void handleLqrControlTraceDownload();
 void setStatusLed(bool on);
 void cancelBalanceWait();
 void updateBalanceWait();
+bool bootAutoPoseAllowed();
+void serviceBootAutoStart();
 bool motionCommandAllowed();
 
 // Test / monitor
@@ -1141,6 +1146,7 @@ void loop() {
       micros() - section_start_us;
 
   updateLqrState();
+  serviceBootAutoStart();
 
   updateWheelVelocityDiagnostic();
   updateLqrDiagnostic();
@@ -3395,8 +3401,47 @@ void cancelBalanceWait() {
   setStatusLed(false);
 }
 
+// Gravity-referenced gate for BOOT ONLY; manual start keeps its existing rules.
+bool bootAutoPoseAllowed(){
+  return diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()&&
+      diagnostic_imu_seq&&diagnostic_imu_finite&&uint32_t(millis()-diagnostic_imu_ms)<=250&&
+      wheelSensorsOK()&&isfinite(LQR_speed)&&
+      abs(LQR_angle)<=kBalanceWaitAngleLimitDeg&&
+      abs(LQR_gyro)<=kBalanceWaitGyroLimitDegPerSec&&
+      abs(LQR_speed)<=kBalanceWaitWheelSpeedLimit;
+}
+void serviceBootAutoStart(){
+  if(boot_auto_start.phase==BootAutoStart::Phase::Finished||
+     boot_auto_start.phase==BootAutoStart::Phase::Cancelled)return;
+  if(emergency_stop_active||!wheelSensorsOK()||polarity_test_active){boot_auto_start.cancel();return;}
+  if(boot_auto_start.phase!=BootAutoStart::Phase::Preparing&&
+      (lqr_diagnostic_armed||balance_wait_active||lqr_direction_test_armed||
+       right_target_voltage!=0||left_target_voltage!=0)){
+    boot_auto_start.cancel();return; // A manual owner takes precedence.
+  }
+  const bool ready=test_system_ready&&startup_foc_ready.load()&&
+      driver1_initialized&&driver2_initialized;
+  if(!boot_auto_start.tick(ready,bootAutoPoseAllowed(),millis(),kBalanceStableTimeMs))return;
+  boot_auto_start.invoking=true;
+  const bool accepted=executeOperatorCommand(OperatorCommand::Start);
+  boot_auto_start.invoking=false;
+  if(!accepted)boot_auto_start.cancel();
+  Serial.println(accepted?"BOOT AUTO: BALANCE PREPARE; reference must be captured before balancing.":
+      "BOOT AUTO: rejected; no automatic retry.");
+}
+
 void updateBalanceWait() {
   if (!balance_wait_active) {
+    return;
+  }
+
+  // Auto boot must never learn an arbitrarily tilted stationary pose as upright.
+  // Keep this extra gravity gate throughout the existing prepare/hold capture.
+  if(boot_auto_start.phase==BootAutoStart::Phase::Preparing&&!bootAutoPoseAllowed()){
+    balance_stable_start_ms=balance_stable_elapsed_ms=0;
+    balance_angle_sum=balance_distance_sum=0;balance_sample_count=0;
+    balance_candidate_angle=0;balance_timer_reset=true;
+    balance_brake_right=balance_brake_left=0;setBothTargetsToZero();
     return;
   }
 
@@ -3572,6 +3617,7 @@ void updateBalanceWait() {
 
     lqr_direction_test_start_ms = millis();
     lqr_direction_test_armed = true;
+    boot_auto_start.complete();
     lqr_startup_diagnostic_active = true;
     lqr_startup_diagnostic_start_ms = millis();
     lqr_startup_diagnostic_last_ms =
@@ -3691,6 +3737,7 @@ bool startBalanceTest() {
     return false;
   }
 
+  if(!boot_auto_start.invoking)boot_auto_start.cancel();
   Serial.printf("LQR TEST MODE: %s\n", lqrTestModeDisplayName());
   Serial.printf("LQR SPEED SOURCE: %s\n", lqrSpeedSourceName());
   stopBothMotorsAtZero();
@@ -3984,6 +4031,8 @@ void terminateLqrDriveSession(const char* reason, bool require_recenter) {
 }
 
 bool stopBalanceTest() {
+  boot_auto_start.cancel();
+  if(!strcmp(diagnostic_stop_reason,"NONE"))recordDiagnosticStop("MANUAL_STOP");
   // A redundant STOP after a fall must not overwrite its diagnostic reason.
   if (lqr_direction_test_armed || balance_wait_active || polarity_test_active) {
     last_stop_reason = "MANUAL_STOP";
@@ -4091,6 +4140,11 @@ void publishDiagnosticSnapshot(){
       emergency_stop_active?(!strcmp(last_stop_reason,"TILT_STOP")?5:4):!test_system_ready?0:
       lqr_direction_test_armed?3:balance_wait_active?2:
       strcmp(last_stop_reason,"NONE")?(!strcmp(last_stop_reason,"TILT_STOP")?5:4):1;
+  if(test_system_ready&&!lqr_direction_test_armed&&!emergency_stop_active&&
+      !sensor1.fault&&!sensor2.fault){
+    if(boot_auto_start.pending())s.state=8;
+    else if(boot_auto_start.phase==BootAutoStart::Phase::Cancelled&&!balance_wait_active&&s.state==1)s.state=4;
+  }
   snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
   snprintf(s.right_error,sizeof(s.right_error),"%s",sensor1.error);
   snprintf(s.left_error,sizeof(s.left_error),"%s",sensor2.error);
