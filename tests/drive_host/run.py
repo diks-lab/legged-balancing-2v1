@@ -29,6 +29,8 @@ prelude = r'''
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
 #include "BoundedHttpResponse.h"
+#include "DiagnosticTelemetry.h"
+#include "DiagnosticWebSocket.h"
 #include "ContinuingHttpFile.h"
 #include "ReleaseMemoryObservation.h"
 #include "AllocationResponseObserver.h"
@@ -188,7 +190,7 @@ int xQueueReceive(QueueHandle_t q,void* data,int t){int r=xQueuePeek(q,data,t);q
 std::function<void()> onHttpYield;
 void vTaskDelay(int ms){delay(ms);if(onHttpYield)onHttpYield();}
 '''
-bridge_start = source.index('struct HttpStatus {')
+bridge_start = source.index('diagnostic::Snapshot diagnostic_latest;')
 bridge_end = source.index('void captureHttpStatus();', bridge_start)
 prefix += source[bridge_start:bridge_end]
 prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
@@ -204,8 +206,7 @@ names = [
     'clearVelocityTrace','clearLoopTimingTrace','clearLqrControlTrace',
     'captureFocOutputSnapshot','updateLqrControlTrace','captureLqrDriveSignTrace','captureLqrStopTrace',
     'resetLqrDriveSignTrace','resetLqrStopTrace','startLqrStopTrace','setStatusLed','printLqrStatus',
-    'stopForActualFall','releaseHttpTraceSnapshot','reapHttpTraceSnapshot','traceDownloadBlocked','beginCsvResponse','sendTraceBusyResponse',
-    'handleVelocityTraceDownload','handleLoopTimingTraceDownload','handleLqrControlTraceDownload',
+    'stopForActualFall',
     'captureHttpStatus','serviceHttpRequests','handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','enqueueHttpCommand',
     'serveWebFile','cycleLqrSpeedSource','resetPs4MotionInput','executeOperatorCommand',
     'applyPs4Steering','ps4ButtonsReleased','handlePs4Connection','processPs4Input',
@@ -238,6 +239,14 @@ const char* ps4DriveStateName(Ps4DriveState){return "TEST";}
 void beginPs4DriveStopping(uint32_t){ps4_drive_state=Ps4DriveState::Stopping;}
 '''
 checks = r'''
+struct ParkedWsIO {
+ bool open=true;unsigned sends=0;std::string input;
+ uint32_t now(){return nowMs;}bool connected(){return open;}void close(){open=false;}
+ int read(char*p,size_t n){if(input.empty())return -EAGAIN;size_t k=std::min(n,input.size());memcpy(p,input.data(),k);input.erase(0,k);return k;}
+ int write(const char*,size_t){++sends;return -EAGAIN;}
+ bool acceptKey(const char*,char*out){strcpy(out,"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");return true;}
+ void snapshot(diagnostic::Snapshot&s){s=diagnostic_latest;}
+};
 void near(float x,float y){assert(std::fabs(x-y)<1e-5f);}
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
@@ -367,30 +376,12 @@ int main(){
   for(int i=0;i<12;++i){delay(10);fell=confirmActualFall()||fell;}
   assert(fell);
 
-  // Normal trace observes last FOC values before this loop's move stages
-  // a different command. Merely recording must not alter cached motor state.
-  setupCase();clearLqrControlTrace();
-  motor1.voltage.q=.125f;motor2.voltage.q=-.25f;
-  motor1.current_sp=.125f;motor2.current_sp=-.25f;
-  captureFocOutputSnapshot();
-  motor1.current_sp=motor1.voltage.q=0; // control code can clear live fields
-  updateLqrControlTrace(.75f,-.5f,true);
-  const auto observed=lqr_control_trace[0];
-  near(observed.right_output,.75f);near(observed.left_output,-.5f);
-  near(observed.right_voltage_q,.125f);near(observed.left_voltage_q,-.25f);
-  near(observed.right_current_sp,.125f);near(observed.left_current_sp,-.25f);
-  assert(observed.right_motor_enabled && observed.left_motor_enabled);
-  assert(observed.right_driver_en && observed.left_driver_en && !observed.after_disable);
-  motor1.move(.75f);near(motor1.current_sp,.75f);near(motor1.voltage.q,0);
-  near(lqr_control_trace[0].right_current_sp,.125f); // immutable before-move snapshot
-  lqr_direction_test_armed=false;
-  handleLqrControlTraceDownload();
-  assert(wifi_log_server.body.find("right_voltage_q_V,left_voltage_q_V,right_current_sp_V")!=String::npos);
-  assert(wifi_log_server.body.find("0.750000,-0.500000,0.125000,-0.250000,0.125000,-0.250000,1,1,1,1,BEFORE_MOVE")!=String::npos);
-  // CSV has 24 columns (existing 14 plus 10 appended), with no truncated row.
-  const auto newline=wifi_log_server.body.find('\n');
-  assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.begin()+newline,',')==23);
-  assert(std::count(wifi_log_server.body.begin()+newline+1,wifi_log_server.body.end(),',')==23);
+  // Latest diagnostic output/cache observes values without storing history.
+  setupCase();motor1.voltage.q=.125f;motor2.voltage.q=-.25f;
+  captureFocOutputSnapshot();updateLqrControlTrace(.75f,-.5f,true);
+  near(diagnostic_right_command,.75f);near(diagnostic_left_command,-.5f);
+  near(last_foc_output.right_voltage_q,.125f);
+  motor1.move(.75f);near(last_foc_output.right_voltage_q,.125f);
   LQR_angle=5.93f;angle_zeropoint=1;captureHttpStatus();handleWifiStatusPage();
   assert(wifi_log_server.body.find("Cached AngleY: 5.930000 deg")!=String::npos);
   assert(wifi_log_server.body.find("Reference: 1.000000 deg")!=String::npos);
@@ -400,11 +391,6 @@ int main(){
   // No USB: gating must already be complete whenever any stop-path Serial
   // output occurs, including the startup diagnostic before the trace dumps.
   setupCase();
-  velocity_trace_count=velocity_trace_write_index=1;velocity_trace[0].elapsed_ms=42;
-  loop_timing_count=loop_timing_write_index=1;loop_timing_trace[0].elapsed_ms=43;
-  lqr_control_trace_count=lqr_control_trace_write_index=1;
-  lqr_control_trace[0].elapsed_ms=44;
-  handleVelocityTraceDownload();assert(wifi_log_server.status==409);
   motor1.current_sp=motor2.current_sp=.8f;
   lqr_startup_diagnostic_active=true;
   int serialChecks=0;
@@ -418,37 +404,15 @@ int main(){
   stopForActualFall(right,left);
   onSerialOutput={};
   assert(serialChecks>0 && right==0 && left==0);
-  assert(std::string(last_stop_reason)=="TILT_STOP" && !traceDownloadBlocked(1));
-  releaseHttpTraceSnapshot();
-  assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
-  assert(lqr_control_trace[1].right_output==0 && lqr_control_trace[1].left_output==0);
-  assert(lqr_control_trace[1].after_disable);
-  assert(lqr_control_trace[1].right_voltage_q==0 && lqr_control_trace[1].right_current_sp==0);
-  assert(lqr_control_trace[1].right_motor_enabled && !lqr_control_trace[1].right_driver_en);
-  for(int i=0;i<20;++i){delay(20);updateWheelVelocityDiagnostic();updateLqrControlTrace(0,0,false);}
-  assert(velocity_trace_count==1 && loop_timing_count==1 && lqr_control_trace_count==2);
-  captureHttpStatus();handleWifiStatusPage();
-  assert(wifi_log_server.status==200);
-  assert(wifi_log_server.body.find("TILT_STOP")!=String::npos);
-  assert(wifi_log_server.body.find("Velocity=1")!=String::npos);
-  handleVelocityTraceDownload();assert(wifi_log_server.status==200);
-  const String csv=wifi_log_server.body;
-  assert(std::count(csv.begin(),csv.end(),'\n')==2);
-  assert(csv.find("42,")!=String::npos);
-  handleVelocityTraceDownload();assert(csv==wifi_log_server.body);
-  handleLoopTimingTraceDownload();assert(wifi_log_server.status==200);
-  assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.end(),'\n')==2);
-  handleLqrControlTraceDownload();assert(wifi_log_server.status==200);
-  assert(std::count(wifi_log_server.body.begin(),wifi_log_server.body.end(),'\n')==3);
-  assert(wifi_log_server.body.find("AFTER_DISABLE")!=String::npos);
-  handleStopBalanceTest();serviceHttpRequests(); // a redundant Web STOP must preserve the fall
-  assert(std::string(last_stop_reason)=="TILT_STOP" && velocity_trace_count==1);
-  handleStartBalanceTest();serviceHttpRequests(); // rejected while disabled: no erase
-  assert(wifi_log_server.status==202 && lqr_control_trace_count==2);
   assert(std::string(last_stop_reason)=="TILT_STOP");
-  emergency_stop_active=false; // same zero-output re-enable state as u
-  assert(startBalanceTest());
-  assert(velocity_trace_count==0 && loop_timing_count==0 && lqr_control_trace_count==0);
+  assert(std::string(diagnostic_stop_reason)=="TILT_STOP" && diagnostic_stop_ms==nowMs);
+  near(diagnostic_right_command,0);near(diagnostic_left_command,0);
+  assert(last_foc_output.right_voltage_q==0 && !last_foc_output.right_driver_en);
+  captureHttpStatus();handleWifiStatusPage();assert(wifi_log_server.status==200);
+  handleStopBalanceTest();serviceHttpRequests();assert(std::string(last_stop_reason)=="TILT_STOP");
+  handleStartBalanceTest();serviceHttpRequests();assert(std::string(last_stop_reason)=="TILT_STOP");
+  emergency_stop_active=false;assert(startBalanceTest());
+  assert(std::string(diagnostic_stop_reason)=="TILT_STOP"); // restart keeps latest event
   assert(std::string(last_stop_reason)=="NONE" && balance_wait_active);
   assert(stopBalanceTest());assert(std::string(last_stop_reason)=="MANUAL_STOP");
 
@@ -595,74 +559,6 @@ int main(){
   lqr_soft_stop_active=true;packet={};processPs4Input(packet,nowMs+=50);
   packet.dpad_down=true;processPs4Input(packet,nowMs+=50);assert(legCommand==20);
   // Stable CSV copies remain independent if the robot starts after capture.
-  setupCase();stopBalanceTest();velocity_trace_count=1;velocity_trace[0].elapsed_ms=876;
-  assert(!traceDownloadBlocked(1));velocity_trace[0].elapsed_ms=999;
-  assert(http_trace_snapshot->velocity[0].elapsed_ms==876);
-  releaseHttpTraceSnapshot();
-  loop_timing_trace[0].elapsed_ms=432;loop_timing_count=1;
-  assert(!traceDownloadBlocked(2));loop_timing_trace[0].elapsed_ms=999;
-  assert(http_trace_snapshot->timing[0].elapsed_ms==432);
-  releaseHttpTraceSnapshot();
-  lqr_control_trace[0].elapsed_ms=654;lqr_control_trace_count=1;
-  assert(!traceDownloadBlocked(3));lqr_control_trace[0].elapsed_ms=999;
-  assert(http_trace_snapshot->control[0].elapsed_ms==654);
-  releaseHttpTraceSnapshot();
-  assert(!http_trace_snapshot && csvAllocs==csvFrees);
-
-  // Allocation failures keep all original logs and return 503.
-  const auto velocity_before=velocity_trace_count,control_before=lqr_control_trace_count;
-  failCsvAllocation=true;
-  for(auto handler:{handleVelocityTraceDownload,handleLoopTimingTraceDownload,handleLqrControlTraceDownload}) {
-    handler();assert(wifi_log_server.status==503 && !http_trace_snapshot);
-  }
-  assert(velocity_trace_count==velocity_before && lqr_control_trace_count==control_before);
-  failCsvAllocation=false;
-  // A request not yet claimed can be cancelled immediately at timeout/disconnect.
-  onHttpYield={};handleLoopTimingTraceDownload();
-  assert(wifi_log_server.status==503 && !http_trace_snapshot && csvAllocs==csvFrees);
-  assert(http_trace_request==TraceIdle);
-  onHttpYield=[]{csvClientConnected=false;};handleVelocityTraceDownload();
-  assert(!http_trace_snapshot && csvAllocs==csvFrees);csvClientConnected=true;
-  // Real concurrent control copy: timeout must not free the in-use payload.
-  for(bool disconnectDuringCopy:{false,true}) {
-  std::mutex copyMutex;std::condition_variable copyCv;bool entered=false,finish=false;
-  std::thread copier;
-  onCsvCopy=[&]{std::unique_lock<std::mutex> lock(copyMutex);entered=true;copyCv.notify_all();
-    copyCv.wait(lock,[&]{return finish;});};
-  onHttpYield=[&]{if(!copier.joinable()){
-    copier=std::thread([]{serviceHttpRequests();});
-    std::unique_lock<std::mutex> lock(copyMutex);copyCv.wait(lock,[&]{return entered;});
-  } else if(disconnectDuringCopy) csvClientConnected=false;};
-  const auto frees_before=csvFrees;handleLqrControlTraceDownload();
-  assert(wifi_log_server.status==503 && http_trace_request==TraceCopying);
-  assert(http_trace_snapshot && http_trace_abandoned && csvFrees==frees_before);
-  assert(http_trace_failure==(disconnectDuringCopy?HttpTraceFailure::Disconnected:HttpTraceFailure::Timeout));
-  csvClientConnected=true;
-  // Another request cannot reuse/free/change the in-flight kind.
-  const auto old_kind=http_trace_kind;handleVelocityTraceDownload();
-  assert(wifi_log_server.status==503 && http_trace_kind==old_kind && csvFrees==frees_before);
-  {std::lock_guard<std::mutex> lock(copyMutex);finish=true;}copyCv.notify_all();copier.join();
-  onCsvCopy={};reapHttpTraceSnapshot();
-  assert(!http_trace_snapshot && csvAllocs==csvFrees);
-  }
-  // A ready copy remains immutable across an actual trial restart during send.
-  onHttpYield=[]{serviceHttpRequests();};
-  handleVelocityTraceDownload();assert(wifi_log_server.status==200);
-  const auto immutableCsv=wifi_log_server.body;
-  bool restarted=false;
-  onCsvContent=[&]{if(!restarted){restarted=true;assert(startBalanceTest());}};
-  handleVelocityTraceDownload();onCsvContent={};
-  assert(restarted && wifi_log_server.body==immutableCsv && !http_trace_snapshot);
-  stopBalanceTest();
-  // Disconnect after some sendContent calls still releases the ready snapshot.
-  onCsvContent=[]{csvClientConnected=false;};handleLqrControlTraceDownload();
-  onCsvContent={};csvClientConnected=true;
-  assert(!http_trace_snapshot && csvAllocs==csvFrees);
-  for(int i=0;i<30;++i){handleVelocityTraceDownload();handleLoopTimingTraceDownload();handleLqrControlTraceDownload();
-    assert(!http_trace_snapshot && http_trace_request==TraceIdle && csvAllocs==csvFrees);}
-
-
-
   // PS4 library init result and actual connection are distinct diagnostic facts.
   setupCase();ps4_diagnostics=Ps4Diagnostics{};PS4.ok=false;
   setupPs4Controller();assert(ps4_diagnostics.init_attempted && !ps4_diagnostics.init_ok);
@@ -869,14 +765,25 @@ int main(){
   }
   assert(haveAllocation); // Actual async completion emits this window's failed request.
 
-  // Trace sum and status report selected contributions, not unused speed PID.
+  // Actual WebSocket engine parked on EAGAIN: PS4 delivery/full-stop still proceeds.
+  setupCase();PS4.ok=true;setupPs4Controller();
+  ParkedWsIO wsio;diagnostic::WebSocket<ParkedWsIO> ws;
+  ws.setBoot("0123456789abcdef");ws.connected(wsio);
+  wsio.input="GET /diagnostics HTTP/1.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+  ws.poll(wsio);ws.poll(wsio);ws.poll(wsio);assert(ws.active()&&wsio.sends>0);
+  PS4.connect_cb();PS4.input={};PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
+  PS4.disconnect_cb();updatePs4Controller();assert(!ps4_was_connected);
+  PS4.connect_cb();PS4.input_cb();updatePs4Controller();assert(ps4_was_connected);
+  PS4.input.cross=true;PS4.input_cb();updatePs4Controller();assert(emergency_stop_active&&!pins[27]&&!pins[32]);
+  ws.disconnect(wsio);assert(!wsio.open);
+
+  // Latest telemetry reports selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);
-  updateLqrControlTrace(0,0,true);
-  auto& sample=lqr_control_trace[0];
-  near(sample.angle_control+sample.gyro_control+sample.distance_control+sample.speed_control,sample.lqr_u);
+  nowMs+=50;publishDiagnosticSnapshot();
+  near(diagnostic_latest.values[9]+diagnostic_latest.values[10]+diagnostic_latest.values[11]+diagnostic_latest.values[12],diagnostic_latest.values[13]);
   Serial.output.clear();printLqrStatus();
   assert(Serial.output.find("speed_control=0.000000")!=std::string::npos);
-  std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, immutable CSV and Web status\n";
+  std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))

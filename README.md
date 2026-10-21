@@ -360,3 +360,6 @@ Webの配置・LittleFS・通常ファームとdataの書き込み手順は
 [docs/web-files.md](docs/web-files.md) を参照。
 PS4の操作一覧・共通指令経路・実機未検証範囲は
 [docs/ps4-operation.md](docs/ps4-operation.md) を参照。
+
+
+Web診断は[WebSocket・JSON・ブラウザー60秒履歴](docs/websocket-diagnostics.md)へ移行しています。ファームとLittleFSの両方を更新してください。操作の中心はPS4です。

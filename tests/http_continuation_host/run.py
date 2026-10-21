@@ -143,7 +143,7 @@ int main(){
  // Slow service intervals must no longer fail the former 50 ms budget.
  for(unsigned gap:{10u,30u,100u}){Response r;IOState io;start(r,io,assets[3]);pump(r,io,gap);
   assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().bodySent==strlen(assets[3]));
-  assert(r.metrics().maxPollGap==gap&&r.metrics().elapsed>=40&&r.metrics().polls==5);
+  assert(r.metrics().maxPollGap==gap&&r.metrics().elapsed>=40&&r.metrics().polls==2*((strlen(assets[3])+255)/256)+1);
   assert(r.metrics().firstProgressMs==0&&r.metrics().lastProgressMs==r.metrics().elapsed);released();}
  // Larger HTML must still respect the unchanged 2-second response budget.
  for(unsigned gap:{10u,30u,100u}){Response r;IOState io;start(r,io,assets[1]);pump(r,io,gap);

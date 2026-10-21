@@ -1,14 +1,20 @@
 <!doctype html>
 <html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 LQR Logger</title><link rel="icon" href="data:,"></head>
-<body><main><h1>ESP32 LQR Logger</h1><p>PS4を基本操作に使用します。Webは状態表示・停止後のログ取得用です。</p>
-<p id="connection" role="status">HTML解析中…</p><pre id="status">状態取得はCSS・JSの準備後に開始します。</pre>
-<h2>Trace CSV</h2><p>走行・倒立・直接駆動試験中は取得できません。転倒後の記録も取得できます。</p>
-<nav><a href="/trace/velocity.csv">Velocity Trace</a><a href="/trace/loop.csv">Loop Timing Trace</a><a href="/trace/lqr.csv">LQR Control Trace</a></nav>
-<h2>停止</h2><button data-command="stop">STOP TEST</button>
-<details><summary>既存の診断操作</summary><p>停止状態で使用してください。受付と実行結果は異なります。状態表示で確認してください。</p>
-<button data-command="mode">Change Mode</button><button data-command="speed-source">Change Speed Source</button><button data-command="start">START BALANCE TEST</button></details>
-<p id="result" role="status"></p></main>
+<title>ESP32 リアルタイム診断</title><link rel="icon" href="data:,"></head>
+<body><main><h1>ESP32 リアルタイム診断</h1>
+<p>操作の中心はPS4です。この画面は診断専用です。機体に履歴は保存されず、未接続中・通信欠落中の過去データは復元できません。</p>
+<p id="connection" role="status">HTML解析中…</p>
+<section class="always" aria-label="最新状態"><p id="health">停止理由・異常状態：未取得</p><p id="loss">欠落：未取得</p></section>
+<nav><button id="start">配信開始／購読適用</button><button id="stop">配信停止</button><button id="pause">表示一時停止</button><button id="clear">ブラウザー履歴消去</button><button id="save">直近60秒をCSV保存</button><button id="reconnect">再接続</button></nav>
+<p id="subscription" role="status">購読未設定</p>
+<details open><summary>観測項目（チェック後「配信開始／購読適用」）</summary><div id="fields"></div></details>
+<p>20 Hz・1クライアント。履歴はブラウザー内の直近60秒・最大1200点。表示一時停止中も受信・記録・状態表示を継続します。配信停止は走行停止ではありません。</p>
+<div id="graphs"></div>
+<details><summary>単位・符号・取得時点</summary><p>横軸はESP32起動後の取得時刻 sample_ms（全グラフ共通）。角度はMPU Y軸の既存値、誤差＝姿勢角−基準角。角速度は既存GyroY（deg/s）。左右位置・速度はSimpleFOC shaftの生符号、平均速度は既存の左右方向係数を適用した和÷2（rad/s）です。</p>
+<p>制御項・合計は既存制御式の符号を保持。速度項は符号補正済みの直接項、位置項は使用中モードだけ表示。左右指令は制限・旋回を適用後のmove直前（V）。FOC q電圧はloopFOC後・その周期のmove前のキャッシュで、foc_capture_usをサンプルに記録します。指令とFOC値は同一時点ではありません。</p>
+<p>最新制御値は制御ループ末尾で50 msごとに整合してコピーします（FOC初期化前も状態取得可能）。周期は最新の既存計測値で、メモリーは通信タスクの送信準備時に採取。異常bitは1＝右センサー、2＝左センサー、4＝FOC初期化失敗。停止時刻stop_msは最新停止イベントの起動後時刻。age_msはスナップショットの経過時間です。NaN等はnullとします。ブラウザーのCSVはこの受信済み履歴だけです。</p></details>
+<details><summary>シリアル診断と移行</summary><p>既存シリアル診断・停止手段は維持しています。従来の機体トレースCSVは廃止しました。HTTP /api/statusは診断用に残ります。WebSocketはws://取得IP:81/diagnostics（同一LAN内・暗号化なし）。無制限の自動再接続は行いません。</p></details>
+</main>
 <script>
 document.addEventListener('DOMContentLoaded',async()=>{
   const message=document.getElementById('connection');
@@ -30,8 +36,6 @@ document.addEventListener('DOMContentLoaded',async()=>{
     if(typeof window.startLogger!=='function')throw new Error('JSの準備が完了しませんでした');
     target='JS初期化';
     window.startLogger();
-  }catch(error){
-    message.textContent=`取得・準備失敗: ${target}: ${error.message}。自動再試行はしません。ページを再読み込みしてください。`;
-  }
+  }catch(error){message.textContent=`取得・準備失敗: ${target}: ${error.message}。自動再試行はしません。ページを再読み込みしてください。`;}
 },{once:true});
 </script></body></html>

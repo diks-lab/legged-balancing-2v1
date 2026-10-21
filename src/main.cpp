@@ -17,6 +17,13 @@
 #include <new>
 #include <lwip/sockets.h>
 #include "BoundedHttpResponse.h"
+#include "DiagnosticTelemetry.h"
+#include "DiagnosticWebSocket.h"
+#include <fcntl.h>
+#include <unistd.h>
+#include <mbedtls/sha1.h>
+#include <mbedtls/base64.h>
+#include <esp_random.h>
 #include "ContinuingHttpFile.h"
 #include "UartAllocationDiagnostics.h"
 #include "HttpTransmitClient.h"
@@ -394,6 +401,13 @@ float left_target_voltage = 0.0f;
 bool test_system_ready = false;
 bool emergency_stop_active = false;
 const char* last_stop_reason = "NONE";
+char diagnostic_stop_reason[64]="NONE";
+uint32_t diagnostic_stop_ms=0;
+void recordDiagnosticStop(const char* reason){
+  if(!strcmp(reason,"NONE"))return;
+  size_t i=0;for(;reason[i]&&i+1<sizeof(diagnostic_stop_reason);++i)diagnostic_stop_reason[i]=reason[i];
+  diagnostic_stop_reason[i]=0;diagnostic_stop_ms=millis();
+}
 bool driver1_initialized = false;
 bool driver2_initialized = false;
 
@@ -539,107 +553,18 @@ float fall_previous_angle_error = 0.0f;
 float fall_previous_reference = 0.0f;
 bool fall_previous_sample_valid = false;
 
-struct LqrStopTraceSample {
-  uint32_t elapsed_ms;
-  float angle_error;
-  float gyro;
-  float angle_control;
-  float gyro_control;
-  float drive_angle_bias;
-  float target_speed;
-  float actual_speed;
-  float speed_error;
-  float speed_control;
-  float speed_direct_term;
-  float distance_control;
-  float lqr_u;
-  float right_output;
-  float left_output;
-  float distance_delta;
-};
-
-LqrStopTraceSample
-    lqr_stop_trace[kLqrStopTraceMaxSamples];
-size_t lqr_stop_trace_count = 0;
-bool lqr_stop_trace_active = false;
-uint32_t lqr_stop_trace_start_ms = 0;
-uint32_t lqr_stop_trace_last_sample_ms = 0;
-float lqr_stop_trace_origin_distance = 0.0f;
-
-struct LqrDriveSignTraceSample {
-  uint32_t elapsed_ms;
-  float angle_error;
-  float gyro;
-  float angle_control;
-  float gyro_control;
-  float drive_angle_bias;
-  float target_speed;
-  float raw_speed;
-  float actual_speed;
-  float speed_error;
-  float speed_control;
-  float speed_direct_term;
-  float lqr_u;
-  float right_output;
-  float left_output;
-  float motor1_velocity;
-  float motor2_velocity;
-  float expected_motion_sign;
-  float actual_motion_sign;
-  bool motion_sign_ok;
-  float distance_delta;
-};
-
-LqrDriveSignTraceSample
-    lqr_drive_sign_trace[kLqrDriveSignTraceCapacity];
-size_t lqr_drive_sign_trace_count = 0;
-uint32_t lqr_drive_sign_trace_start_ms = 0;
-uint32_t lqr_drive_sign_trace_last_ms = 0;
-bool lqr_drive_sign_trace_active = false;
-
+// On-device history retired: diagnostics retain only the latest coherent state.
 float previous_right_angle = 0.0f;
 float previous_left_angle = 0.0f;
 uint32_t previous_velocity_diagnostic_us = 0;
-constexpr size_t kVelocityTraceSize = 128;
-constexpr size_t kLqrControlTraceSize = 128;
-constexpr uint32_t kLqrControlTraceIntervalUs = 10000;
-
-struct VelocityTraceSample {
-  uint32_t elapsed_ms;
-  uint32_t elapsed_us;
-
-  float current_right_angle;
-  float previous_right_angle;
-  float right_angle_delta;
-
-  float current_left_angle;
-  float previous_left_angle;
-  float left_angle_delta;
-
-  float diag_right_velocity_10ms;
-  float diag_left_velocity_10ms;
-  float diag_LQR_speed_10ms;
-
-  float simplefoc_right_velocity;
-  float simplefoc_left_velocity;
-  float LQR_speed;
-
-  bool diag_speed_spike;
-};
-
-VelocityTraceSample velocity_trace[kVelocityTraceSize];
-
-constexpr size_t kLoopTimingTraceSize = 64;
-
-struct LoopTimingSample {
-  uint32_t elapsed_ms;
-  uint32_t whole_loop_us;
-  uint32_t motor1_loopfoc_us;
-  uint32_t motor2_loopfoc_us;
-  uint32_t mpu_update_us;
-  uint32_t motor_move_us;
-};
-
+bool lqr_stop_trace_active = false;
+uint32_t lqr_stop_trace_start_ms = 0;
+size_t lqr_stop_trace_count = 0; // Legacy serial gates; no stored samples.
+size_t lqr_drive_sign_trace_count = 0;
+uint32_t lqr_drive_sign_trace_start_ms = 0, lqr_drive_sign_trace_last_ms = 0;
+bool lqr_drive_sign_trace_active = false;
+float diagnostic_right_command=0,diagnostic_left_command=0;
+uint32_t diagnostic_loop_us=0,diagnostic_right_foc_us=0,diagnostic_left_foc_us=0,diagnostic_imu_us=0,diagnostic_move_us=0;
 struct FocOutputSnapshot {
   float right_voltage_q, left_voltage_q;
   float right_current_sp, left_current_sp;
@@ -649,47 +574,6 @@ struct FocOutputSnapshot {
 };
 FocOutputSnapshot last_foc_output = {};
 
-struct LqrControlTraceSample {
-  uint32_t elapsed_ms;
-  float angle;
-  float angle_zeropoint;
-  float angle_error;
-  float gyro;
-  float lqr_speed;
-  float speed_for_control;
-
-  float angle_control;
-  float gyro_control;
-  float distance_control;
-  float speed_control;
-
-  float lqr_u;
-  float right_output;
-  float left_output;
-  // Normal row: after loopFOC, BEFORE this cycle's move(). Stop row: after gate-off.
-  float right_voltage_q;
-  float left_voltage_q;
-  float right_current_sp;
-  float left_current_sp;
-  bool right_motor_enabled;
-  bool left_motor_enabled;
-  bool right_driver_en;
-  bool left_driver_en;
-  bool after_disable;
-  uint32_t foc_capture_us;
-};
-
-LoopTimingSample loop_timing_trace[kLoopTimingTraceSize];
-size_t loop_timing_write_index = 0;
-size_t loop_timing_count = 0;
-
-LqrControlTraceSample lqr_control_trace[kLqrControlTraceSize];
-size_t lqr_control_trace_write_index = 0;
-size_t lqr_control_trace_count = 0;
-uint32_t lqr_control_trace_last_us = 0;
-
-size_t velocity_trace_write_index = 0;
-size_t velocity_trace_count = 0;
 uint32_t last_10ms_timing_log_ms = 0;
 float angle_control = 0.0f;
 float gyro_control = 0.0f;
@@ -1475,32 +1359,11 @@ const float left_angle_delta =
   const uint32_t whole_loop_us =
       micros() - loop_start_us;
 
-  if (lqr_direction_test_armed &&
-      (whole_loop_us >= 15000 ||
-      motor1_loopfoc_us >= 5000 ||
-      motor2_loopfoc_us >= 5000 ||
-      mpu_update_us >= 5000 ||
-      motor_move_us >= 5000)) {
-
-    LoopTimingSample& sample =
-        loop_timing_trace[loop_timing_write_index];
-
-    sample.elapsed_ms =
-        millis() - lqr_direction_test_start_ms;
-    sample.whole_loop_us = whole_loop_us;
-    sample.motor1_loopfoc_us = motor1_loopfoc_us;
-    sample.motor2_loopfoc_us = motor2_loopfoc_us;
-    sample.mpu_update_us = mpu_update_us;
-    sample.motor_move_us = motor_move_us;
-
-    loop_timing_write_index =
-        (loop_timing_write_index + 1) %
-        kLoopTimingTraceSize;
-
-    if (loop_timing_count < kLoopTimingTraceSize) {
-      ++loop_timing_count;
-    }
-  }
+  diagnostic_loop_us=whole_loop_us;
+  diagnostic_right_foc_us=motor1_loopfoc_us;
+  diagnostic_left_foc_us=motor2_loopfoc_us;
+  diagnostic_imu_us=mpu_update_us;
+  diagnostic_move_us=motor_move_us;
 
   serviceHttpRequests();
 }
@@ -1519,6 +1382,7 @@ void stopForActualFall(float& right_output, float& left_output) {
   disableBothDrivers();
   right_output = left_output = 0.0f;
   last_stop_reason = "TILT_STOP";
+  recordDiagnosticStop(last_stop_reason);
   lqr_startup_diagnostic_active = false;
   lqr_direction_test_armed = false;
   setStatusLed(false);
@@ -1647,6 +1511,7 @@ bool stopOnWheelFault() {
   test_system_ready = false;
   emergency_stop_active = true;
   last_stop_reason = "WHEEL_FAULT";
+  recordDiagnosticStop(last_stop_reason);
   lqr_diagnostic_armed = false;
   lqr_direction_test_armed = false;
   polarity_test_active = false;
@@ -1817,46 +1682,6 @@ void updateWheelVelocityDiagnostic() {
     lqr_ps4_speed_for_control = 0.0f;
   }
 
-if (lqr_direction_test_armed) {
-  VelocityTraceSample& sample =
-      velocity_trace[velocity_trace_write_index];
-
-  sample.elapsed_ms =
-      millis() - lqr_direction_test_start_ms;
-  sample.elapsed_us = elapsed_us;
-
-  sample.current_right_angle = current_right_angle;
-  sample.previous_right_angle = previous_right_angle;
-  sample.right_angle_delta = right_angle_delta;
-
-  sample.current_left_angle = current_left_angle;
-  sample.previous_left_angle = previous_left_angle;
-  sample.left_angle_delta = left_angle_delta;
-
-  sample.diag_right_velocity_10ms =
-      diag_right_velocity_10ms;
-  sample.diag_left_velocity_10ms =
-      diag_left_velocity_10ms;
-  sample.diag_LQR_speed_10ms =
-      diag_LQR_speed_10ms;
-
-  sample.simplefoc_right_velocity =
-      motor1.shaft_velocity;
-  sample.simplefoc_left_velocity =
-      motor2.shaft_velocity;
-  sample.LQR_speed = LQR_speed;
-
-  sample.diag_speed_spike =
-      abs(diag_LQR_speed_10ms) >= 2.0f;
-
-  velocity_trace_write_index =
-      (velocity_trace_write_index + 1) %
-      kVelocityTraceSize;
-
-  if (velocity_trace_count < kVelocityTraceSize) {
-    ++velocity_trace_count;
-  }
-}
   previous_right_angle = current_right_angle;
   previous_left_angle = current_left_angle;
   previous_velocity_diagnostic_us = current_timestamp;
@@ -1877,128 +1702,17 @@ void captureFocOutputSnapshot() {
 
 void updateLqrControlTrace(float right_output, float left_output,
                            bool force_sample) {
-  if (!force_sample && !lqr_direction_test_armed) {
-    return;
-  }
-
-  const uint32_t now_us = micros();
-
-  if (!force_sample && lqr_control_trace_last_us != 0 &&
-      now_us - lqr_control_trace_last_us <
-          kLqrControlTraceIntervalUs) {
-    return;
-  }
-
-  lqr_control_trace_last_us = now_us;
-
-  LqrControlTraceSample& sample =
-      lqr_control_trace[lqr_control_trace_write_index];
-
-  sample.elapsed_ms =
-      millis() - lqr_direction_test_start_ms;
-  sample.angle = LQR_angle;
-  sample.angle_zeropoint = angle_zeropoint;
-  sample.angle_error = LQR_angle - angle_zeropoint;
-  sample.gyro = LQR_gyro;
-  sample.lqr_speed = LQR_speed;
-  sample.speed_for_control = lqr_speed_for_control;
-
-  sample.angle_control = angle_control;
-  sample.gyro_control = gyro_control;
-  sample.distance_control =
-      (lqr_test_mode == LqrTestMode::Full ||
-       lqr_test_mode == LqrTestMode::AttitudeDistance) ? distance_control : 0.0f;
-  sample.speed_control =
-      (lqr_test_mode == LqrTestMode::Full ||
-       lqr_test_mode == LqrTestMode::AttitudeSpeed) ? speed_direct_control : 0.0f;
-
-  sample.lqr_u = test_LQR_u;
-  sample.right_output = right_output;
-  sample.left_output = left_output;
-  sample.after_disable = force_sample && emergency_stop_active;
-  if (sample.after_disable) captureFocOutputSnapshot();
-  sample.right_voltage_q = last_foc_output.right_voltage_q;
-  sample.left_voltage_q = last_foc_output.left_voltage_q;
-  sample.right_current_sp = last_foc_output.right_current_sp;
-  sample.left_current_sp = last_foc_output.left_current_sp;
-  sample.right_motor_enabled = last_foc_output.right_motor_enabled;
-  sample.left_motor_enabled = last_foc_output.left_motor_enabled;
-  sample.right_driver_en = last_foc_output.right_driver_en;
-  sample.left_driver_en = last_foc_output.left_driver_en;
-  sample.foc_capture_us = last_foc_output.capture_us;
-
-  lqr_control_trace_write_index =
-      (lqr_control_trace_write_index + 1) %
-      kLqrControlTraceSize;
-
-  if (lqr_control_trace_count < kLqrControlTraceSize) {
-    ++lqr_control_trace_count;
-  }
+  diagnostic_right_command=right_output;
+  diagnostic_left_command=left_output;
+  if(force_sample && emergency_stop_active)captureFocOutputSnapshot();
 }
 
 void clearLqrControlTrace() {
-  lqr_control_trace_write_index = 0;
-  lqr_control_trace_count = 0;
-  lqr_control_trace_last_us = 0;
+
 }
 
 void printLqrControlTrace() {
-  if (lqr_control_trace_count == 0) {
-    return;
-  }
-
-  Serial.println("LQR CONTROL TRACE BEGIN");
-  Serial.printf(
-      "count=%u\n",
-      static_cast<unsigned>(lqr_control_trace_count));
-
-  Serial.println(
-      "elapsed_ms,angle,angle_zeropoint,angle_error,gyro,"
-      "lqr_speed,speed_for_control,"
-      "angle_control,gyro_control,distance_control,speed_control,"
-      "lqr_u,right_output,left_output,"
-      "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us");
-
-  const size_t first_index =
-      (lqr_control_trace_write_index +
-       kLqrControlTraceSize -
-       lqr_control_trace_count) %
-      kLqrControlTraceSize;
-
-  for (size_t i = 0; i < lqr_control_trace_count; ++i) {
-    const LqrControlTraceSample& sample =
-        lqr_control_trace[
-            (first_index + i) % kLqrControlTraceSize];
-
-    Serial.printf(
-        "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%s,%lu\n",
-        static_cast<unsigned long>(sample.elapsed_ms),
-          sample.angle,
-          sample.angle_zeropoint,
-          sample.angle_error,
-          sample.gyro,
-          sample.lqr_speed,
-          sample.speed_for_control,
-          sample.angle_control,
-          sample.gyro_control,
-          sample.distance_control,
-          sample.speed_control,
-          sample.lqr_u,
-          sample.right_output,
-          sample.left_output,
-        sample.right_voltage_q, sample.left_voltage_q,
-        sample.right_current_sp, sample.left_current_sp,
-        static_cast<int>(sample.right_motor_enabled),
-        static_cast<int>(sample.left_motor_enabled),
-        static_cast<int>(sample.right_driver_en),
-        static_cast<int>(sample.left_driver_en),
-        sample.after_disable ? "AFTER_DISABLE" : "BEFORE_MOVE",
-        static_cast<unsigned long>(sample.foc_capture_us));
-  }
-
-  Serial.println("LQR CONTROL TRACE END");
+  Serial.println("Diagnostic history moved to browser WebSocket recording; no offline trace retained.");
 }
 
 void updateTestLqrOutput(float angle_term, float gyro_term,
@@ -2056,271 +1770,35 @@ const char* lqrTestModeDisplayName() {
 }
 
 void resetLqrDriveSignTrace() {
-  lqr_drive_sign_trace_count = 0;
-  lqr_drive_sign_trace_start_ms = millis();
-  lqr_drive_sign_trace_last_ms = 0;
-  lqr_drive_sign_trace_active = true;
+
 }
 
 void captureLqrDriveSignTrace(float speed_direct_term) {
-  if (!lqr_drive_sign_trace_active ||
-      lqr_drive_sign_trace_count >=
-          kLqrDriveSignTraceCapacity) {
-    return;
-  }
-
-  const uint32_t now_ms = millis();
-
-  if (lqr_drive_sign_trace_count != 0 &&
-      now_ms - lqr_drive_sign_trace_last_ms <
-          kLqrDriveSignTraceIntervalMs) {
-    return;
-  }
-
-  lqr_drive_sign_trace_last_ms = now_ms;
-
-  LqrDriveSignTraceSample& sample =
-      lqr_drive_sign_trace[lqr_drive_sign_trace_count++];
-
-  sample.elapsed_ms =
-      now_ms - lqr_drive_sign_trace_start_ms;
-  sample.angle_error =
-      LQR_angle - angle_zeropoint;
-  sample.gyro = LQR_gyro;
-  sample.angle_control = angle_control;
-  sample.gyro_control = gyro_control;
-  sample.drive_angle_bias = lqr_drive_angle_bias;
-  sample.target_speed = lqr_target_speed;
-  sample.raw_speed = lqr_speed_raw_for_control;
-  sample.actual_speed = lqr_speed_for_control;
-  sample.speed_error =
-      lqr_target_speed - lqr_speed_for_control;
-  sample.speed_control = speed_control;
-  sample.speed_direct_term = speed_direct_term;
-  sample.lqr_u = LQR_u;
-
-  const float trace_motor1_output_sign =
-      m1_direction < 0.0f ? -1.0f : 1.0f;
-  const float trace_motor2_output_sign =
-      m2_direction < 0.0f ? -1.0f : 1.0f;
-
-  sample.right_output =
-      lqrMotorVoltage(test_LQR_u, trace_motor1_output_sign,
-                      kLqrTestVoltageLimit);
-
-  sample.left_output =
-      lqrMotorVoltage(test_LQR_u, trace_motor2_output_sign,
-                      kLqrTestVoltageLimit);
-
-  sample.motor1_velocity = motor1.shaft_velocity;
-  sample.motor2_velocity = motor2.shaft_velocity;
-
-  sample.expected_motion_sign =
-      lqr_target_speed > 0.0f
-          ? 1.0f
-          : (lqr_target_speed < 0.0f ? -1.0f : 0.0f);
-
-  const float actual_motion_velocity =
-      motor1.shaft_velocity * m1_direction +
-      motor2.shaft_velocity * m2_direction;
-
-  sample.actual_motion_sign =
-      actual_motion_velocity > 0.0f
-          ? 1.0f
-          : (actual_motion_velocity < 0.0f ? -1.0f : 0.0f);
-
-  sample.motion_sign_ok =
-      sample.expected_motion_sign == 0.0f ||
-      sample.actual_motion_sign == 0.0f ||
-      sample.expected_motion_sign == sample.actual_motion_sign;
-
-  sample.distance_delta =
-      LQR_distance - lqr_drive_start_distance;
+  (void)speed_direct_term;
 }
 
 void printLqrDriveSignTrace(const char* reason) {
-  lqr_drive_sign_trace_active = false;
-
-  Serial.printf(
-      "LQR DRIVE SIGN TRACE [%s] BEGIN\n",
-      reason);
-  Serial.printf(
-      "count=%u\n",
-      static_cast<unsigned>(
-          lqr_drive_sign_trace_count));
-  Serial.println(
-      "elapsed_ms,angle_error,gyro,"
-      "angle_control,gyro_control,drive_angle_bias,"
-      "target_speed,raw_speed,filtered_speed,"
-      "speed_error,speed_control,speed_direct_term,lqr_u,"
-      "right_output,left_output,"
-      "motor1_velocity,motor2_velocity,"
-      "expected_motion_sign,actual_motion_sign,"
-      "motion_sign_ok,distance_delta");
-
-  for (size_t i = 0;
-       i < lqr_drive_sign_trace_count;
-       ++i) {
-    const LqrDriveSignTraceSample& sample =
-        lqr_drive_sign_trace[i];
-
-    Serial.printf(
-        "%lu,%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,"
-        "%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,"
-        "%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,"
-        "%+.1f,%+.1f,%s,%+.6f\n",
-        static_cast<unsigned long>(sample.elapsed_ms),
-        sample.angle_error,
-        sample.gyro,
-        sample.angle_control,
-        sample.gyro_control,
-        sample.drive_angle_bias,
-        sample.target_speed,
-        sample.raw_speed,
-        sample.actual_speed,
-        sample.speed_error,
-        sample.speed_control,
-        sample.speed_direct_term,
-        sample.lqr_u,
-        sample.right_output,
-        sample.left_output,
-        sample.motor1_velocity,
-        sample.motor2_velocity,
-        sample.expected_motion_sign,
-        sample.actual_motion_sign,
-        sample.motion_sign_ok ? "yes" : "no",
-        sample.distance_delta);
-  }
-
-  Serial.printf(
-      "LQR DRIVE SIGN TRACE [%s] END\n",
-      reason);
+  (void)reason;
+  Serial.println("Diagnostic history moved to browser WebSocket recording; no offline trace retained.");
 }
 
 void printLqrDriveSnapshot(const char* phase);
 
 void resetLqrStopTrace() {
-  lqr_stop_trace_count = 0;
-  lqr_stop_trace_active = false;
-  lqr_stop_trace_start_ms = 0;
-  lqr_stop_trace_last_sample_ms = 0;
-  lqr_stop_trace_origin_distance = 0.0f;
+
 }
 
 void startLqrStopTrace() {
-  lqr_stop_trace_count = 0;
-  lqr_stop_trace_active = true;
-  lqr_stop_trace_start_ms = millis();
-  lqr_stop_trace_last_sample_ms = 0;
-  lqr_stop_trace_origin_distance = LQR_distance;
+
 }
 
 void captureLqrStopTrace(float speed_direct_term) {
-  if (!lqr_stop_trace_active) {
-    return;
-  }
-
-  const uint32_t now_ms = millis();
-  const uint32_t elapsed_ms =
-      now_ms - lqr_stop_trace_start_ms;
-
-  if (elapsed_ms > kLqrStopTraceDurationMs ||
-      lqr_stop_trace_count >= kLqrStopTraceMaxSamples) {
-    lqr_stop_trace_active = false;
-    return;
-  }
-
-  if (lqr_stop_trace_count > 0 &&
-      now_ms - lqr_stop_trace_last_sample_ms <
-          kLqrStopTraceSampleIntervalMs) {
-    return;
-  }
-
-  lqr_stop_trace_last_sample_ms = now_ms;
-
-  LqrStopTraceSample& sample =
-      lqr_stop_trace[lqr_stop_trace_count++];
-
-  sample.elapsed_ms = elapsed_ms;
-  sample.angle_error =
-      LQR_angle - angle_zeropoint;
-  sample.gyro = LQR_gyro;
-  sample.angle_control = angle_control;
-  sample.gyro_control = gyro_control;
-  sample.drive_angle_bias = lqr_drive_angle_bias;
-  sample.target_speed = lqr_target_speed;
-  sample.actual_speed = lqr_speed_for_control;
-  sample.speed_error =
-      lqr_target_speed - lqr_speed_for_control;
-  sample.speed_control = speed_control;
-  sample.speed_direct_term = speed_direct_term;
-  sample.distance_control = distance_control;
-  sample.lqr_u = LQR_u;
-
-  const float stop_trace_motor1_output_sign =
-      m1_direction < 0.0f ? -1.0f : 1.0f;
-  const float stop_trace_motor2_output_sign =
-      m2_direction < 0.0f ? -1.0f : 1.0f;
-
-  sample.right_output =
-      lqrMotorVoltage(test_LQR_u, stop_trace_motor1_output_sign,
-                      kLqrTestVoltageLimit);
-
-  sample.left_output =
-      lqrMotorVoltage(test_LQR_u, stop_trace_motor2_output_sign,
-                      kLqrTestVoltageLimit);
-
-  sample.distance_delta =
-      LQR_distance - lqr_stop_trace_origin_distance;
+  (void)speed_direct_term;
 }
 
 void printLqrStopTrace(const char* reason) {
-  Serial.printf(
-      "LQR STOP TRACE [%s] BEGIN\n",
-      reason);
-  Serial.printf(
-      "count=%lu\n",
-      static_cast<unsigned long>(
-          lqr_stop_trace_count));
-
-  Serial.println(
-      "elapsed_ms,angle_error,gyro,"
-      "angle_control,gyro_control,drive_angle_bias,"
-      "target_speed,actual_speed,speed_error,"
-      "speed_control,speed_direct_term,distance_control,lqr_u,"
-      "right_output,left_output,distance_delta");
-
-  for (size_t i = 0;
-       i < lqr_stop_trace_count;
-       ++i) {
-    const LqrStopTraceSample& sample =
-        lqr_stop_trace[i];
-
-    Serial.printf(
-        "%lu,%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,"
-        "%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,%+.6f,"
-        "%+.6f,%+.6f,%+.6f,%+.6f\n",
-        static_cast<unsigned long>(sample.elapsed_ms),
-        sample.angle_error,
-        sample.gyro,
-        sample.angle_control,
-        sample.gyro_control,
-        sample.drive_angle_bias,
-        sample.target_speed,
-        sample.actual_speed,
-        sample.speed_error,
-        sample.speed_control,
-        sample.speed_direct_term,
-        sample.distance_control,
-        sample.lqr_u,
-        sample.right_output,
-        sample.left_output,
-        sample.distance_delta);
-  }
-
-  Serial.printf(
-      "LQR STOP TRACE [%s] END\n",
-      reason);
+  (void)reason;
+  Serial.println("Diagnostic history moved to browser WebSocket recording; no offline trace retained.");
 }
 
 bool requestLqrDrive(float target_speed, char command) {
@@ -3648,19 +3126,6 @@ void updateLqrDiagnostic() {
     captureLqrDriveSignTrace(lqr_speed_direct_term);
   }
 
-  if (lqr_stop_trace_active) {
-    captureLqrStopTrace(lqr_speed_direct_term);
-
-    const uint32_t stop_trace_elapsed_ms =
-        millis() - lqr_stop_trace_start_ms;
-
-    if (lqr_stop_trace_count >=
-            kLqrStopTraceMaxSamples ||
-        stop_trace_elapsed_ms >=
-            kLqrStopTraceDurationMs) {
-      lqr_stop_trace_active = false;
-    }
-  }
 
 }
 
@@ -4110,105 +3575,18 @@ bool motionCommandAllowed() {
 //==================================================
 // Normally there is no need to edit below this line.
 void clearVelocityTrace() {
-  velocity_trace_write_index = 0;
-  velocity_trace_count = 0;
+
 }
 
 void printVelocityTrace() {
-  if (velocity_trace_count == 0) {
-    return;
-  }
-
-  Serial.println("10MS TRACE BEGIN");
-  Serial.printf("count=%u\n",
-                static_cast<unsigned int>(velocity_trace_count));
-
-  Serial.println(
-      "elapsed_ms,elapsed_us,"
-      "current_right_angle,previous_right_angle,right_angle_delta,"
-      "current_left_angle,previous_left_angle,left_angle_delta,"
-      "diag_right_velocity_10ms,diag_left_velocity_10ms,"
-      "diag_LQR_speed_10ms,"
-      "simplefoc_right_velocity,simplefoc_left_velocity,"
-      "LQR_speed,diag_speed_spike");
-
-  const size_t start_index =
-      velocity_trace_count < kVelocityTraceSize
-          ? 0
-          : velocity_trace_write_index;
-
-  for (size_t i = 0; i < velocity_trace_count; ++i) {
-    const size_t index =
-        (start_index + i) % kVelocityTraceSize;
-
-    const VelocityTraceSample& sample =
-        velocity_trace[index];
-
-    Serial.printf(
-        "%lu,%lu,"
-        "%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%s\n",
-        static_cast<unsigned long>(sample.elapsed_ms),
-        static_cast<unsigned long>(sample.elapsed_us),
-        sample.current_right_angle,
-        sample.previous_right_angle,
-        sample.right_angle_delta,
-        sample.current_left_angle,
-        sample.previous_left_angle,
-        sample.left_angle_delta,
-        sample.diag_right_velocity_10ms,
-        sample.diag_left_velocity_10ms,
-        sample.diag_LQR_speed_10ms,
-        sample.simplefoc_right_velocity,
-        sample.simplefoc_left_velocity,
-        sample.LQR_speed,
-        sample.diag_speed_spike ? "yes" : "no");
-  }
-
-  Serial.println("10MS TRACE END");
+  Serial.println("Diagnostic history moved to browser WebSocket recording; no offline trace retained.");
 }
 void clearLoopTimingTrace() {
-  loop_timing_write_index = 0;
-  loop_timing_count = 0;
+
 }
 
 void printLoopTimingTrace() {
-  if (loop_timing_count == 0) {
-    return;
-  }
-
-  Serial.println("LOOP TIMING TRACE BEGIN");
-  Serial.printf("count=%u\n",
-                static_cast<unsigned>(loop_timing_count));
-
-  Serial.println(
-      "elapsed_ms,whole_loop_us,"
-      "motor1_loopfoc_us,motor2_loopfoc_us,"
-      "mpu_update_us,motor_move_us");
-
-  const size_t first_index =
-      (loop_timing_write_index + kLoopTimingTraceSize -
-       loop_timing_count) %
-      kLoopTimingTraceSize;
-
-  for (size_t i = 0; i < loop_timing_count; ++i) {
-    const LoopTimingSample& sample =
-        loop_timing_trace[
-            (first_index + i) % kLoopTimingTraceSize];
-
-    Serial.printf(
-        "%lu,%lu,%lu,%lu,%lu,%lu\n",
-        static_cast<unsigned long>(sample.elapsed_ms),
-        static_cast<unsigned long>(sample.whole_loop_us),
-        static_cast<unsigned long>(sample.motor1_loopfoc_us),
-        static_cast<unsigned long>(sample.motor2_loopfoc_us),
-        static_cast<unsigned long>(sample.mpu_update_us),
-        static_cast<unsigned long>(sample.motor_move_us));
-  }
-
-  Serial.println("LOOP TIMING TRACE END");
+  Serial.println("Diagnostic history moved to browser WebSocket recording; no offline trace retained.");
 }
 
 bool cycleLqrTestMode() {
@@ -4473,6 +3851,7 @@ void stopLqrDriveOnly(const char* reason, bool require_recenter) {
       (lqr_direction_test_armed || balance_wait_active ||
        lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
     last_stop_reason = reason;
+    recordDiagnosticStop(last_stop_reason);
   }
   lqr_target_speed = 0.0f;
   lqr_drive_angle_bias = 0.0f;
@@ -4571,6 +3950,7 @@ bool stopBalanceTest() {
   // A redundant STOP after a fall must not overwrite its diagnostic reason.
   if (lqr_direction_test_armed || balance_wait_active || polarity_test_active) {
     last_stop_reason = "MANUAL_STOP";
+    recordDiagnosticStop(last_stop_reason);
   }
   lqr_stop_trace_active = false;
 
@@ -4653,37 +4033,36 @@ StaticTask_t http_task_tcb;
 TaskHandle_t http_task_handle = nullptr;
 std::atomic<bool> http_task_ready{false};
 
+diagnostic::Snapshot diagnostic_latest;
+portMUX_TYPE diagnostic_snapshot_lock=portMUX_INITIALIZER_UNLOCKED;
+void publishDiagnosticSnapshot(){
+  static uint32_t last=0,seq=0;
+  const uint32_t now=millis();if(uint32_t(now-last)<50)return;last=now;
+  diagnostic::Snapshot s;s.sample_ms=now;s.source_seq=++seq;s.foc_capture_us=last_foc_output.capture_us;
+  s.stop_ms=diagnostic_stop_ms;memcpy(s.stop_reason,diagnostic_stop_reason,sizeof(s.stop_reason));
+  s.running=lqr_direction_test_armed||balance_wait_active||polarity_test_active;
+  s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=test_system_ready;
+  s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
+  const float values[]={LQR_angle,angle_zeropoint,LQR_angle-angle_zeropoint,LQR_gyro,
+    motor1.shaft_angle,motor2.shaft_angle,motor1.shaft_velocity,motor2.shaft_velocity,
+    (motor1.shaft_velocity*m1_direction+motor2.shaft_velocity*m2_direction)*0.5f,
+    angle_control,gyro_control,
+    (lqr_test_mode==LqrTestMode::Full||lqr_test_mode==LqrTestMode::AttitudeDistance)?distance_control:0.0f,
+    speed_direct_control,test_LQR_u,diagnostic_right_command,diagnostic_left_command,
+    last_foc_output.right_voltage_q,last_foc_output.left_voltage_q,control_dt_ms,
+    float(diagnostic_loop_us),float(diagnostic_right_foc_us),float(diagnostic_left_foc_us),float(diagnostic_imu_us),float(diagnostic_move_us),0,0};
+  static_assert(sizeof(values)==sizeof(s.values),"telemetry field mapping");memcpy(s.values,values,sizeof(values));
+  portENTER_CRITICAL(&diagnostic_snapshot_lock);diagnostic_latest=s;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
+}
 struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
 QueueHandle_t http_status_queue = nullptr;
 QueueHandle_t http_command_queue = nullptr;
 bool http_filesystem_ready = false;
-enum HttpTraceState { TraceIdle=0, TraceRequested=1, TraceReady=2, TraceBusy=-1, TraceCopying=3 };
-std::atomic<int> http_trace_request{TraceIdle};
-int http_trace_kind = 1; // Published by request.store; one HTTP handler at a time.
-struct HttpTraceSnapshot {
-  // WebServer handles one download at a time. Only copy the requested CSV;
-  // sharing storage avoids retaining three simultaneous full trace copies.
-  union {
-    VelocityTraceSample velocity[kVelocityTraceSize];
-    LoopTimingSample timing[kLoopTimingTraceSize];
-    LqrControlTraceSample control[kLqrControlTraceSize];
-  };
-  size_t velocity_index, velocity_count, timing_index, timing_count;
-  size_t control_index, control_count;
-};
-HttpTraceSnapshot* http_trace_snapshot = nullptr; // HTTP-owned, published by request.store().
-bool http_trace_abandoned = false; // HTTP task only; reaped after control-side acknowledgement.
-enum class HttpTraceFailure : uint8_t { Active, Allocation, Timeout, Pending, Disconnected };
-HttpTraceFailure http_trace_failure = HttpTraceFailure::Active;
-void releaseHttpTraceSnapshot();
-void reapHttpTraceSnapshot();
-struct HttpTraceLease {
-  ~HttpTraceLease() { releaseHttpTraceSnapshot(); }
-};
 void captureHttpStatus();
 void formatHttpResources(char* text, size_t capacity);
 
 void serviceHttpRequests() {
+  publishDiagnosticSnapshot();
   if (!http_status_queue) return;
   char command = 0;
   if (xQueueReceive(http_command_queue, &command, 0) == pdTRUE) {
@@ -4692,30 +4071,6 @@ void serviceHttpRequests() {
       case 'd': executeOperatorCommand(OperatorCommand::EndTest); break;
       case 'g': executeOperatorCommand(OperatorCommand::CycleMode); break;
       case 'i': cycleLqrSpeedSource(); break;
-    }
-  }
-  int requested = TraceRequested;
-  if (http_trace_request.compare_exchange_strong(requested, TraceCopying)) {
-    // The HTTP owner cannot free a claimed payload until Ready/Busy is published.
-    // Also exclude direct motor/polarity tests, not just balancing.
-    if (lqr_direction_test_armed || balance_wait_active || polarity_test_active ||
-        right_target_voltage != 0.0f || left_target_voltage != 0.0f) {
-      http_trace_request.store(TraceBusy);
-    } else {
-      if (http_trace_kind == 1) {
-        memcpy(http_trace_snapshot->velocity, velocity_trace, sizeof(velocity_trace));
-      } else if (http_trace_kind == 2) {
-        memcpy(http_trace_snapshot->timing, loop_timing_trace, sizeof(loop_timing_trace));
-      } else {
-        memcpy(http_trace_snapshot->control, lqr_control_trace, sizeof(lqr_control_trace));
-      }
-      http_trace_snapshot->velocity_index = velocity_trace_write_index;
-      http_trace_snapshot->velocity_count = velocity_trace_count;
-      http_trace_snapshot->timing_index = loop_timing_write_index;
-      http_trace_snapshot->timing_count = loop_timing_count;
-      http_trace_snapshot->control_index = lqr_control_trace_write_index;
-      http_trace_snapshot->control_count = lqr_control_trace_count;
-      http_trace_request.store(TraceReady); // Last access to the shared payload on this side.
     }
   }
   static uint32_t last_status_ms = 0;
@@ -4728,207 +4083,7 @@ void serviceHttpRequests() {
 //==================================================
 // Wi-Fi Trace Logger
 //==================================================
-void releaseHttpTraceSnapshot() {
-  if (!http_trace_snapshot) return;
-  int state = http_trace_request.load();
-  while (state == TraceRequested) {
-    if (http_trace_request.compare_exchange_strong(state, TraceIdle)) break;
-  }
-  if (state == TraceCopying) {
-    http_trace_abandoned = true;
-    return; // Control is using the payload. HTTP will reap its completion later.
-  }
-  // Ready/Busy acknowledge that the control loop has no further pointer access.
-  free(http_trace_snapshot);
-  http_trace_snapshot = nullptr;
-  http_trace_abandoned = false;
-  http_trace_request.store(TraceIdle);
-}
-
-void reapHttpTraceSnapshot() {
-  if (http_trace_abandoned && http_trace_request.load() != TraceCopying)
-    releaseHttpTraceSnapshot();
-}
-
-bool traceDownloadBlocked(int kind) {
-  reapHttpTraceSnapshot();
-  if (http_trace_snapshot) {
-    http_trace_failure = HttpTraceFailure::Pending;
-    return true;
-  }
-  http_trace_snapshot = static_cast<HttpTraceSnapshot*>(malloc(sizeof(HttpTraceSnapshot)));
-  if (!http_trace_snapshot) {
-    http_trace_failure = HttpTraceFailure::Allocation;
-    return true;
-  }
-  new (http_trace_snapshot) HttpTraceSnapshot; // Begin trivial object lifetime; no allocation.
-  http_trace_kind = kind;
-  http_trace_request.store(TraceRequested);
-  const uint32_t start = millis();
-  int state = TraceRequested;
-  while (((state = http_trace_request.load()) == TraceRequested || state == TraceCopying) &&
-         millis() - start < 500 && wifi_log_server.client().connected()) {
-    vTaskDelay(pdMS_TO_TICKS(1));
-  }
-  if (!wifi_log_server.client().connected()) {
-    http_trace_failure = HttpTraceFailure::Disconnected;
-    return true;
-  }
-  if (state == TraceReady) return false;
-  http_trace_failure = state == TraceBusy ? HttpTraceFailure::Active : HttpTraceFailure::Timeout;
-  return true;
-}
-
 void sendSmallHttpResponse(int code,const char* text);
-
-void sendTraceBusyResponse() {
-  const bool active = http_trace_failure == HttpTraceFailure::Active;
-  const char* reason = active ? "TRACE NOT AVAILABLE WHILE LQR TEST IS RUNNING\n" :
-      (http_trace_failure == HttpTraceFailure::Allocation ? "CSV SNAPSHOT ALLOCATION FAILED; ORIGINAL LOG RETAINED\n" :
-       (http_trace_failure == HttpTraceFailure::Pending ? "CSV COPY COMPLETION PENDING\n" :
-        (http_trace_failure == HttpTraceFailure::Disconnected ? "CSV CLIENT DISCONNECTED\n" : "CSV SNAPSHOT TIMEOUT\n")));
-  sendSmallHttpResponse(active ? 409 : 503,reason);
-}
-
-void beginCsvResponse(const char* filename) {
-  wifi_log_server.sendHeader(
-      "Content-Disposition",
-      String("attachment; filename=\"") + filename + "\"");
-  wifi_log_server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  wifi_log_server.send(200, "text/csv", "");
-}
-
-void handleVelocityTraceDownload() {
-  HttpTraceLease lease; // HTTP-only cleanup on success, failure, disconnect or timeout.
-  if (traceDownloadBlocked(1)) {
-    sendTraceBusyResponse();
-    return;
-  }
-
-  beginCsvResponse("velocity-trace.csv");
-  wifi_log_server.sendContent(
-      "elapsed_ms,elapsed_us,"
-      "current_right_angle,previous_right_angle,right_angle_delta,"
-      "current_left_angle,previous_left_angle,left_angle_delta,"
-      "diag_right_velocity_10ms,diag_left_velocity_10ms,"
-      "diag_LQR_speed_10ms,"
-      "simplefoc_right_velocity,simplefoc_left_velocity,"
-      "LQR_speed,diag_speed_spike\n");
-
-  const size_t first_index =
-      (http_trace_snapshot->velocity_index + kVelocityTraceSize -
-       http_trace_snapshot->velocity_count) %
-      kVelocityTraceSize;
-  char line[320];
-  for (size_t i = 0; i < http_trace_snapshot->velocity_count; ++i) {
-    if (!wifi_log_server.client().connected()) {
-      break;
-    }
-    const VelocityTraceSample& sample =
-        http_trace_snapshot->velocity[(first_index + i) % kVelocityTraceSize];
-    snprintf(
-        line, sizeof(line),
-        "%lu,%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%s\n",
-        static_cast<unsigned long>(sample.elapsed_ms),
-        static_cast<unsigned long>(sample.elapsed_us),
-        sample.current_right_angle, sample.previous_right_angle,
-        sample.right_angle_delta, sample.current_left_angle,
-        sample.previous_left_angle, sample.left_angle_delta,
-        sample.diag_right_velocity_10ms,
-        sample.diag_left_velocity_10ms, sample.diag_LQR_speed_10ms,
-        sample.simplefoc_right_velocity,
-        sample.simplefoc_left_velocity, sample.LQR_speed,
-        sample.diag_speed_spike ? "yes" : "no");
-    wifi_log_server.sendContent(line);
-  }
-  wifi_log_server.sendContent("");
-}
-
-void handleLoopTimingTraceDownload() {
-  HttpTraceLease lease; // HTTP-only cleanup on success, failure, disconnect or timeout.
-  if (traceDownloadBlocked(2)) {
-    sendTraceBusyResponse();
-    return;
-  }
-
-  beginCsvResponse("loop-timing-trace.csv");
-  wifi_log_server.sendContent(
-      "elapsed_ms,whole_loop_us,motor1_loopfoc_us,motor2_loopfoc_us,"
-      "mpu_update_us,motor_move_us\n");
-
-  const size_t first_index =
-      (http_trace_snapshot->timing_index + kLoopTimingTraceSize -
-       http_trace_snapshot->timing_count) %
-      kLoopTimingTraceSize;
-  char line[128];
-  for (size_t i = 0; i < http_trace_snapshot->timing_count; ++i) {
-    if (!wifi_log_server.client().connected()) {
-      break;
-    }
-    const LoopTimingSample& sample =
-        http_trace_snapshot->timing[(first_index + i) % kLoopTimingTraceSize];
-    snprintf(line, sizeof(line), "%lu,%lu,%lu,%lu,%lu,%lu\n",
-             static_cast<unsigned long>(sample.elapsed_ms),
-             static_cast<unsigned long>(sample.whole_loop_us),
-             static_cast<unsigned long>(sample.motor1_loopfoc_us),
-             static_cast<unsigned long>(sample.motor2_loopfoc_us),
-             static_cast<unsigned long>(sample.mpu_update_us),
-             static_cast<unsigned long>(sample.motor_move_us));
-    wifi_log_server.sendContent(line);
-  }
-  wifi_log_server.sendContent("");
-}
-
-void handleLqrControlTraceDownload() {
-  HttpTraceLease lease; // HTTP-only cleanup on success, failure, disconnect or timeout.
-  if (traceDownloadBlocked(3)) {
-    sendTraceBusyResponse();
-    return;
-  }
-
-  beginCsvResponse("lqr-control-trace.csv");
-  wifi_log_server.sendContent(
-      "elapsed_ms,angle,angle_zeropoint,angle_error,gyro,"
-      "lqr_speed,speed_for_control,"
-      "angle_control,gyro_control,distance_control,speed_control,"
-      "lqr_u,right_output,left_output,"
-      "right_voltage_q_V,left_voltage_q_V,right_current_sp_V,left_current_sp_V,right_motor_enabled,left_motor_enabled,right_driver_en,left_driver_en,sample_phase,foc_capture_us\n");
-
-  const size_t first_index =
-      (http_trace_snapshot->control_index + kLqrControlTraceSize -
-       http_trace_snapshot->control_count) %
-      kLqrControlTraceSize;
-  char line[512];
-  for (size_t i = 0; i < http_trace_snapshot->control_count; ++i) {
-    if (!wifi_log_server.client().connected()) {
-      break;
-    }
-    const LqrControlTraceSample& sample =
-        http_trace_snapshot->control[(first_index + i) % kLqrControlTraceSize];
-    snprintf(
-        line, sizeof(line),
-        "%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-        "%.6f,%.6f,%.6f,%.6f,%d,%d,%d,%d,%s,%lu\n",
-        static_cast<unsigned long>(sample.elapsed_ms), sample.angle,
-        sample.angle_zeropoint, sample.angle_error, sample.gyro,
-        sample.lqr_speed, sample.speed_for_control,
-        sample.angle_control, sample.gyro_control,
-        sample.distance_control, sample.speed_control, sample.lqr_u,
-        sample.right_output, sample.left_output,
-        sample.right_voltage_q, sample.left_voltage_q,
-        sample.right_current_sp, sample.left_current_sp,
-        static_cast<int>(sample.right_motor_enabled),
-        static_cast<int>(sample.left_motor_enabled),
-        static_cast<int>(sample.right_driver_en),
-        static_cast<int>(sample.left_driver_en),
-        sample.after_disable ? "AFTER_DISABLE" : "BEFORE_MOVE",
-        static_cast<unsigned long>(sample.foc_capture_us));
-    wifi_log_server.sendContent(line);
-  }
-  wifi_log_server.sendContent("");
-}
 
 void enqueueHttpCommand(char command) {
   if (command == 't' && !startup_foc_ready.load()) {
@@ -4968,7 +4123,7 @@ void captureHttpStatus() {
       "Left: driver_init=%d sensor_ready=%d fault=%d (%s) motor_status=%u motor_enabled=%d EN=%d\n"
       "LQR Test Mode: %s\nLQR Speed Source: %s\n"
       "PS4: %s / %s / motion_ready=%d\nTarget speed: %.4f / yaw command: %.4f V\n"
-      "Test active: %s\nTrace samples: Velocity=%u Loop Timing=%u LQR Control=%u\n",
+      "Test active: %s\nHistory: browser only (WebSocket)\n",
       startup_phase, startup_web_ready.load() ? "READY" : "WAITING/FAILED",
       test_system_ready ? "READY" : (foc_initialization_failed ? "FAILED" :
           (foc_initialization_attempted ? "INITIALIZING" : "NOT_INITIALIZED")),
@@ -4987,9 +4142,7 @@ void captureHttpStatus() {
       digitalRead(motor2EnablePin), lqrTestModeDisplayName(), lqrSpeedSourceName(),
       ps4_was_connected ? "connected" : "disconnected", ps4DriveStateName(ps4_drive_state),
       static_cast<int>(ps4_motion_ready), lqr_target_speed, ps4_yaw_output,
-      test_active ? "yes" : "no", static_cast<unsigned>(velocity_trace_count),
-      static_cast<unsigned>(loop_timing_count),
-      static_cast<unsigned>(lqr_control_trace_count));
+      test_active ? "yes" : "no");
   const size_t used = strlen(status.text);
   ps4_diagnostics.format(status.text + used, sizeof(status.text) - used, kPs4DriveStickDeadzone);
   status.ps4_revision = ps4_diagnostics.revision;
@@ -5212,6 +4365,8 @@ void serviceReleaseMemoryObservation() {
   }
 }
 
+void serviceDiagnosticWebSocket();
+
 void httpTask(void*) {
   // Creation may schedule us immediately, before filesystem/Wi-Fi setup ends.
   while (!http_task_ready.load()) vTaskDelay(pdMS_TO_TICKS(2));
@@ -5221,7 +4376,6 @@ void httpTask(void*) {
   for (;;) {
     updateWifiLogServer();
     enforceStartupOutputGate();
-    reapHttpTraceSnapshot();
     if(!foc_alignment_observer.active()){
       const char* deferred=foc_deferred_http_failure.exchange(nullptr);
       if(deferred)reportStartupFailure(deferred);
@@ -5229,6 +4383,7 @@ void httpTask(void*) {
     }
     serviceHttpPs4DiagnosticSerial();
     serviceHttpFileResponse();
+    serviceDiagnosticWebSocket();
     serviceReleaseMemoryObservation();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
@@ -5245,11 +4400,11 @@ void startWifiHttpServer() {
     wifi_log_server.on("/app.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/app.js", "application/javascript"); });
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
-                       [](){HttpMemoryRequest observed{5};handleVelocityTraceDownload();});
+                       [](){HttpMemoryRequest observed{5};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
     wifi_log_server.on("/trace/loop.csv", HTTP_GET,
-                       [](){HttpMemoryRequest observed{6};handleLoopTimingTraceDownload();});
+                       [](){HttpMemoryRequest observed{6};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
     wifi_log_server.on("/trace/lqr.csv", HTTP_GET,
-                       [](){HttpMemoryRequest observed{7};handleLqrControlTraceDownload();});
+                       [](){HttpMemoryRequest observed{7};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
     wifi_log_server.on("/control/mode", HTTP_POST,
                        [](){HttpMemoryRequest observed{8};handleCycleLqrTestMode();});
     wifi_log_server.on("/control/speed-source", HTTP_POST,
@@ -5305,14 +4460,13 @@ void printHttpStartupMemory(const char* stage) {
   char text[384];
   snprintf(text, sizeof(text),
       "HTTP memory stage=%s heap_free=%lu internal_free=%lu internal_largest=%lu "
-      "stack_bytes=%lu tcb_bytes=%u status_bytes=%u trace_copy_request_bytes=%u\n",
+      "stack_bytes=%lu tcb_bytes=%u status_bytes=%u\n",
       stage, static_cast<unsigned long>(ESP.getFreeHeap()),
       static_cast<unsigned long>(heap_caps_get_free_size(caps)),
       static_cast<unsigned long>(heap_caps_get_largest_free_block(caps)),
       static_cast<unsigned long>(kHttpTaskStackBytes),
       static_cast<unsigned>(sizeof(http_task_tcb)),
-      static_cast<unsigned>(sizeof(HttpStatus)),
-      static_cast<unsigned>(sizeof(HttpTraceSnapshot)));
+      static_cast<unsigned>(sizeof(HttpStatus)));
   Serial.print(text);
 #else
   (void)stage;
@@ -6059,7 +5213,7 @@ bool executeOperatorCommand(OperatorCommand command) {
       setBothTargetsToZero();
       disableLegServoTorqueForTestEnd("DISARM");
       stopBalanceTest();
-      if (was_active || strcmp(last_stop_reason, "NONE") == 0) last_stop_reason = "DISARM";
+      if (was_active || strcmp(last_stop_reason, "NONE") == 0) { last_stop_reason = "DISARM"; recordDiagnosticStop(last_stop_reason); }
       printVelocityTrace();
       printLoopTimingTrace();
       printLqrControlTrace();
@@ -6914,4 +6068,56 @@ void observeFocAlignPp(const void* motor,float moved,bool passed) {
 }
 void observeFocLibraryDisable(uint32_t now) {
   foc_alignment_observer.gate(FocGateSource::LibraryDisable,now);
+}
+
+namespace {
+struct DiagnosticSocketIO {
+  int fd=-1;
+  uint32_t now(){return millis();}
+  bool connected(){return fd>=0;}
+  int read(char* p,size_t n){int r=recv(fd,p,n,MSG_DONTWAIT);return r<0?-errno:r;}
+  int write(const char*p,size_t n){int r=send(fd,p,n,MSG_DONTWAIT);return r<0?-errno:r;}
+  void close(){if(fd>=0){::close(fd);fd=-1;}}
+  bool acceptKey(const char*key,char*out){
+    unsigned char decoded[18],digest[20];size_t size=0;
+    if(mbedtls_base64_decode(decoded,sizeof(decoded),&size,reinterpret_cast<const unsigned char*>(key),24)||size!=16)return false;
+    char input[61];memcpy(input,key,24);memcpy(input+24,"258EAFA5-E914-47DA-95CA-C5AB0DC85B11",36);input[60]=0;
+    if(mbedtls_sha1(reinterpret_cast<const unsigned char*>(input),60,digest))return false;
+    return !mbedtls_base64_encode(reinterpret_cast<unsigned char*>(out),29,&size,digest,20)&&size==28;
+  }
+  void snapshot(diagnostic::Snapshot&s){
+    portENTER_CRITICAL(&diagnostic_snapshot_lock);s=diagnostic_latest;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
+    constexpr uint32_t caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
+    s.values[24]=heap_caps_get_free_size(caps);s.values[25]=heap_caps_get_largest_free_block(caps);
+  }
+};
+DiagnosticSocketIO diagnostic_socket_io;
+diagnostic::WebSocket<DiagnosticSocketIO> diagnostic_websocket;
+int diagnostic_listener=-1;
+uint32_t diagnostic_listen_attempt=0;
+bool diagnostic_boot_ready=false;
+void serviceDiagnosticWebSocket(){
+  auto& io=diagnostic_socket_io;
+  if(!wifi_connection_ready||!wifi_log_server_started){
+    diagnostic_websocket.disconnect(io);
+    if(diagnostic_listener>=0){::close(diagnostic_listener);diagnostic_listener=-1;}
+    return;
+  }
+  if(!diagnostic_boot_ready){char boot[17];snprintf(boot,sizeof(boot),"%08lx%08lx",(unsigned long)esp_random(),(unsigned long)esp_random());diagnostic_websocket.setBoot(boot);diagnostic_boot_ready=true;}
+  if(diagnostic_listener<0){
+    const uint32_t now=millis();if(diagnostic_listen_attempt&&uint32_t(now-diagnostic_listen_attempt)<5000)return;diagnostic_listen_attempt=now;
+    int fd=socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);if(fd<0)return;
+    sockaddr_in address{};address.sin_family=AF_INET;address.sin_port=htons(81);address.sin_addr.s_addr=htonl(INADDR_ANY);
+    int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+    if(fcntl(fd,F_SETFL,O_NONBLOCK)<0||bind(fd,reinterpret_cast<sockaddr*>(&address),sizeof(address))<0||listen(fd,1)<0){::close(fd);return;}
+    diagnostic_listener=fd;
+  }
+  // One accept and at most one read OR send per pass; a second client is closed without a session.
+  int accepted=accept(diagnostic_listener,nullptr,nullptr);
+  if(accepted>=0){
+    if(diagnostic_websocket.active()||fcntl(accepted,F_SETFL,O_NONBLOCK)<0)::close(accepted);
+    else {io.fd=accepted;diagnostic_websocket.connected(io);}
+  }
+  diagnostic_websocket.poll(io);
+}
 }

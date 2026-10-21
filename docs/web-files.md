@@ -1,3 +1,5 @@
+> 最新の診断画面・履歴/CSVは[WebSocket移行](websocket-diagnostics.md)で置き換えました。以下の旧CSV/状態pollingの記述は移行前の設計記録です。
+
 # Web配信とファイルシステム
 
 基準: `codex/2208-short-drive` の `dfd4d0c`。
