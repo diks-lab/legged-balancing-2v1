@@ -782,7 +782,31 @@ int main(){
   // Latest telemetry reports selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);
   nowMs+=50;publishDiagnosticSnapshot();
-  near(diagnostic_latest.values[9]+diagnostic_latest.values[10]+diagnostic_latest.values[11]+diagnostic_latest.values[12],diagnostic_latest.values[13]);
+  assert(std::isnan(diagnostic_latest.values[11])); // Drive disables position feedback.
+  near(diagnostic_latest.values[9]+diagnostic_latest.values[10]+diagnostic_latest.values[12],diagnostic_latest.values[13]);
+  // Exact PID inputs, signed/filtered speed selection and no second averaging.
+  setupCase();LQR_angle=0.4f;LQR_gyro=-0.2f;LQR_distance=0.3f;
+  step(0.6f);nowMs+=50;publishDiagnosticSnapshot();
+  near(diagnostic_latest.values[26],diagnostic_control_inputs.angle_error);
+  near(diagnostic_latest.values[26],LQR_angle-angle_zeropoint);
+  near(diagnostic_latest.values[3],LQR_gyro);
+  near(diagnostic_latest.values[8],lqr_speed_for_control);
+  near(diagnostic_latest.values[6],motor1.shaft_velocity*kRightForwardSign);
+  near(diagnostic_latest.values[7],motor2.shaft_velocity*kLeftForwardSign);
+  near(diagnostic_latest.values[27],distance_zeropoint-LQR_distance);
+  near(diagnostic_latest.values[28],lqr_target_speed);
+  near(diagnostic_latest.values[31],lqr_speed_raw_for_control);
+  setupCase(LqrTestMode::AttitudeOnly);step();nowMs+=50;publishDiagnosticSnapshot();
+  assert(std::isnan(diagnostic_latest.values[8]));
+  assert(std::isnan(diagnostic_latest.values[11])&&std::isnan(diagnostic_latest.values[12]));
+  setupCase();start(1);ps4_drive_state=Ps4DriveState::DriveRequested;
+  lqr_ps4_window_speed=0.27f;step(0.9f);nowMs+=50;publishDiagnosticSnapshot();
+  near(diagnostic_latest.values[8],0.27f);
+  near(diagnostic_latest.values[26],LQR_angle-angle_zeropoint-lqr_ps4_target_tilt_deg-lqr_drive_angle_bias);
+  near(diagnostic_latest.values[29],lqr_ps4_target_tilt_deg+lqr_drive_angle_bias);
+  assert(std::isnan(diagnostic_latest.values[12]));
+  lqr_diagnostic_armed=false;step();nowMs+=50;publishDiagnosticSnapshot();
+  assert(std::isnan(diagnostic_latest.values[26])&&std::isnan(diagnostic_latest.values[8]));
   Serial.output.clear();printLqrStatus();
   assert(Serial.output.find("speed_control=0.000000")!=std::string::npos);
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";

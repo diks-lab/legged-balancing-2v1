@@ -2,7 +2,7 @@
 from pathlib import Path
 import subprocess,tempfile,os
 assets=[]
-for name in ['index.html','style.css','app.js']:
+for name in ['index.html','style.css','app.js','signals.js','history.js','plot.js']:
  data=(Path('data')/name).read_text(encoding='utf-8')
  assert ')ASSET"' not in data
  assets.append('R"ASSET('+data+')ASSET"')
@@ -54,8 +54,8 @@ const char* assets[]={
 };
 int main(){
  failAllocation=true;assert(malloc(1)==nullptr);
- const char*mimes[]={"text/html; charset=utf-8","text/css","application/javascript"};
- for(int i=0;i<3;++i){
+ const char*mimes[]={"text/html; charset=utf-8","text/css","application/javascript","application/javascript","application/javascript","application/javascript"};
+ for(int i=0;i<6;++i){
   Transport t;File f{assets[i],strlen(assets[i]),t};
   assert(sendBoundedHttpFile(t,f,mimes[i])==HttpSendResult::Complete);
   assert(f.closed==1&&t.closed==1&&t.bodyBytes()==f.length&&!memcmp(strstr(t.output,"\r\n\r\n")+4,assets[i],f.length));

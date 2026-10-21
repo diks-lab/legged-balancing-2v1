@@ -1,3 +1,5 @@
+> 最新画面・制御値の対応・RAM・更新手順は [制御グラフ](control-graph.md) を参照。以下のRAM比較は当初移行時の記録。
+
 # WebSocket診断とブラウザー履歴への移行
 
 基準: codex/2208-web-ps4 / 7056ad6（取得したFETCH_HEADとローカルHEADの一致を確認）。
@@ -62,7 +64,7 @@ seqの飛びとdroppedからブラウザーが欠落を表示し、boot_id変更
 
 ## 取得経路・項目
 
-制御ループ末尾/初期化待ち経路で50 msごとに、既存変数から192 BのSnapshotを作り、
+制御ループ末尾/初期化待ち経路で50 msごとに、既存変数から216 BのSnapshotを作り、
 短いcritical sectionで最新1個へコピーする。追加I2C読み取り、制御側の動的確保、JSON整形、
 通信待ちはない。通信タスクは同じlockでコピーしてからメモリー情報・JSONを生成する。
 従来のHTTP状態キューは残し、既存の状態API/PS4シリアル表示も維持する。
@@ -71,12 +73,12 @@ seqの飛びとdroppedからブラウザーが欠落を表示し、boot_id変更
 |---|---|---|
 |angle_deg / reference_deg / angle_error_deg|deg、既存AngleY / 基準角 / その差|最新制御更新後|
 |gyro_deg_s|deg/s、既存GyroY|同上|
-|right_position_rad / left_position_rad|rad、各shaft_angleの既存生符号|直近loopFOCの既存センサーキャッシュ|
-|right_velocity_rad_s / left_velocity_rad_s|rad/s、各shaft_velocityの既存生符号|同上|
-|mean_velocity_rad_s|rad/s、(右速度×m1_direction＋左速度×m2_direction)/2|同上（制御の和を変更しない）|
+|right_position_rad / left_position_rad|rad、各shaft_angleに既存車体前進符号を適用|直近loopFOCの既存センサーキャッシュ|
+|right_velocity_rad_s / left_velocity_rad_s|rad/s、各shaft_velocity（SimpleFOC LPF後）に既存車体前進符号を適用|同上|
+|mean_velocity_rad_s|rad/s、実際のdrive_speed_for_control|通常LPF後／PS4走行時は既存速度窓。既に平均化済みで再度÷2しない|
 |angle_term_v / gyro_term_v|V、既存姿勢/角速度項|最新制御更新後|
-|position_term_v|V、使用モードの符号補正済み位置項、他モードは0|同上|
-|speed_term_v|V、使用モードの符号補正済み直接速度項、他モードは0|同上|
+|position_term_v|V、使用モードの符号補正済み位置項、未使用時null|同上|
+|speed_term_v|V、使用モードの符号補正済み直接速度項、未使用時null|同上|
 |total_output_v|V、test_LQR_u（左右制限/旋回の前）|同上|
 |right_command_v / left_command_v|V、制限・旋回適用後|その周期のmove直前。停止強制記録時はゲート遮断後|
 |right_foc_q_v / left_foc_q_v|V、既存motor.voltage.q|loopFOC後・その周期move前。foc_capture_us付き|
@@ -92,8 +94,9 @@ faultsはbit1=右センサーfault、bit2=左センサーfault、bit4=FOC初期�
 
 ## 画面と履歴の置換
 
-初期選択は角度誤差・角速度・左右速度・左右指令電圧の6項目。
-単位別Canvasでグラフを分け、全グラフの横軸は共通のsample_ms、直近60秒を表示する。
+初期選択は制御角度誤差・制御角速度・制御平均速度・左右車輪速度・左右指令電圧の7項目。
+単一Canvasへ重ね描きし、単位ごとに独立した縦軸と共通のsample_ms横軸で直近60秒を表示する。
+観測選択・詳細は初期状態で閉じ、凡例で線を切り替える。プリセットと追加6項目は[制御グラフ](control-graph.md)を参照。
 項目変更は「配信開始」で送信し、受理した世代・項目・周期を画面に表示する。
 配信停止はグラフ/履歴を残し、表示一時停止は受信・記録・異常表示を継続する。
 ブラウザーの履歴消去・直近履歴CSV保存を提供。履歴は60秒かつ1200点以下で、永続保存しない。

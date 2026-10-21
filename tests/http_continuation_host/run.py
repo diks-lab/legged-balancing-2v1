@@ -13,7 +13,7 @@ header=(core/'libraries/Network/src/NetworkClient.h').read_text()
 assert 'std::shared_ptr<NetworkClientSocketHandle> clientSocketHandle' in header
 assert 'std::shared_ptr<NetworkClientRxBuffer> _rxBuffer' in header
 assets=[]
-for name in ['index.html','style.css','app.js']:
+for name in ['index.html','style.css','app.js','signals.js','history.js','plot.js']:
  raw=(Path('data')/name).read_bytes().replace(b'\r\n',b'\n')
  for data in [raw,raw.replace(b'\n',b'\r\n')]:
   assets.append('"'+''.join('\\x%02x'%v for v in data)+'"')
@@ -128,7 +128,7 @@ void step(Response&r,IOState&io){
 void pump(Response&r,IOState&io,unsigned increment=1){for(int i=0;i<5000&&r.active();++i){step(r,io);io.tick+=increment;}assert(r.finished());}
 void released(){assert(stats.socketCloses==1&&stats.socketDeaths==1&&stats.rxDeaths==1&&stats.fileCloses==1&&stats.fileDeaths==1);failAllocation=false;}
 int main(){
- for(unsigned i=0;i<6;++i){Response r;IOState io;start(r,io,assets[i]);pump(r,io);
+ for(unsigned i=0;i<sizeof(assets)/sizeof(assets[0]);++i){Response r;IOState io;start(r,io,assets[i]);pump(r,io);
   assert(r.metrics().reason==HttpFileEnd::Complete&&r.metrics().bodySent==strlen(assets[i]));
   assert(io.bodyBytes()==strlen(assets[i])&&!memcmp(strstr(io.output,"\r\n\r\n")+4,assets[i],strlen(assets[i])));
   assert(r.metrics().wireSent==r.metrics().wireTotal&&io.used==r.metrics().wireTotal);released();

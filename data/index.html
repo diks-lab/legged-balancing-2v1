@@ -1,41 +1,107 @@
 <!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ESP32 リアルタイム診断</title><link rel="icon" href="data:,"></head>
-<body><main><h1>ESP32 リアルタイム診断</h1>
-<p>操作の中心はPS4です。この画面は診断専用です。機体に履歴は保存されず、未接続中・通信欠落中の過去データは復元できません。</p>
-<p id="connection" role="status">HTML解析中…</p>
-<section class="always" aria-label="最新状態"><p id="health">停止理由・異常状態：未取得</p><p id="loss">欠落：未取得</p></section>
-<nav><button id="start">配信開始</button><button id="stop">配信停止</button><button id="pause">表示一時停止</button><button id="clear">ブラウザー履歴消去</button><button id="save">直近60秒をCSV保存</button><button id="reconnect">再接続</button></nav>
-<p id="subscription" role="status">配信未設定</p>
-<details open><summary>観測項目（チェック後「配信開始」）</summary><div id="fields"></div></details>
-<p>20 Hz・1クライアント。履歴はブラウザー内の直近60秒・最大1200点。表示一時停止中も受信・記録・状態表示を継続します。配信停止は走行停止ではありません。</p>
-<div id="graphs"></div>
-<details><summary>単位・符号・取得時点</summary><p>横軸はESP32起動後の取得時刻 sample_ms（全グラフ共通）。角度はMPU Y軸の既存値、誤差＝姿勢角−基準角。角速度は既存GyroY（deg/s）。左右位置・速度はSimpleFOC shaftの生符号、平均速度は既存の左右方向係数を適用した和÷2（rad/s）です。</p>
-<p>制御項・合計は既存制御式の符号を保持。速度項は符号補正済みの直接項、位置項は使用中モードだけ表示。左右指令は制限・旋回を適用後のmove直前（V）。FOC q電圧はloopFOC後・その周期のmove前のキャッシュで、foc_capture_usをサンプルに記録します。指令とFOC値は同一時点ではありません。</p>
-<p>最新制御値は制御ループ末尾で50 msごとに整合してコピーします（FOC初期化前も状態取得可能）。周期は最新の既存計測値で、メモリーは通信タスクの送信準備時に採取。異常bitは1＝右センサー、2＝左センサー、4＝FOC初期化失敗。停止時刻stop_msは最新停止イベントの起動後時刻。age_msはスナップショットの経過時間です。NaN等はnullとします。ブラウザーのCSVはこの受信済み履歴だけです。</p></details>
-<details><summary>シリアル診断と移行</summary><p>既存シリアル診断・停止手段は維持しています。従来の機体トレースCSVは廃止しました。HTTP /api/statusは診断用に残ります。WebSocketはws://取得IP:81/diagnostics（同一LAN内・暗号化なし）。無制限の自動再接続は行いません。</p></details>
-</main>
-<script>
-document.addEventListener('DOMContentLoaded',async()=>{
-  const message=document.getElementById('connection');
-  let target='/style.css';
-  async function asset(path){
-    message.textContent=`取得中: ${path}`;
-    const response=await fetch(path,{cache:'no-store',signal:AbortSignal.timeout(3000)});
-    if(!response.ok)throw new Error(`HTTP ${response.status}`);
-    return await response.text();
-  }
-  try{
-    const style=document.createElement('style');
-    style.textContent=await asset(target);
-    document.head.appendChild(style);
-    target='/app.js';
-    const script=document.createElement('script');
-    script.textContent=await asset(target);
-    document.head.appendChild(script);
-    if(typeof window.startLogger!=='function')throw new Error('JSの準備が完了しませんでした');
-    target='JS初期化';
-    window.startLogger();
-  }catch(error){message.textContent=`取得・準備失敗: ${target}: ${error.message}。自動再試行はしません。ページを再読み込みしてください。`;}
-},{once:true});
-</script></body></html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 制御グラフ</title>
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <main>
+    <header class="status">
+      <h1>ESP32 制御グラフ <small>診断専用・基本操作はPS4</small></h1>
+      <p id="connection" role="status">HTML解析中…</p>
+      <p id="health">倒立／停止・異常／停止理由：未取得</p>
+      <p id="loss">欠落：未取得</p>
+      <p id="subscription" role="status">配信未設定</p>
+    </header>
+    <section class="plot" aria-label="制御値の重ね描き">
+      <canvas id="plot" aria-label="ESP32取得時刻を共通横軸とするグラフ"></canvas>
+    </section>
+    <section aria-label="凡例と基本操作">
+      <div id="legend" aria-label="クリックで線の表示切替"></div>
+      <nav>
+        <button id="start">配信開始</button>
+        <button id="stop">配信停止</button>
+        <button id="pause">表示一時停止</button>
+        <button id="clear">ブラウザー履歴消去</button>
+        <button id="reconnect">再接続</button>
+      </nav>
+    </section>
+    <details id="selection">
+      <summary>観測項目を選ぶ（変更は「配信開始」で適用）</summary>
+      <label>プリセット
+        <select id="preset">
+          <option value="stationary">自立静止</option>
+          <option value="position">位置保持</option>
+          <option value="drive">PS4走行・旋回</option>
+        </select>
+      </label>
+      <div id="fields"></div>
+    </details>
+    <details id="details">
+      <summary>詳細診断・単位・取得時点・CSV保存</summary>
+      <div class="explanation">
+        <p>1クライアント・20 Hz。履歴はブラウザー内の60秒／最大1200点。
+          表示一時停止中も受信・履歴・異常表示を継続します。
+          配信停止は走行停止ではありません。未接続中の履歴は復元できません。</p>
+        <p>姿勢角・基準角との差はMPU Y軸［deg］。
+          制御角度誤差は実際の姿勢PID入力（目標傾斜・既存バイアスを含む）。
+          制御角速度は同じ周期のGyroY［deg/s］。無効／未使用の制御値はnullで描画しません。</p>
+        <p>左右車輪の位置［rad］・速度［rad/s］はSimpleFOC shaft値
+          （センサー方向補正・速度LPF後に既存の車体前進符号を適用、前進が正）。
+          車体姿勢とは別の回転量です。
+          制御平均速度は速度PIDへ渡す既存の選択済み値：通常は既存速度LPF後、
+          PS4走行中は既存ウィンドウ速度。左右方向係数には平均化が含まれるため再度2で割りません。
+          速度LPF前は車体速度LPF前の比較用で、SimpleFOC内部LPF後です。
+          PS4ウィンドウ速度とは異なります。</p>
+        <p>基準位置誤差＝基準位置−方向補正済み左右位置の和。
+          目標速度は速度誤差の基準。目標傾斜角は姿勢PIDへ適用した傾斜＋バイアス。
+          旋回指令［V］は既存ヘッドルーム制限後（右は減算・左は加算後に出力方向補正）。</p>
+        <p>制御項は既存の符号・モードを保持し、未使用項はnull。
+          指令電圧は制限・旋回・停止判定後のmove直前。
+          FOC q電圧はloopFOC直後・同周期move前のキャッシュ（foc_capture_us）。
+          指令とFOCの取得時点は異なります。追加I2C読み取りはありません。</p>
+        <p>sample_msは50 msごとの制御ループ末尾の整合スナップショット時刻。
+          周期・処理時間は既存計測値、内部RAM［B］は通信タスクの送信準備時。
+          異常bit：1右センサー、2左センサー、4FOC初期化失敗。
+          停止時刻stop_msは最新停止イベント。age_msは取得後の経過時間。
+          欠落・無効値・世代の切替は線をつなぎません。フィルターは追加しません。</p>
+        <button id="save">直近60秒をCSV保存</button>
+      </div>
+    </details>
+  </main>
+  <script>
+    document.addEventListener('DOMContentLoaded', async () => {
+      const message = document.getElementById('connection');
+      let target = '/style.css';
+      async function asset(path) {
+        message.textContent = `取得中: ${path}`;
+        const response = await fetch(path, {
+          cache: 'no-store', signal: AbortSignal.timeout(3000)
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.text();
+      }
+      try {
+        const style = document.createElement('style');
+        style.textContent = await asset(target);
+        document.head.appendChild(style);
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/app.js']) {
+          const script = document.createElement('script');
+          script.textContent = await asset(target);
+          document.head.appendChild(script);
+        }
+        if (typeof window.startLogger !== 'function') {
+          throw new Error('JSの準備が完了しませんでした');
+        }
+        target = 'JS初期化';
+        window.startLogger();
+      } catch (error) {
+        message.textContent = `取得・準備失敗: ${target}: ${error.message}。` +
+          '自動再試行はしません。ページを再読み込みしてください。';
+      }
+    }, { once: true });
+  </script>
+</body>
+</html>

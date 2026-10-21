@@ -1,5 +1,12 @@
 from pathlib import Path
-import subprocess,tempfile,os,json
+import subprocess,tempfile,os,json,re
+# Browser choices/presets must use exactly the firmware's published schema.
+header=Path('include/DiagnosticTelemetry.h').read_text()
+firmware_fields=re.findall(r'"([a-z0-9_]+)"',header.split('fields[FieldCount]={',1)[1].split('};',1)[0])
+browser_fields=json.loads(subprocess.check_output(['node','-e',
+ 'console.log(JSON.stringify(require("./data/signals.js").SIGNALS.map(s=>s[0])))'],text=True))
+assert firmware_fields==browser_fields and len(firmware_fields)==32
+
 code=r'''
 #include "DiagnosticWebSocket.h"
 #include <cassert>
@@ -43,7 +50,7 @@ int main(){
  for(auto text:{"{}","[]","null","{\"type\":\"stop\",\"request_id\":1,}","{\"type\":\"stop\",\"request_id\":1,\"request_id\":2}","{\"type\":\"stop\",\"request_id\":-1}","{\"type\":\"stop\",\"request_id\":01}","{\"type\":\"stop\",\"request_id\":4294967296}"})assert(!diagnostic::SubscriptionParser(text).parse(s));
  std::string bad=sub;bad.replace(bad.find("50"),2,"10");assert(!diagnostic::SubscriptionParser(bad.c_str()).parse(s));
  bad=sub;bad.replace(bad.find("right_velocity_rad_s"),20,"angle_error_deg");assert(!diagnostic::SubscriptionParser(bad.c_str()).parse(s));
- diagnostic::Snapshot snap;for(auto&v:snap.values)v=NAN;strcpy(snap.stop_reason,"quote\"\\\n");char json[2048];assert(diagnostic::sample(json,sizeof(json),snap,"0123456789abcdef",1,1,0,(1<<26)-1,0));assert(strstr(json,"null")&&strstr(json,"quote\\\"\\\\\\u000a"));char tiny[8];assert(!diagnostic::sample(tiny,sizeof(tiny),snap,"x",1,1,0,1,0));
+ diagnostic::Snapshot snap;for(auto&v:snap.values)v=NAN;strcpy(snap.stop_reason,"quote\"\\\n");char json[2048];assert(diagnostic::sample(json,sizeof(json),snap,"0123456789abcdef",1,1,0,UINT32_MAX,0));assert(strstr(json,"null")&&strstr(json,"quote\\\"\\\\\\u000a"));char tiny[8];assert(!diagnostic::sample(tiny,sizeof(tiny),snap,"x",1,1,0,1,0));
  {IO i;WS w;handshake(w,i);i.message(sub);poll(w,i,25);assert(w.generation()==1&&w.mask()==((1u<<2)|(1u<<6)));size_t at=0;auto ack=payload(i,at);assert(ack.find("subscribed")!=ack.npos);poll(w,i,40);bool saw=false;while(at<i.out){auto msg=payload(i,at);if(msg.find("sample")!=msg.npos){assert(msg.find("angle_error_deg")!=msg.npos&&msg.find("right_velocity_rad_s")!=msg.npos&&msg.find("left_velocity_rad_s")==msg.npos&&msg.find("internal_free_b")==msg.npos);puts(msg.c_str());saw=true;}}assert(saw);
   auto generation=w.generation();i.message("{\"type\":\"pid\",\"value\":99}");poll(w,i,30);assert(w.generation()==generation&&w.mask()==((1<<2)|(1<<6)));
   i.message("{\"type\":\"subscribe\",\"request_id\":2,\"period_ms\":50,\"fields\":[\"gyro_deg_s\"]}");poll(w,i,30);assert(w.generation()==2&&w.mask()==(1u<<3));
@@ -64,11 +71,11 @@ int main(){
  }
  // All fields fit the single frame even with worst finite float text and escaped stop reason.
  {diagnostic::Snapshot all;for(auto&v:all.values)v=3.4028234e38f;memset(all.stop_reason,'\\',63);all.stop_reason[63]=0;
-  char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,(1u<<26)-1,UINT32_MAX));
+  char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX));
   std::string request="{\"type\":\"subscribe\",\"request_id\":9,\"period_ms\":50,\"fields\":[";
   for(unsigned i=0;i<diagnostic::FieldCount;++i){if(i)request+=",";request+="\"";request+=diagnostic::fields[i];request+="\"";}request+="]}";
-  diagnostic::Subscription accepted;assert(request.size()<=1000&&diagnostic::SubscriptionParser(request.c_str()).parse(accepted)&&accepted.mask==(1u<<26)-1);
-  IO i;WS w;handshake(w,i);i.message(request);poll(w,i,80);assert(w.mask()==(1u<<26)-1&&w.generation()==1);
+  diagnostic::Subscription accepted;assert(request.size()<=1000&&diagnostic::SubscriptionParser(request.c_str()).parse(accepted)&&accepted.mask==UINT32_MAX);
+  IO i;WS w;handshake(w,i);i.message(request);poll(w,i,80);assert(w.mask()==UINT32_MAX&&w.generation()==1);
  }
  {IO i;WS w;i.tick=UINT32_MAX-100;handshake(w,i);i.snapshotCost=5;i.message(sub);poll(w,i,100);assert(w.active());}
  // Deterministic malformed bytes exercise bounded JSON scanning under sanitizers.

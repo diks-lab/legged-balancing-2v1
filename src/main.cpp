@@ -757,6 +757,12 @@ int16_t leftLegPositionFromPercent(float percent);
 void moveBothLegsToPercent(float percent);
 void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
                                float left_output);
+// Captured at the actual control call sites, not reconstructed by the UI.
+struct DiagnosticControlInputs {
+  float angle_error = NAN, speed = NAN, position_error = NAN;
+  float target_speed = NAN, target_tilt = NAN, yaw = 0;
+} diagnostic_control_inputs;
+
 }  // namespace
 
 void setup() {
@@ -2006,6 +2012,7 @@ void printLqrDriveSnapshot(const char* phase) {
 }
 
 void updateLqrDiagnostic() {
+  diagnostic_control_inputs = DiagnosticControlInputs{};
   lqr_speed_raw_for_control =
       lqr_speed_source == LqrSpeedSource::SimpleFoc
           ? LQR_speed
@@ -2033,7 +2040,10 @@ void updateLqrDiagnostic() {
 
   if (lqr_test_mode == LqrTestMode::AttitudeOnly) {
     // Preserve the c4ba29b control equation when this comparison mode is selected.
-    angle_control = pid_angle(LQR_angle - angle_zeropoint);
+    const float attitude_error = LQR_angle - angle_zeropoint;
+    diagnostic_control_inputs.angle_error = attitude_error;
+    diagnostic_control_inputs.target_tilt = 0;
+    angle_control = pid_angle(attitude_error);
     gyro_control = pid_gyro(LQR_gyro);
     distance_control = speed_control = 0.0f;
     LQR_u = angle_control + gyro_control;
@@ -2903,6 +2913,8 @@ void updateLqrDiagnostic() {
   const float drive_speed_error =
       lqr_target_speed - drive_speed_for_control;
 
+  diagnostic_control_inputs.speed = drive_speed_for_control;
+  diagnostic_control_inputs.target_speed = lqr_target_speed;
   speed_control = pid_speed(drive_speed_error);
 
   if (lqr_auto_drive_active || lqr_soft_stop_active ||
@@ -2966,6 +2978,8 @@ void updateLqrDiagnostic() {
   const float lqr_angle_error =
       LQR_angle - (angle_zeropoint + lqr_ps4_target_tilt) -
       lqr_drive_angle_bias;
+  diagnostic_control_inputs.angle_error = lqr_angle_error;
+  diagnostic_control_inputs.target_tilt = lqr_ps4_target_tilt + lqr_drive_angle_bias;
   angle_control = pid_angle(lqr_angle_error);
   gyro_control = pid_gyro(LQR_gyro);
 
@@ -2975,7 +2989,11 @@ void updateLqrDiagnostic() {
     // fight the requested wheel motion.
     distance_control = 0.0f;
   } else {
-    distance_control = pid_distance(distance_zeropoint - LQR_distance);
+    const float position_error = distance_zeropoint - LQR_distance;
+    if (lqr_test_mode == LqrTestMode::Full ||
+        lqr_test_mode == LqrTestMode::AttitudeDistance)
+      diagnostic_control_inputs.position_error = position_error;
+    distance_control = pid_distance(position_error);
     if (drive_recovery_state == DriveRecoveryState::PositionRamp) {
       const float ramp = constrain(
           static_cast<float>(millis() - drive_recovery_position_ramp_start_ms) /
@@ -4045,14 +4063,30 @@ void publishDiagnosticSnapshot(){
   s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=test_system_ready;
   s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
   const float values[]={LQR_angle,angle_zeropoint,LQR_angle-angle_zeropoint,LQR_gyro,
-    motor1.shaft_angle,motor2.shaft_angle,motor1.shaft_velocity,motor2.shaft_velocity,
-    (motor1.shaft_velocity*m1_direction+motor2.shaft_velocity*m2_direction)*0.5f,
+    motor1.shaft_angle*kRightForwardSign,motor2.shaft_angle*kLeftForwardSign,
+    motor1.shaft_velocity*kRightForwardSign,motor2.shaft_velocity*kLeftForwardSign,
+    diagnostic_control_inputs.speed,
     angle_control,gyro_control,
     (lqr_test_mode==LqrTestMode::Full||lqr_test_mode==LqrTestMode::AttitudeDistance)?distance_control:0.0f,
     speed_direct_control,test_LQR_u,diagnostic_right_command,diagnostic_left_command,
     last_foc_output.right_voltage_q,last_foc_output.left_voltage_q,control_dt_ms,
-    float(diagnostic_loop_us),float(diagnostic_right_foc_us),float(diagnostic_left_foc_us),float(diagnostic_imu_us),float(diagnostic_move_us),0,0};
+    float(diagnostic_loop_us),float(diagnostic_right_foc_us),float(diagnostic_left_foc_us),float(diagnostic_imu_us),float(diagnostic_move_us),0,0,
+    diagnostic_control_inputs.angle_error,diagnostic_control_inputs.position_error,
+    diagnostic_control_inputs.target_speed,diagnostic_control_inputs.target_tilt,
+    diagnostic_control_inputs.yaw,lqr_speed_raw_for_control};
   static_assert(sizeof(values)==sizeof(s.values),"telemetry field mapping");memcpy(s.values,values,sizeof(values));
+  if (!lqr_diagnostic_armed) {
+    for (unsigned i=9;i<=13;++i) s.values[i]=NAN;
+    s.values[3]=s.values[8]=NAN;
+    for (unsigned i=26;i<=29;++i) s.values[i]=NAN;
+  } else {
+    if (!isfinite(diagnostic_control_inputs.position_error)) s.values[11]=NAN;
+    if (lqr_test_mode!=LqrTestMode::Full && lqr_test_mode!=LqrTestMode::AttitudeSpeed)
+      s.values[12]=NAN;
+    if (lqr_auto_drive_active && ps4_drive_state==Ps4DriveState::DriveRequested)
+      s.values[12]=NAN; // Outer tilt loop; no direct speed contribution.
+    if (drive_recovery_state!=DriveRecoveryState::Inactive) s.values[12]=NAN;
+  }
   portENTER_CRITICAL(&diagnostic_snapshot_lock);diagnostic_latest=s;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
 }
 struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
@@ -4411,6 +4445,9 @@ void startWifiHttpServer() {
     wifi_log_server.on("/", HTTP_GET, []() { HttpMemoryRequest observed{1}; serveWebFile("/index.html", "text/html; charset=utf-8"); });
     wifi_log_server.on("/style.css", HTTP_GET, []() { HttpMemoryRequest observed{2}; serveWebFile("/style.css", "text/css"); });
     wifi_log_server.on("/app.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/app.js", "application/javascript"); });
+    wifi_log_server.on("/plot.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/plot.js", "application/javascript"); });
+    wifi_log_server.on("/history.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/history.js", "application/javascript"); });
+    wifi_log_server.on("/signals.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/signals.js", "application/javascript"); });
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
                        [](){HttpMemoryRequest observed{5};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
@@ -5277,6 +5314,7 @@ bool executeOperatorCommand(OperatorCommand command) {
 }
 
 void applyPs4Steering(float& right_output, float& left_output) {
+  diagnostic_control_inputs.yaw = 0;
   if (!ps4_was_connected || emergency_stop_active || !lqr_direction_test_armed ||
       !lqr_auto_drive_active || lqr_soft_stop_active ||
       ps4_drive_state != Ps4DriveState::DriveRequested ||
@@ -5285,6 +5323,7 @@ void applyPs4Steering(float& right_output, float& left_output) {
   const float common = lqrMotorVoltage(test_LQR_u, 1.0f, kLqrTestVoltageLimit);
   const float headroom = max(0.0f, kLqrTestVoltageLimit - abs(common));
   const float yaw = constrain(ps4_yaw_output, -headroom, headroom);
+  diagnostic_control_inputs.yaw = yaw;
   right_output = lqrMotorVoltage(common - yaw, kRightForwardSign, kLqrTestVoltageLimit);
   left_output = lqrMotorVoltage(common + yaw, kLeftForwardSign, kLqrTestVoltageLimit);
 }

@@ -6,13 +6,15 @@
 #include <math.h>
 #include <stdarg.h>
 namespace diagnostic {
-constexpr unsigned FieldCount=26;
+constexpr unsigned FieldCount=32;
+static_assert(FieldCount<=32,"subscription mask capacity");
 static const char* const fields[FieldCount]={
  "angle_deg","reference_deg","angle_error_deg","gyro_deg_s",
  "right_position_rad","left_position_rad","right_velocity_rad_s","left_velocity_rad_s","mean_velocity_rad_s",
  "angle_term_v","gyro_term_v","position_term_v","speed_term_v","total_output_v",
  "right_command_v","left_command_v","right_foc_q_v","left_foc_q_v",
- "control_dt_ms","loop_us","right_foc_us","left_foc_us","imu_us","move_us","internal_free_b","internal_largest_b"};
+ "control_dt_ms","loop_us","right_foc_us","left_foc_us","imu_us","move_us","internal_free_b","internal_largest_b",
+ "control_angle_error_deg","position_error_rad","target_speed_rad_s","target_tilt_deg","yaw_command_v","speed_raw_rad_s"};
 struct Snapshot {
  uint32_t sample_ms=0,source_seq=0,foc_capture_us=0,stop_ms=0;
  uint32_t faults=0; bool running=false,disabled=true,ps4=false,foc_ready=false;

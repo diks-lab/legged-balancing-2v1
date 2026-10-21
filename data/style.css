@@ -1,1 +1,63 @@
-body{font:16px system-ui,sans-serif;background:#f3f5f7;color:#17212b;margin:0}main{max-width:1100px;margin:1rem auto;padding:1.2rem;background:white}button{padding:.6rem;margin:.25rem;cursor:pointer}details{margin:1rem 0}#connection{font-weight:600}.always{position:sticky;top:0;background:#edf1f4;padding:.2rem 1rem;z-index:1;overflow-wrap:anywhere}.always p{margin:.4rem 0}#fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:.5rem;padding:1rem 0}canvas{width:100%;height:180px;background:#f4f6f8}h2{font-size:1rem;margin-bottom:0}#subscription{overflow-wrap:anywhere}p{line-height:1.6}
+:root {
+  font: 16px system-ui, sans-serif;
+  color: #172b45;
+  background: #f4f6f9;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main {
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  max-width: 1920px;
+  margin: auto;
+}
+h1 { font-size: 19px; margin: 0; }
+p { margin: 4px 0; }
+.status { flex: none; }
+.status p { font-size: 14px; overflow-wrap: anywhere; }
+#connection, #health { font-weight: 600; }
+.plot {
+  flex: 1 1 280px;
+  min-height: 210px;
+  background: white;
+  border: 1px solid #bdc8d6;
+  border-radius: 6px;
+  overflow: hidden;
+}
+canvas { width: 100%; height: 100%; display: block; }
+#legend { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+button, select {
+  font: inherit;
+  padding: 6px 10px;
+  border: 1px solid #8798ac;
+  border-radius: 5px;
+  background: white;
+  color: inherit;
+  cursor: pointer;
+}
+button:focus-visible, summary:focus-visible { outline: 3px solid #1971c2; }
+.legend-item { font-size: 14px; padding: 3px 7px; }
+.legend-item::before {
+  content: '';
+  display: inline-block;
+  width: 19px;
+  margin-right: 6px;
+  border-top: 3px solid var(--signal-color);
+  vertical-align: middle;
+}
+.legend-item[aria-pressed='false'] { opacity: 0.55; text-decoration: line-through; }
+nav { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+details { flex: none; border-top: 1px solid #c5ceda; padding-top: 5px; }
+summary { cursor: pointer; }
+details[open] { max-height: 36vh; overflow: auto; }
+#fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 6px; padding: 10px 0; }
+#fields label { display: flex; gap: 6px; align-items: center; }
+#subscription { font-size: 14px; }
+.explanation { line-height: 1.5; }
+@media (max-width: 700px) {
+  main { height: auto; min-height: 100dvh; padding: 8px; }
+  .plot { flex-basis: 300px; }
+}
