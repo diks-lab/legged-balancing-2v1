@@ -26,13 +26,19 @@
         <button id="pause">表示一時停止</button>
         <button id="clear">ブラウザー履歴消去</button>
         <button id="reconnect">再接続</button>
+        <label class="scale-option">
+          <input id="autoscale" type="checkbox">自動スケール（微小変動）
+        </label>
       </nav>
+      <p class="axis-note">主軸：姿勢角・基準角［deg］。
+        異なる単位の軸の線が交差しても、数値が等しい意味ではありません。</p>
     </section>
     <details id="selection">
-      <summary>観測項目を選ぶ（変更は「配信開始」で適用）</summary>
+      <summary>観測項目を選ぶ（配信中は変更を自動反映）</summary>
       <label>プリセット
         <select id="preset">
-          <option value="stationary">自立静止</option>
+          <option value="stationary">自立静止（姿勢・出力）</option>
+          <option value="control">制御入力の比較</option>
           <option value="position">位置保持</option>
           <option value="drive">PS4走行・旋回</option>
         </select>
@@ -47,7 +53,13 @@
           配信停止は走行停止ではありません。未接続中の履歴は復元できません。</p>
         <p>姿勢角・基準角との差はMPU Y軸［deg］。
           制御角度誤差は実際の姿勢PID入力（目標傾斜・既存バイアスを含む）。
-          制御角速度は同じ周期のGyroY［deg/s］。無効／未使用の制御値はnullで描画しません。</p>
+          機体角速度は同じ周期のGyroY［deg/s］。停止中も姿勢角・基準角・角速度を表示します。
+          無効／未使用の制御項はnullで描画しません。</p>
+        <p>通常の最低表示範囲：degは±20、deg/sは±100、Vは±1、rad/sは±6。
+          範囲外は拡張します。自動スケールは微小変動の比較用です。
+          表示範囲は転倒閾値や電圧制限とは別で、データ加工はしません。
+          選択変更は配信中だけ200 msでまとめて反映。全項目解除は配信停止とし、
+          再開は「配信開始」。停止中の選択変更では配信しません。</p>
         <p>左右車輪の位置［rad］・速度［rad/s］はSimpleFOC shaft値
           （センサー方向補正・速度LPF後に既存の車体前進符号を適用、前進が正）。
           車体姿勢とは別の回転量です。
@@ -87,7 +99,7 @@
         const style = document.createElement('style');
         style.textContent = await asset(target);
         document.head.appendChild(style);
-        for (target of ['/signals.js', '/history.js', '/plot.js', '/app.js']) {
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/app.js']) {
           const script = document.createElement('script');
           script.textContent = await asset(target);
           document.head.appendChild(script);

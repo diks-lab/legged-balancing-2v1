@@ -3,7 +3,7 @@ const SIGNALS = [
   ['angle_deg', '姿勢角', 'deg'],
   ['reference_deg', '基準角', 'deg'],
   ['angle_error_deg', '基準角との差', 'deg'],
-  ['gyro_deg_s', '制御角速度', 'deg/s'],
+  ['gyro_deg_s', '機体角速度', 'deg/s'],
   ['right_position_rad', '右位置', 'rad'],
   ['left_position_rad', '左位置', 'rad'],
   ['right_velocity_rad_s', '右車輪速度', 'rad/s'],
@@ -35,13 +35,18 @@ const SIGNALS = [
 ];
 
 const DEFAULTS = [
+  'angle_deg', 'reference_deg', 'gyro_deg_s',
+  'right_command_v', 'left_command_v'
+];
+const CONTROL_FIELDS = [
   'control_angle_error_deg', 'gyro_deg_s', 'mean_velocity_rad_s',
   'right_velocity_rad_s', 'left_velocity_rad_s',
   'right_command_v', 'left_command_v'
 ];
 const PRESETS = {
   stationary: DEFAULTS,
-  position: [...DEFAULTS, 'position_error_rad'],
+  control: CONTROL_FIELDS,
+  position: [...CONTROL_FIELDS, 'position_error_rad'],
   drive: [
     'control_angle_error_deg', 'gyro_deg_s', 'target_speed_rad_s',
     'mean_velocity_rad_s', 'target_tilt_deg', 'yaw_command_v',

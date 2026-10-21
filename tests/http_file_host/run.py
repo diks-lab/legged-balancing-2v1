@@ -2,7 +2,7 @@
 from pathlib import Path
 import subprocess,tempfile,os
 assets=[]
-for name in ['index.html','style.css','app.js','signals.js','history.js','plot.js']:
+for name in ['index.html','style.css','app.js','signals.js','history.js','plot.js','subscribe.js']:
  data=(Path('data')/name).read_text(encoding='utf-8')
  assert ')ASSET"' not in data
  assets.append('R"ASSET('+data+')ASSET"')
@@ -54,8 +54,8 @@ const char* assets[]={
 };
 int main(){
  failAllocation=true;assert(malloc(1)==nullptr);
- const char*mimes[]={"text/html; charset=utf-8","text/css","application/javascript","application/javascript","application/javascript","application/javascript"};
- for(int i=0;i<6;++i){
+ const char*mimes[]={"text/html; charset=utf-8","text/css","application/javascript","application/javascript","application/javascript","application/javascript","application/javascript"};
+ for(int i=0;i<7;++i){
   Transport t;File f{assets[i],strlen(assets[i]),t};
   assert(sendBoundedHttpFile(t,f,mimes[i])==HttpSendResult::Complete);
   assert(f.closed==1&&t.closed==1&&t.bodyBytes()==f.length&&!memcmp(strstr(t.output,"\r\n\r\n")+4,assets[i],f.length));
@@ -65,8 +65,13 @@ int main(){
  Transport partial;partial.maximum=128;partial.header_progress=37;File pf{assets[0],strlen(assets[0]),partial};
  assert(sendBoundedHttpFile(partial,pf,mimes[0])==HttpSendResult::Complete);
  assert(partial.bodyBytes()==pf.length&&!memcmp(strstr(partial.output,"\r\n\r\n")+4,assets[0],pf.length));
- Transport shortIO;File sf{assets[0],strlen(assets[0]),shortIO};sf.short_read=100;
- assert(sendBoundedHttpFile(shortIO,sf,mimes[0])==HttpSendResult::Complete);
+ // The retired synchronous helper retains its 50ms/64-call bounds.
+ // Larger formatted HTML with 100-byte reads must fail finitely, not relax them.
+ Transport smallReads;File large{assets[0],strlen(assets[0]),smallReads};large.short_read=100;
+ assert(sendBoundedHttpFile(smallReads,large,mimes[0])==HttpSendResult::BodyFailed);
+ assert(smallReads.bodyBytes()<large.length&&large.closed==1&&smallReads.closed==1);
+ Transport shortIO;File sf{assets[1],strlen(assets[1]),shortIO};sf.short_read=100;
+ assert(sendBoundedHttpFile(shortIO,sf,mimes[1])==HttpSendResult::Complete);
  Transport headerFail;headerFail.result=-EAGAIN;File hf{assets[0],strlen(assets[0]),headerFail};
  assert(sendBoundedHttpFile(headerFail,hf,mimes[0])==HttpSendResult::HeaderFailed);
  assert(hf.reads==0&&hf.closed==1&&headerFail.closed==1&&headerFail.calls==3);

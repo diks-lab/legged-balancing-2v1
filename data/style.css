@@ -61,3 +61,6 @@ details[open] { max-height: 36vh; overflow: auto; }
   main { height: auto; min-height: 100dvh; padding: 8px; }
   .plot { flex-basis: 300px; }
 }
+
+.scale-option { display: flex; align-items: center; gap: 6px; }
+.axis-note { font-size: 14px; margin-top: 6px; }

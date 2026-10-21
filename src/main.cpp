@@ -4077,7 +4077,7 @@ void publishDiagnosticSnapshot(){
   static_assert(sizeof(values)==sizeof(s.values),"telemetry field mapping");memcpy(s.values,values,sizeof(values));
   if (!lqr_diagnostic_armed) {
     for (unsigned i=9;i<=13;++i) s.values[i]=NAN;
-    s.values[3]=s.values[8]=NAN;
+    s.values[8]=NAN; // Gyro is a measured body state even when control is stopped.
     for (unsigned i=26;i<=29;++i) s.values[i]=NAN;
   } else {
     if (!isfinite(diagnostic_control_inputs.position_error)) s.values[11]=NAN;
@@ -4448,6 +4448,7 @@ void startWifiHttpServer() {
     wifi_log_server.on("/plot.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/plot.js", "application/javascript"); });
     wifi_log_server.on("/history.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/history.js", "application/javascript"); });
     wifi_log_server.on("/signals.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/signals.js", "application/javascript"); });
+    wifi_log_server.on("/subscribe.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/subscribe.js", "application/javascript"); });
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
                        [](){HttpMemoryRequest observed{5};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});

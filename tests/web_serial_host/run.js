@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'signals.js', 'history.js', 'plot.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'app.js'];
 const context = vm.createContext({});
 for (const name of ['signals.js', 'history.js', 'plot.js']) {
   vm.runInContext(source(name), context);
@@ -34,7 +34,19 @@ vm.runInContext(`
   const parts = signalSegments(h.rows, 'x');
   if (JSON.stringify(parts.map(p => p.length)) !== '[2,1,1,1,1,1]') throw Error('gaps');
   if (SIGNALS.length !== 32 || new Set(COLORS).size !== 32) throw Error('fields/colors');
-  if (DEFAULTS.length !== 7 || PRESETS.position.length !== 8 || PRESETS.drive.length !== 10) throw Error('presets');
+  if (DEFAULTS.includes('right_velocity_rad_s') || !DEFAULTS.includes('angle_deg') ||
+    !DEFAULTS.includes('reference_deg')) throw Error('attitude defaults');
+  for (const [unit, range] of Object.entries(MINIMUM_RANGES)) {
+    const rows = [{ values: { x: 0.0001 } }, { values: { x: -0.0001 } }];
+    if (JSON.stringify(axisRange(rows, ['x'], unit)) !== JSON.stringify(range)) throw Error('minimum');
+    const auto = axisRange(rows, ['x'], unit, true);
+    if (auto[0] >= -0.0001 || auto[1] <= 0.0001 || auto[1] - auto[0] >= 0.001) throw Error('auto');
+    const large = axisRange([{ values: { x: range[1] * 3 } }], ['x'], unit);
+    if (large[0] > range[0] || large[1] <= range[1] * 3) throw Error('extend');
+    const invalid = axisRange([{ values: { x: null } }], ['x'], unit);
+    if (JSON.stringify(invalid) !== JSON.stringify(range)) throw Error('invalid scale');
+  }
+  if (DEFAULTS.length !== 5 || PRESETS.position.length !== 8 || PRESETS.drive.length !== 10) throw Error('presets');
 `, context);
 for (const file of assets) {
   const text = source(file);

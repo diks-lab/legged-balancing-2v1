@@ -805,7 +805,17 @@ int main(){
   near(diagnostic_latest.values[26],LQR_angle-angle_zeropoint-lqr_ps4_target_tilt_deg-lqr_drive_angle_bias);
   near(diagnostic_latest.values[29],lqr_ps4_target_tilt_deg+lqr_drive_angle_bias);
   assert(std::isnan(diagnostic_latest.values[12]));
-  lqr_diagnostic_armed=false;step();nowMs+=50;publishDiagnosticSnapshot();
+  assert(stopBalanceTest());
+  LQR_angle=12.5f;LQR_gyro=-3.2f;
+  angle_zeropoint=-0.8f;step();nowMs+=50;publishDiagnosticSnapshot();
+  near(diagnostic_latest.values[0],12.5f);
+  near(diagnostic_latest.values[1],-0.8f);
+  near(diagnostic_latest.values[3],-3.2f);
+  assert(!diagnostic_latest.running);
+  LQR_angle=-8.25f;LQR_gyro=1.6f;step();nowMs+=50;publishDiagnosticSnapshot();
+  near(diagnostic_latest.values[0],-8.25f);
+  near(diagnostic_latest.values[1],-0.8f);
+  near(diagnostic_latest.values[3],1.6f);
   assert(std::isnan(diagnostic_latest.values[26])&&std::isnan(diagnostic_latest.values[8]));
   Serial.output.clear();printLqrStatus();
   assert(Serial.output.find("speed_control=0.000000")!=std::string::npos);
