@@ -259,6 +259,7 @@ void setupCase(LqrTestMode mode=LqrTestMode::Full){
   lqr_test_mode=mode;
   test_system_ready=true; startup_foc_ready.store(true); emergency_stop_active=false;
   sensor1.fault=sensor2.fault=false;
+  diagnostic_calibration_done.store(true);diagnostic_calibration_ok.store(true);
   motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=4;
   lqr_diagnostic_armed=true; lqr_direction_test_armed=true;
   LQR_angle=LQR_gyro=LQR_speed=LQR_distance=0;
@@ -274,7 +275,7 @@ void step(float speed=0){
   LQR_speed=diag_LQR_speed_10ms=speed;
   motor1.shaft_velocity=motor2.shaft_velocity=speed;
   control_dt_ms=10;
-  diagnostic_imu_initialized.store(true);noteImuMeasurement();
+  diagnostic_imu_initialized.store(true);diagnostic_imu_io_ok=diagnostic_imu_io_seen=true;noteImuMeasurement();
   updateLqrDiagnostic();
 }
 void start(float sign){
@@ -794,7 +795,7 @@ int main(){
     LQR_angle=0.8f;LQR_gyro=0.2f;LQR_speed=0;
   };
   auto bootFrame=[&](){
-    nowMs+=10;noteImuMeasurement();serviceBootAutoStart();
+    nowMs+=10;diagnostic_imu_io_ok=diagnostic_imu_io_seen=true;noteImuMeasurement();serviceBootAutoStart();
     updateLqrDiagnostic();updateBalanceWait();
   };
   bootFixture();test_system_ready=false;
@@ -841,6 +842,29 @@ int main(){
   assert(!lqr_direction_test_armed);
   bootFixture();assert(executeOperatorCommand(OperatorCommand::FullStop));
   emergency_stop_active=false;
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  bootFixture();
+  diagnostic_imu_io_seen=true;diagnostic_imu_io_ok=false;noteImuMeasurement();
+  const auto failedReadSeq=diagnostic_imu_seq,failedReadMs=diagnostic_imu_ms;
+  serviceBootAutoStart();nowMs+=50;publishDiagnosticSnapshot();
+  assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
+  assert(diagnostic_latest.imu_reason==9&&!diagnostic_latest.imu_valid);
+  assert(diagnostic_imu_seq==failedReadSeq&&diagnostic_imu_ms==failedReadMs);
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active&&!lqr_direction_test_armed);
+  bootFixture();
+  for(int n=0;n<160;++n) { bootFrame(); }
+  assert(balance_wait_active);
+  diagnostic_imu_io_ok=false;noteImuMeasurement();serviceBootAutoStart();
+  assert(!balance_wait_active&&!lqr_diagnostic_armed&&!lqr_direction_test_armed);
+  assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
+  assert(std::string(diagnostic_stop_reason)=="AUTO_IMU_INVALID");
+  for(int n=0;n<600;++n) { bootFrame(); }
+  assert(!balance_wait_active);
+  bootFixture();diagnostic_calibration_ok.store(false);serviceBootAutoStart();
+  assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
+  diagnostic_calibration_ok.store(true);
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!balance_wait_active);
   bootFixture();sensor2.fault=true;assert(stopOnWheelFault());

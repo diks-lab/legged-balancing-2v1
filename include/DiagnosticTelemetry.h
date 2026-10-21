@@ -22,15 +22,15 @@ struct Snapshot {
  char stop_reason[64]="NONE";
  uint32_t imu_ms=0,imu_seq=0,command_ms=0;
  bool imu_valid=false,reference_valid=false,command_valid=false;
- uint8_t imu_reason=1,state=0;
+ uint8_t imu_reason=1,state=0,imu_tx=255,imu_rx=0;
  char startup_reason[32]="WEB_WAIT",right_error[24]="",left_error[24]="";
  float values[FieldCount]{};
 };
 // Reasons describe acquisition, not socket traffic. No I2C or heap here.
 inline const char* imuReason(unsigned reason){
  static const char*const names[]={"OK","NOT_INITIALIZED","CALIBRATING","NO_SAMPLE",
- "RIGHT_WHEEL_FAULT","LEFT_WHEEL_FAULT","BOTH_WHEEL_FAULT","NONFINITE","LOOP_STALE"};
- return reason<9?names[reason]:"UNKNOWN";
+ "RIGHT_WHEEL_FAULT","LEFT_WHEEL_FAULT","BOTH_WHEEL_FAULT","NONFINITE","LOOP_STALE","IMU_I2C_FAILED","CALIBRATION_FAILED"};
+ return reason<11?names[reason]:"UNKNOWN";
 }
 inline const char* stateName(unsigned state){
  static const char*const names[]={"INITIALIZING","READY_WAIT","BALANCE_WAIT","BALANCING",
@@ -83,7 +83,7 @@ class SubscriptionParser {
 inline bool sample(char*dest,size_t capacity,const Snapshot&s,const char*boot,uint32_t generation,uint32_t seq,uint32_t dropped,uint32_t mask,uint32_t now){
  Json j(dest,capacity);j.add("{\"type\":\"%s\",\"boot_id\":\"%s\",\"subscription_id\":%lu,\"seq\":%lu,\"source_seq\":%lu,\"sample_ms\":%lu,\"foc_capture_us\":%lu,\"age_ms\":%lu,\"dropped\":%lu,\"stop_ms\":%lu,\"stop_reason\":",mask?"sample":"status",boot,(unsigned long)generation,(unsigned long)seq,(unsigned long)s.source_seq,(unsigned long)s.sample_ms,(unsigned long)s.foc_capture_us,(unsigned long)(now-s.sample_ms),(unsigned long)dropped,(unsigned long)s.stop_ms);j.string(s.stop_reason);
  j.add(",\"imu_ms\":%lu,\"imu_seq\":%lu,\"imu_valid\":%s,\"imu_reason\":\"%s\",\"reference_valid\":%s,\"state\":\"%s\",\"startup_reason\":",(unsigned long)s.imu_ms,(unsigned long)s.imu_seq,s.imu_valid?"true":"false",imuReason(s.imu_reason),s.reference_valid?"true":"false",stateName(s.state));
- j.string(s.startup_reason);j.add(",\"command_ms\":%lu,\"command_valid\":%s",(unsigned long)s.command_ms,s.command_valid?"true":"false");j.add(",\"right_error\":");j.string(s.right_error);j.add(",\"left_error\":");j.string(s.left_error);
+ j.string(s.startup_reason);j.add(",\"imu_tx\":%u,\"imu_rx\":%u",unsigned(s.imu_tx),unsigned(s.imu_rx));j.add(",\"command_ms\":%lu,\"command_valid\":%s",(unsigned long)s.command_ms,s.command_valid?"true":"false");j.add(",\"right_error\":");j.string(s.right_error);j.add(",\"left_error\":");j.string(s.left_error);
  j.add(",\"faults\":%lu,\"running\":%s,\"disabled\":%s,\"ps4\":%s,\"foc_ready\":%s,\"values\":{",(unsigned long)s.faults,s.running?"true":"false",s.disabled?"true":"false",s.ps4?"true":"false",s.foc_ready?"true":"false");
  bool first=true;for(unsigned i=0;i<FieldCount;++i)if(mask&(1u<<i)){j.add("%s\"%s\":",first?"":",",fields[i]);if(isfinite(s.values[i]))j.add("%.7g",double(s.values[i]));else j.add("null");first=false;}
  j.add("}}");return j.ok;

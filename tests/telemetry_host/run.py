@@ -70,7 +70,7 @@ int main(){
   size_t offset=0;while(offset<i.out){auto text=payload(i,offset);if(text.find("\"type\":\"sample\"")!=text.npos){puts(text.c_str());break;}}
  }
  // All fields fit the single frame even with worst finite float text and escaped stop reason.
- {diagnostic::Snapshot all;for(auto&v:all.values)v=3.4028234e38f;memset(all.stop_reason,'\\',63);all.stop_reason[63]=0;memset(all.startup_reason,'R',31);all.startup_reason[31]=0;memset(all.right_error,'R',23);all.right_error[23]=0;memset(all.left_error,'L',23);all.left_error[23]=0;all.imu_ms=all.imu_seq=all.command_ms=UINT32_MAX;
+ {diagnostic::Snapshot all;for(auto&v:all.values)v=3.4028234e38f;memset(all.stop_reason,'\\',63);all.stop_reason[63]=0;memset(all.startup_reason,'R',31);all.startup_reason[31]=0;memset(all.right_error,'R',23);all.right_error[23]=0;memset(all.left_error,'L',23);all.left_error[23]=0;all.imu_ms=all.imu_seq=all.command_ms=UINT32_MAX;all.imu_reason=10;all.state=7;
   char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX));
   std::string request="{\"type\":\"subscribe\",\"request_id\":9,\"period_ms\":50,\"fields\":[";
   for(unsigned i=0;i<diagnostic::FieldCount;++i){if(i)request+=",";request+="\"";request+=diagnostic::fields[i];request+="\"";}request+="]}";

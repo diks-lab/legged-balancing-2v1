@@ -14,6 +14,7 @@ pre=r'''
 #include <errno.h>
 #include <string>
 #include <atomic>
+std::atomic<bool> diagnostic_calibration_done{true},diagnostic_calibration_ok{true};
 std::atomic<bool> diagnostic_imu_initialized{true},diagnostic_imu_calibrating{false},diagnostic_startup_failed{false};
 std::atomic<const char*> diagnostic_startup_phase{"READY"};
 uint32_t tick=0;uint32_t millis(){return tick;}

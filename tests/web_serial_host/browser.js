@@ -86,6 +86,12 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert.equal(await page.locator('#right-reading').textContent(), '更新停止／不明');
       assert((await page.locator('#measurement').textContent()).includes('右車輪異常'));
       assert((await page.locator('#health').textContent()).includes('I2C_NACK'));
+      await page.evaluate(() => window.sample({ imu_valid: false, imu_reason: 'CALIBRATION_FAILED', state: 'FAULT' }));
+      assert((await page.locator('#measurement').textContent()).includes('校正'));
+      await page.evaluate(() => window.sample({ imu_valid: false, imu_reason: 'IMU_I2C_FAILED', imu_tx: 2, imu_rx: 0, state: 'FAULT' }));
+      assert((await page.locator('#measurement').textContent()).includes('tx=2 rx=0/14'));
+      await page.evaluate(() => window.sample({ state: 'AUTO_WAIT' }));
+      assert((await page.locator('#health').textContent()).includes('自動開始待ち'));
       // Fixed attitude scale survives auxiliary autoscale.
       await page.check('#autoscale');
       await page.click('#pause'); await page.click('#pause');

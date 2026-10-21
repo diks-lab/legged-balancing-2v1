@@ -6,10 +6,10 @@ const MACHINE_NAMES = {
 };
 const IMU_REASONS = {
   OK: '正常', NOT_INITIALIZED: 'IMU未初期化', CALIBRATING: 'IMU校正中',
-  NO_SAMPLE: '測定未取得', RIGHT_WHEEL_FAULT: '右車輪異常で制御ループ停止',
+  CALIBRATION_FAILED: 'IMU校正の既存6バイト読取りに失敗', NO_SAMPLE: '測定未取得', RIGHT_WHEEL_FAULT: '右車輪異常で制御ループ停止',
   LEFT_WHEEL_FAULT: '左車輪異常で制御ループ停止',
   BOTH_WHEEL_FAULT: '両輪異常で制御ループ停止', NONFINITE: 'IMU値が非有限',
-  LOOP_STALE: 'IMU測定周期が停止（250 ms超）'
+  LOOP_STALE: 'IMU測定周期が停止（250 ms超）', IMU_I2C_FAILED: 'IMU既存読取りのI2C失敗／14バイト未取得'
 };
 function outputReading(sample, key, live, elapsed = 0) {
   if (!live || !sample || sample.type !== 'sample' || sample.age_ms + elapsed > 250) return { state: 'unknown', text: '更新停止／不明' };
@@ -18,7 +18,8 @@ function outputReading(sample, key, live, elapsed = 0) {
     sample.age_ms + elapsed > 250 || !Number.isFinite(sample.values[key])) return { state: 'unknown', text: '更新停止／不明' };
   const value = sample.values[key];
   const number = Math.abs(value) > 0 && Math.abs(value) < 0.005
-    ? Math.abs(value).toPrecision(2) : Math.abs(value).toFixed(2);
+    ? Math.abs(value).toPrecision(2) : Math.abs(value) > 1
+      ? String(Math.abs(value)) : Math.abs(value).toFixed(2);
   return { state: value === 0 ? 'zero' : value > 0 ? 'positive' : 'negative',
     text: `${value < 0 ? '−' : '+'}${number} V`, value,
     arc: Math.min(Math.abs(value), 1) * Math.PI, ccw: value < 0,
@@ -110,10 +111,11 @@ class Dashboard {
       (names.length ? ` / ${names.join('・')}` : '');
     this.el('measurement').textContent = `${valid ? '姿勢測定更新中' : '測定更新停止'}: ` +
       `${!current ? '診断配信停止／通信更新停止' : IMU_REASONS[s.imu_reason] || s.imu_reason}` +
+      `${s.imu_reason === 'IMU_I2C_FAILED' ? `（tx=${s.imu_tx} rx=${s.imu_rx}/14）` : ''}` +
       ` / 実測 ${s.imu_ms} ms・#${s.imu_seq} / 基準角:${s.reference_valid ? '有効な設定値' : '未確定の設定値'}`;
     const angle = s.values.angle_deg;
     this.el('pose-value').textContent = valid && Number.isFinite(angle)
-      ? `${angle > 30 ? '▲ 上限超過 ' : angle < -30 ? '▼ 下限超過 ' : '姿勢角 '}${angle.toFixed(2)}°`
+      ? `${angle > 30 ? '▲ 上限超過 ' : angle < -30 ? '▼ 下限超過 ' : '姿勢角 '}${Math.abs(angle) > 30 ? String(angle) : angle.toFixed(2)}°`
       : '姿勢角：測定更新停止／不明';
   }
   draw() { this.pose.draw(); this.aux.draw(); }

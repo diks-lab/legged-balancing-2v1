@@ -140,6 +140,10 @@ class OverlayPlot {
     c.textAlign = 'center';
     c.fillText('ESP32取得時刻 [s] ／ 単位ごとに独立した縦軸',
       (left + right) / 2, height - 8);
+    if (this.fixedAttitude) {
+      c.textAlign = 'right';
+      c.fillText('0°', left - 8, (top + bottom) / 2 + 5);
+    }
     c.save();
     c.beginPath(); c.rect(left, top, right - left, bottom - top); c.clip();
     if (this.fixedAttitude) {

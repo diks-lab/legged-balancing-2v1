@@ -725,6 +725,7 @@ void cancelBalanceWait();
 void updateBalanceWait();
 bool bootAutoPoseAllowed();
 void serviceBootAutoStart();
+bool stopBalanceTest();
 bool motionCommandAllowed();
 
 // Test / monitor
@@ -767,10 +768,14 @@ std::atomic<bool> diagnostic_imu_initialized{false},diagnostic_imu_calibrating{f
 std::atomic<bool> diagnostic_startup_failed{false};
 std::atomic<const char*> diagnostic_startup_phase{"WEB_WAIT"};
 uint32_t diagnostic_imu_ms=0,diagnostic_imu_seq=0;
-bool diagnostic_imu_finite=false;
+bool diagnostic_imu_finite=false,diagnostic_imu_io_ok=false,diagnostic_imu_io_seen=false;
+uint8_t diagnostic_imu_tx=255,diagnostic_imu_rx=0;
+std::atomic<bool> diagnostic_calibration_done{false},diagnostic_calibration_ok{false};
+bool diagnostic_calibration_failed=false;uint16_t diagnostic_calibration_samples=0;
 void noteImuMeasurement(){
+  diagnostic_imu_finite=diagnostic_imu_io_ok&&isfinite(LQR_angle)&&isfinite(LQR_gyro);
+  if(!diagnostic_imu_io_ok)return;
   diagnostic_imu_ms=millis();++diagnostic_imu_seq;
-  diagnostic_imu_finite=isfinite(LQR_angle)&&isfinite(LQR_gyro);
 }
 
 // Captured at the actual control call sites, not reconstructed by the UI.
@@ -1593,10 +1598,15 @@ bool i2cDeviceIsPresent(TwoWire& bus, uint8_t address) {
 void calibrateMpu6050() {
   stopBothMotorsAtZero();
   Serial.println("MPU6050 calibration starting. Keep the robot completely still.");
+  diagnostic_calibration_done.store(false);diagnostic_calibration_ok.store(false);
+  diagnostic_calibration_failed=false;diagnostic_calibration_samples=0;
   diagnostic_imu_calibrating.store(true);
   mpu6050.calcGyroOffsets(true);
+  diagnostic_calibration_ok.store(!diagnostic_calibration_failed&&diagnostic_calibration_samples==3000);
+  diagnostic_calibration_done.store(true);
   diagnostic_imu_calibrating.store(false);
-  Serial.println("MPU6050 calibration complete; both motor targets remain 0 V.");
+  Serial.println(diagnostic_calibration_ok.load()?"MPU6050 calibration IO complete; both motor targets remain 0 V.":
+      "MPU6050 calibration IO FAILED; boot auto balance inhibited.");
 }
 
 //==================================================
@@ -3403,7 +3413,7 @@ void cancelBalanceWait() {
 
 // Gravity-referenced gate for BOOT ONLY; manual start keeps its existing rules.
 bool bootAutoPoseAllowed(){
-  return diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()&&
+  return diagnostic_imu_initialized.load()&&diagnostic_calibration_ok.load()&&!diagnostic_imu_calibrating.load()&&
       diagnostic_imu_seq&&diagnostic_imu_finite&&uint32_t(millis()-diagnostic_imu_ms)<=250&&
       wheelSensorsOK()&&isfinite(LQR_speed)&&
       abs(LQR_angle)<=kBalanceWaitAngleLimitDeg&&
@@ -3414,6 +3424,14 @@ void serviceBootAutoStart(){
   if(boot_auto_start.phase==BootAutoStart::Phase::Finished||
      boot_auto_start.phase==BootAutoStart::Phase::Cancelled)return;
   if(emergency_stop_active||!wheelSensorsOK()||polarity_test_active){boot_auto_start.cancel();return;}
+  if((diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load())||
+      (diagnostic_imu_io_seen&&(!diagnostic_imu_io_ok||!diagnostic_imu_finite))){
+    const bool preparing=boot_auto_start.phase==BootAutoStart::Phase::Preparing;
+    boot_auto_start.cancel();
+    if(preparing)stopBalanceTest();
+    recordDiagnosticStop("AUTO_IMU_INVALID");
+    return;
+  }
   if(boot_auto_start.phase!=BootAutoStart::Phase::Preparing&&
       (lqr_diagnostic_armed||balance_wait_active||lqr_direction_test_armed||
        right_target_voltage!=0||left_target_voltage!=0)){
@@ -4130,12 +4148,13 @@ void publishDiagnosticSnapshot(){
   s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=test_system_ready;
   s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
   s.imu_ms=diagnostic_imu_ms;s.imu_seq=diagnostic_imu_seq;
+  s.imu_tx=diagnostic_imu_tx;s.imu_rx=diagnostic_imu_rx;
   s.imu_reason=!diagnostic_imu_initialized.load()?1:
-      diagnostic_imu_calibrating.load()?2:!diagnostic_imu_seq?3:
+      diagnostic_imu_calibrating.load()?2:diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load()?10:diagnostic_imu_io_seen&&!diagnostic_imu_io_ok?9:!diagnostic_imu_seq?3:
       sensor1.fault?(sensor2.fault?6:4):sensor2.fault?5:!diagnostic_imu_finite?7:0;
   s.reference_valid=lqr_zero_set;
   s.command_ms=diagnostic_command_ms;s.command_valid=diagnostic_command_valid;
-  s.state=(sensor1.fault||sensor2.fault)?6:
+  s.state=(sensor1.fault||sensor2.fault||s.imu_reason==9||s.imu_reason==7||s.imu_reason==10)?6:
       diagnostic_startup_failed.load()&&!test_system_ready?7:
       emergency_stop_active?(!strcmp(last_stop_reason,"TILT_STOP")?5:4):!test_system_ready?0:
       lqr_direction_test_armed?3:balance_wait_active?2:
@@ -4143,7 +4162,10 @@ void publishDiagnosticSnapshot(){
   if(test_system_ready&&!lqr_direction_test_armed&&!emergency_stop_active&&
       !sensor1.fault&&!sensor2.fault){
     if(boot_auto_start.pending())s.state=8;
-    else if(boot_auto_start.phase==BootAutoStart::Phase::Cancelled&&!balance_wait_active&&s.state==1)s.state=4;
+    else if(boot_auto_start.phase==BootAutoStart::Phase::Cancelled&&!balance_wait_active&&s.state==1){
+      if(!strcmp(diagnostic_stop_reason,"AUTO_IMU_INVALID"))s.state=6;
+      else if(!strcmp(diagnostic_stop_reason,"MANUAL_STOP")||!strcmp(diagnostic_stop_reason,"DISARM"))s.state=4;
+    }
   }
   snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
   snprintf(s.right_error,sizeof(s.right_error),"%s",sensor1.error);
@@ -6214,6 +6236,16 @@ void handleSerialCommand() {
 }  // namespace
 
 
+extern "C" void observeImuCalibration(unsigned char tx,unsigned char rx){
+  if(diagnostic_calibration_samples<3000)++diagnostic_calibration_samples;
+  if(tx!=0||rx!=6)diagnostic_calibration_failed=true;
+}
+
+extern "C" void observeImuTransaction(unsigned char tx,unsigned char rx){
+  diagnostic_imu_tx=tx;diagnostic_imu_rx=rx;
+  diagnostic_imu_io_ok=tx==0&&rx==14;diagnostic_imu_io_seen=true;
+}
+
 void observeFocAlignPoint(const void* motor,FocAlignPoint point,float value,uint32_t now) {
   foc_alignment_observer.point(motor,point,value,now);
 }
@@ -6250,8 +6282,11 @@ struct DiagnosticSocketIO {
   }
   void snapshot(diagnostic::Snapshot&s){
     portENTER_CRITICAL(&diagnostic_snapshot_lock);s=diagnostic_latest;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
+    if(diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load())s.imu_reason=10;
     if(diagnostic_imu_calibrating.load())s.imu_reason=2;
     if(!diagnostic_imu_initialized.load())s.imu_reason=1;
+    else if(s.imu_reason==1)s.imu_reason=3;
+    if(s.imu_reason==10)s.state=6;
     if(diagnostic_startup_failed.load()&&!s.foc_ready)s.state=7;
     snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
     diagnostic::freshness(s,millis());

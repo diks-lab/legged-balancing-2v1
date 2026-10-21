@@ -35,3 +35,14 @@ Arduino core 3.0.3のParsing.cppを版・LF正規化SHAで照合し、ビルド�
 ELFで置換parserのリンクも検査する。撤去条件は上流が有限な全体期限・エラー終了・
 Idleへの譲渡を提供し、同等の故障注入試験と実機比較が通ること。
 詳細・制限は[HTTP要求解析のWDT対策](http-request-watchdog.md)。
+
+## MPU6050_tockn既存トランザクション観測
+
+対象1.5.2／commit `217f66ba47416ccfc6e4f5048035ac2ee3096fe6` をlib_depsで固定。
+`scripts/patch_imu_observation.py` はupdateと校正の既存endTransmission／requestFrom(14／6)の戻り値だけを
+固定長callbackへ渡す。追加I2C・Serial・動的確保・待機・計算／フィルター変更なし。
+上流に読取り成否の公開APIがないため、測定の鮮度と自動開始可否の判定を補う。
+LF正規化の全文SHA（原本81787433…、適用後f32752bf…）、版・アンカーを照合し、対象不一致は停止。
+LF／CRLF・再適用を試験し、実ELFのupdate／校正内callをビルド後に検証する。
+撤去条件は、上流の公開APIで同じ既存読取りの成否・取得時点を検証でき、同じ障害回帰を満たすこと。
+[取得・試験・自動開始との関係](instruments-and-boot.md)を参照。
