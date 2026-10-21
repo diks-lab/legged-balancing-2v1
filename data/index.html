@@ -5,9 +5,9 @@
 <p>操作の中心はPS4です。この画面は診断専用です。機体に履歴は保存されず、未接続中・通信欠落中の過去データは復元できません。</p>
 <p id="connection" role="status">HTML解析中…</p>
 <section class="always" aria-label="最新状態"><p id="health">停止理由・異常状態：未取得</p><p id="loss">欠落：未取得</p></section>
-<nav><button id="start">配信開始／購読適用</button><button id="stop">配信停止</button><button id="pause">表示一時停止</button><button id="clear">ブラウザー履歴消去</button><button id="save">直近60秒をCSV保存</button><button id="reconnect">再接続</button></nav>
-<p id="subscription" role="status">購読未設定</p>
-<details open><summary>観測項目（チェック後「配信開始／購読適用」）</summary><div id="fields"></div></details>
+<nav><button id="start">配信開始</button><button id="stop">配信停止</button><button id="pause">表示一時停止</button><button id="clear">ブラウザー履歴消去</button><button id="save">直近60秒をCSV保存</button><button id="reconnect">再接続</button></nav>
+<p id="subscription" role="status">配信未設定</p>
+<details open><summary>観測項目（チェック後「配信開始」）</summary><div id="fields"></div></details>
 <p>20 Hz・1クライアント。履歴はブラウザー内の直近60秒・最大1200点。表示一時停止中も受信・記録・状態表示を継続します。配信停止は走行停止ではありません。</p>
 <div id="graphs"></div>
 <details><summary>単位・符号・取得時点</summary><p>横軸はESP32起動後の取得時刻 sample_ms（全グラフ共通）。角度はMPU Y軸の既存値、誤差＝姿勢角−基準角。角速度は既存GyroY（deg/s）。左右位置・速度はSimpleFOC shaftの生符号、平均速度は既存の左右方向係数を適用した和÷2（rad/s）です。</p>

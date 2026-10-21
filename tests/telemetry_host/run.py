@@ -20,14 +20,16 @@ extern "C" void* __wrap_realloc(void*p,size_t n){assert(!forbid);return __real_r
 void*operator new(size_t n){assert(!forbid);if(auto*p=malloc(n))return p;throw std::bad_alloc();}
 void operator delete(void*p)noexcept{free(p);}void operator delete(void*p,size_t)noexcept{free(p);}
 struct IO{
+ diagnostic::WsObservation events[64]{};unsigned eventCount=0;unsigned snapshotCost=0,clockStep=0;
+ void observe(const diagnostic::WsObservation&r){assert(eventCount<64);events[eventCount++]=r;}
  uint32_t tick=0;bool open=true;unsigned closes=0,reads=0,writes=0;
  char input[16384]{},output[200000]{};size_t in=0,pos=0,out=0;int limit=256,readLimit=128,error=0,readError=0;
- uint32_t now(){return tick;}bool connected(){return open;}
+ uint32_t now(){auto n=tick;tick+=clockStep;return n;}bool connected(){return open;}
  void close(){if(open)++closes;open=false;}
  int read(char*p,size_t n){++reads;if(readError)return readError;if(pos==in)return -EAGAIN;size_t amount=std::min({n,in-pos,size_t(readLimit)});memcpy(p,input+pos,amount);pos+=amount;return amount;}
  int write(const char*p,size_t n){++writes;if(error)return error;size_t amount=std::min(n,size_t(limit));assert(out+amount<sizeof(output));memcpy(output+out,p,amount);out+=amount;return amount;}
  bool acceptKey(const char*key,char*out){if(strcmp(key,"dGhlIHNhbXBsZSBub25jZQ=="))return false;strcpy(out,"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");return true;}
- void snapshot(diagnostic::Snapshot&s){s.sample_ms=tick;s.source_seq=tick/50;s.values[2]=-2.42;s.values[6]=.15;s.values[7]=.14;s.values[24]=12345;}
+ void snapshot(diagnostic::Snapshot&s){tick+=snapshotCost;s.sample_ms=tick;s.source_seq=tick/50;s.values[2]=-2.42;s.values[6]=.15;s.values[7]=.14;s.values[24]=12345;}
  void raw(const char*p,size_t n){assert(in+n<sizeof(input));memcpy(input+in,p,n);in+=n;}
  void message(const std::string&msg,unsigned op=1,bool mask=true){size_t n=msg.size();unsigned char h[8]={uint8_t(0x80|op),uint8_t((mask?128:0)|(n<126?n:126)),0,0,1,2,3,4};size_t at=2;if(n>=126){h[2]=n>>8;h[3]=n;at=4;}if(mask){h[at]=1;h[at+1]=2;h[at+2]=3;h[at+3]=4;}raw((char*)h,at+(mask?4:0));for(size_t i=0;i<n;++i){char c=msg[i]^(mask?char(i%4+1):0);raw(&c,1);}}
 };
@@ -47,6 +49,19 @@ int main(){
   i.message("{\"type\":\"subscribe\",\"request_id\":2,\"period_ms\":50,\"fields\":[\"gyro_deg_s\"]}");poll(w,i,30);assert(w.generation()==2&&w.mask()==(1u<<3));
   i.message("{\"type\":\"stop\",\"request_id\":3}");poll(w,i,30);assert(w.generation()==3&&w.mask()==0);w.disconnect(i);assert(i.closes==1);i.open=true;i.in=i.pos=i.out=0;handshake(w,i);assert(w.mask()==0&&w.generation()==3);i.message(sub);poll(w,i,25);assert(w.generation()==4&&w.mask()==((1u<<2)|(1u<<6)));w.disconnect(i);assert(i.closes==2);
  }
+ // Reproduce real time advancing during snapshot/JSON and timer reads.
+ for(unsigned cost:{1u,5u})for(unsigned step:{0u,1u}){
+  IO i;WS w;handshake(w,i);i.snapshotCost=cost;i.clockStep=step;i.message(sub);poll(w,i,100);
+  assert(w.active());unsigned prepared=0,written=0,sent=0;
+  for(unsigned k=0;k<i.eventCount;++k){auto&e=i.events[k];
+   if(e.event==diagnostic::WsEvent::FirstPrepared)++prepared;
+   if(e.event==diagnostic::WsEvent::FirstWrite)++written;
+   if(e.event==diagnostic::WsEvent::FirstSent){++sent;assert(e.sent==e.total&&e.seq>0);}
+   assert(e.event!=diagnostic::WsEvent::Closed);
+  }
+  assert(prepared==1&&written==1&&sent==1);
+  size_t offset=0;while(offset<i.out){auto text=payload(i,offset);if(text.find("\"type\":\"sample\"")!=text.npos){puts(text.c_str());break;}}
+ }
  // All fields fit the single frame even with worst finite float text and escaped stop reason.
  {diagnostic::Snapshot all;for(auto&v:all.values)v=3.4028234e38f;memset(all.stop_reason,'\\',63);all.stop_reason[63]=0;
   char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,(1u<<26)-1,UINT32_MAX));
@@ -55,6 +70,7 @@ int main(){
   diagnostic::Subscription accepted;assert(request.size()<=1000&&diagnostic::SubscriptionParser(request.c_str()).parse(accepted)&&accepted.mask==(1u<<26)-1);
   IO i;WS w;handshake(w,i);i.message(request);poll(w,i,80);assert(w.mask()==(1u<<26)-1&&w.generation()==1);
  }
+ {IO i;WS w;i.tick=UINT32_MAX-100;handshake(w,i);i.snapshotCost=5;i.message(sub);poll(w,i,100);assert(w.active());}
  // Deterministic malformed bytes exercise bounded JSON scanning under sanitizers.
  {uint32_t seed=1;char input[1001];for(unsigned k=0;k<10000;++k){size_t n=k%1000;for(size_t i=0;i<n;++i){seed=seed*1664525+1013904223;input[i]=char(1+(seed%127));}input[n]=0;diagnostic::Subscription unused;diagnostic::SubscriptionParser(input).parse(unused);}}
  // Partial sends + temporary EAGAIN keep frame offsets; no heap or output queue growth.
@@ -73,9 +89,13 @@ int main(){
 with tempfile.TemporaryDirectory() as td:
  p=Path(td);(p/'test.cpp').write_text(code)
  flags=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('TELEMETRY_SANITIZERS') else []
- subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',str(p/'test.cpp'),'-o',str(p/'test'),'-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc']+flags,check=True)
- result=subprocess.run([str(p/'test')],capture_output=True,text=True,check=True)
+ subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-I'+os.environ.get('TELEMETRY_HEADER_DIR','include'),'-Iinclude',str(p/'test.cpp'),'-o',str(p/'test'),'-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc']+flags,check=True)
+ result=subprocess.run([str(p/'test')],capture_output=True,text=True)
+ if result.returncode:print(result.stderr);result.check_returncode()
+ samples=[]
  for line in result.stdout.splitlines():
   if line.startswith('{'):
-   sample=json.loads(line);assert set(sample['values'])=={'angle_error_deg','right_velocity_rad_s'}
+   sample=json.loads(line);assert set(sample['values'])=={'angle_error_deg','right_velocity_rad_s'};assert sample['age_ms']<1000;samples.append(sample)
   else:print(line)
+
+ if os.environ.get("TELEMETRY_SAMPLE_OUTPUT"):Path(os.environ["TELEMETRY_SAMPLE_OUTPUT"]).write_text(json.dumps(samples))

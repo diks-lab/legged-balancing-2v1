@@ -224,7 +224,7 @@ int main(){
       assert(String(startup_phase)==(failed==1?"I2C0_RESOURCES_FAILED":"I2C1_RESOURCES_FAILED"));
       for(int i=0;i<3;++i) { tick(); }
       assert(foc_calls==0);
-    }else assert(foc_calls==1 && help_count==1);
+    }else assert(foc_calls==1 && help_count==int(SERIAL_DIAGNOSTICS));
   }
   reset();
   // A 6 KiB largest heap block is smaller than the reserved 8 KiB stack.
@@ -256,7 +256,7 @@ int main(){
   tick();assert(Serial.text==timeout_log); // No repeated timeout spam.
   // Recovery after a startup timeout can complete startup exactly once.
   connect();tick();
-  assert(help_count==1 && startup_menu_printed && wifi_log_server_started && handled>0);
+  assert(help_count==int(SERIAL_DIAGNOSTICS) && startup_menu_printed && wifi_log_server_started && handled>0);
   assert(foc_calls==1 && startup_foc_ready && test_system_ready);
   assert(Serial.text.find("STARTUP memory result=READY heap_free=20000 internal_free=18000 internal_largest=6000")!=String::npos);
   const auto done=Serial.text.find("接続完了");
@@ -265,10 +265,10 @@ int main(){
   const auto listener=Serial.text.find("WiFi trace HTTP server started.");
   const auto menu=Serial.text.find("NORMAL OPERATION MENU");
   assert(done!=String::npos && ip!=String::npos && url!=String::npos);
-  assert(listener!=String::npos && menu!=String::npos);
-  assert(done<ip && ip<url && url<listener && listener<menu);
+  assert(listener!=String::npos);assert((menu!=String::npos)==bool(SERIAL_DIAGNOSTICS));
+  assert(done<ip && ip<url && url<listener);if(SERIAL_DIAGNOSTICS)assert(listener<menu);
   for(int i=0;i<4;++i)tick();
-  assert(help_count==1 && listen_attempts==1);
+  assert(help_count==int(SERIAL_DIAGNOSTICS) && listen_attempts==1);
   // A continuing file response gates only new requests, not Wi-Fi monitoring.
   http_response_pending=true;const int before_pending=handled;tick();
   assert(handled==before_pending && startup_web_ready.load());
@@ -282,17 +282,17 @@ int main(){
   foc_alignment_observer.measuring=false;tick();
   assert(Serial.text.find("http://192.168.1.42/")!=String::npos && !foc_deferred_ip_announcement);
   // IP change and reconnect announce the numeric URL again, without another menu.
-  connect(0xc0a8012b);tick();assert(help_count==1);
+  connect(0xc0a8012b);tick();assert(help_count==int(SERIAL_DIAGNOSTICS));
   assert(Serial.text.find("http://192.168.1.43/")!=String::npos);
   WiFi.connection_status=0;WiFi.ip.value=0;tick();
-  assert(!wifi_log_server_started && !wifi_connection_ready && help_count==1);
-  connect();tick();assert(wifi_log_server_started && help_count==1);
+  assert(!wifi_log_server_started && !wifi_connection_ready && help_count==int(SERIAL_DIAGNOSTICS));
+  connect();tick();assert(wifi_log_server_started && help_count==int(SERIAL_DIAGNOSTICS));
   WiFi.ip.value=0;tick();
-  assert(!wifi_log_server_started && help_count==1);
+  assert(!wifi_log_server_started && help_count==int(SERIAL_DIAGNOSTICS));
   assert(Serial.text.find("stage=IP_LOST")!=String::npos);
   for(int i=0;i<5;++i)tick();
   assert(Serial.text.find("stage=IP_TIMEOUT")!=String::npos);
-  connect();tick();assert(wifi_log_server_started && help_count==1);
+  connect();tick();assert(wifi_log_server_started && help_count==int(SERIAL_DIAGNOSTICS));
   // A cached IP without link association is not readiness either.
   reset();setupWifiLogServer();WiFi.ip.value=0xc0a8012a;
   for(int i=0;i<5;++i)tick();
@@ -306,13 +306,13 @@ int main(){
   assert(help_count==0 && listen_attempts==0 && foc_calls==0 && !wheel_outputs_enabled);
   assert(Serial.text.find("stage=IP_TIMEOUT")!=String::npos);
   assert(Serial.text.find("http://0.0.0.0/")==String::npos);
-  connect();tick();assert(help_count==1);
+  connect();tick();assert(help_count==int(SERIAL_DIAGNOSTICS));
   // A failed listen must not set the started flag; retries register routes once.
   reset();setupWifiLogServer();connect();fail_listen=true;tick();
   assert(help_count==0 && !wifi_log_server_started && !wifi_log_server.listening() && foc_calls==0);
   assert(Serial.text.find("stage=HTTP_LISTEN")!=String::npos);
   const auto routes=route_count;tick();assert(listen_attempts==2 && route_count==routes);
-  fail_listen=false;tick();assert(help_count==1 && wifi_log_server_started);
+  fail_listen=false;tick();assert(help_count==int(SERIAL_DIAGNOSTICS) && wifi_log_server_started);
   assert(route_count==routes);
   // Missing filesystem, failed queues/task or failed FOC cannot produce a menu.
   reset();fail_mount=true;setupWifiLogServer();connect();tick();
@@ -353,7 +353,7 @@ with tempfile.TemporaryDirectory(prefix='http-startup-') as directory:
     cpp.write_text(code)
     for detailed in [0,1]:
         subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                        '-DHTTP_MEMORY_STAGE_DIAGNOSTICS='+str(detailed),str(cpp), '-o', str(binary)], check=True)
+                        '-DSERIAL_DIAGNOSTICS='+str(detailed),'-DHTTP_MEMORY_STAGE_DIAGNOSTICS='+str(detailed),str(cpp), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
 
 setup = function('setup')

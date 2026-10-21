@@ -19,6 +19,7 @@
 #include "BoundedHttpResponse.h"
 #include "DiagnosticTelemetry.h"
 #include "DiagnosticWebSocket.h"
+#include "SerialDiagnostics.h"
 #include <fcntl.h>
 #include <unistd.h>
 #include <mbedtls/sha1.h>
@@ -1465,7 +1466,7 @@ bool initializeWheelFoc(BLDCMotor& motor) {
   const bool accepted=raw_called && static_cast<bool>(raw) && !expired && motor.pp_check_result && sensors_ok;
   foc_alignment_observer.end(raw,start,stop,expired,motor.pp_check_result,
       sensors_ok,accepted,micros());
-  printFocAlignmentObservation(slot);
+  if(SERIAL_DIAGNOSTICS)printFocAlignmentObservation(slot);
   return accepted;
 }
 
@@ -4310,10 +4311,22 @@ void serviceReleaseMemoryObservation() {
   if(offset==size && now-last_line>=100){
     ReleaseMemoryRecord r{};uint32_t lost=0;
     portENTER_CRITICAL(&release_memory_lock);
-    const bool have=(now-last_summary<5000) && release_memory_observer.pop(r);lost=release_memory_observer.dropped;
+    bool have=false;
+    for(unsigned scan=0;scan<8 && release_memory_observer.pop(r);++scan){
+      if(SERIAL_DIAGNOSTICS || (r.event&255)==MemWsLife || (r.event&255)==MemWsTx){have=true;break;}
+    }
+    lost=release_memory_observer.dropped;
     portEXIT_CRITICAL(&release_memory_lock);
     int n=0;
-    if(have && (r.event&255)==MemHttpTxEnd){
+    if(have && (r.event&255)==MemWsLife){
+      n=snprintf(line,sizeof(line),"WS event=%s ms=%lu sid=%lu seq=%lu reason=%s elapsed_ms=%lu lost=%lu\n",
+          diagnostic::wsEventName(r.cid),(unsigned long)r.ms,(unsigned long)r.free,(unsigned long)r.largest,
+          diagnostic::wsReasonName(r.arg&255),(unsigned long)(r.arg>>8),(unsigned long)lost);
+    }else if(have && (r.event&255)==MemWsTx){
+      n=snprintf(line,sizeof(line),"WS_TX event=%s ms=%lu sent=%lu total=%lu calls=%u retry=%u last_errno=%u lost=%lu\n",
+          diagnostic::wsEventName(r.cid),(unsigned long)r.ms,(unsigned long)r.free,(unsigned long)r.largest,
+          unsigned((r.arg>>16)&255),unsigned(r.arg>>24),unsigned(r.arg&65535),(unsigned long)lost);
+    }else if(SERIAL_DIAGNOSTICS && have && (r.event&255)==MemHttpTxEnd){
       n=snprintf(line,sizeof(line),"HTTP_END ms=%lu route=%u reason=%u phase=%u elapsed=%lu calls=%u retry=%u errno=%lu lost=%lu\n",
           (unsigned long)r.ms,unsigned(r.cid),unsigned(r.arg&255),unsigned((r.arg>>8)&255),
           (unsigned long)r.free,unsigned((r.arg>>16)&255),unsigned(r.arg>>24),(unsigned long)r.largest,(unsigned long)lost);
@@ -4342,7 +4355,7 @@ void serviceReleaseMemoryObservation() {
       n=snprintf(line,sizeof(line),"MEM event=%u http_active=%u ms=%lu cid=%u arg=%lu free=%lu largest=%lu lost=%lu\n",
           unsigned(r.event&255),unsigned(r.event>>8),(unsigned long)r.ms,unsigned(r.cid),(unsigned long)r.arg,
           (unsigned long)r.free,(unsigned long)r.largest,(unsigned long)lost);
-    }else if(now-last_summary>=5000){
+    }else if(SERIAL_DIAGNOSTICS && now-last_summary>=5000){
       uint32_t total,active,failed,f,l,min;
       portENTER_CRITICAL(&release_memory_lock);
       total=release_memory_observer.requests;active=release_memory_observer.active;
@@ -4508,7 +4521,7 @@ void maybePrintStartupMenu() {
   startup_menu_printed = true;
   Serial.println("STARTUP: state=READY foc=READY littlefs=READY wifi_ip=READY http=LISTENING");
   printStartupMemoryResult("READY");
-  printHelp(); // Static help text only; no actuator/controller state is read.
+  if(SERIAL_DIAGNOSTICS)printHelp(); // Static help text only; no actuator/controller state is read.
 }
 
 void setupWifiLogServer() {
@@ -4955,6 +4968,7 @@ float ps4DriveSpeedRequestFromLeftStickY(int stick_y) {
 }
 
 void printPs4DriveRequestDiagnostic(const Ps4InputState& input) {
+  if(!SERIAL_DIAGNOSTICS)return;
   ps4_drive_speed_request =
       ps4DriveSpeedRequestFromLeftStickY(input.left_stick_y);
   Serial.println("PS4 DRIVE REQUEST:");
@@ -4963,6 +4977,7 @@ void printPs4DriveRequestDiagnostic(const Ps4InputState& input) {
 }
 
 void printPs4InputDiagnostic(const Ps4InputState& input) {
+  if(!SERIAL_DIAGNOSTICS)return;
   Serial.printf(
       "PS4 INPUT: LX=%d LY=%d RX=%d RY=%d L2=%u R2=%u "
       "Cross=%u Circle=%u Square=%u Triangle=%u "
@@ -4994,6 +5009,7 @@ void printPs4DriveStopDiagnostic(const Ps4InputState& input,
                                  bool stick_in_deadzone,
                                  bool stop_complete,
                                  uint32_t now_ms) {
+  if(!SERIAL_DIAGNOSTICS)return;
   if (now_ms - ps4_drive_stop_diagnostic_last_ms <
       kPs4DriveStopDiagnosticIntervalMs) {
     return;
@@ -5065,6 +5081,7 @@ void printPs4DriveStopDiagnostic(const Ps4InputState& input,
 }
 
 void printPs4DriveStopSummary(uint32_t now_ms) {
+  if(!SERIAL_DIAGNOSTICS){Serial.println("PS4: normal drive stop complete; balance remains active.");return;}
   Serial.println("PS4 DRIVE STOP SUMMARY:");
   Serial.printf("elapsed_ms=%lu\n",
                 static_cast<unsigned long>(now_ms - ps4_drive_stop_start_ms));
@@ -5083,9 +5100,11 @@ void setPs4DriveState(Ps4DriveState next_state) {
     return;
   }
 
-  Serial.println("PS4 DRIVE STATE:");
-  Serial.printf("%s -> %s\n", ps4DriveStateName(ps4_drive_state),
-                ps4DriveStateName(next_state));
+  if(SERIAL_DIAGNOSTICS){
+    Serial.println("PS4 DRIVE STATE:");
+    Serial.printf("%s -> %s\n", ps4DriveStateName(ps4_drive_state),
+                  ps4DriveStateName(next_state));
+  }
   ps4_drive_state = next_state;
 }
 
@@ -5102,6 +5121,7 @@ void beginPs4DriveStopping(uint32_t now_ms) {
 }
 
 void servicePs4DiagnosticSerial() {
+  if(!SERIAL_DIAGNOSTICS)return;
   // With HTTP available, its task owns the UART staging buffer. If task/queue
   // creation failed, this fallback runs only while startup keeps wheels gated.
   if (http_task_ready.load()) return;
@@ -5120,6 +5140,7 @@ void servicePs4DiagnosticSerial() {
 }
 
 void serviceHttpPs4DiagnosticSerial() {
+  if(!SERIAL_DIAGNOSTICS)return;
   if(foc_alignment_observer.active() || release_memory_serial_active)return;
   const uint32_t now = millis();
   if (ps4_diagnostic_serial_offset == ps4_diagnostic_serial_size &&
@@ -6073,6 +6094,15 @@ void observeFocLibraryDisable(uint32_t now) {
 namespace {
 struct DiagnosticSocketIO {
   int fd=-1;
+  void observe(const diagnostic::WsObservation&r){
+    const auto e=r.event;
+    const ReleaseMemoryRecord life{r.ms,r.generation,r.seq,MemWsLife,uint16_t(e),uint32_t(r.reason)|((r.elapsed>0xffffff?0xffffff:r.elapsed)<<8)};
+    const ReleaseMemoryRecord tx{r.ms,r.sent,r.total,MemWsTx,uint16_t(e),uint32_t(uint16_t(r.error))|(uint32_t(r.calls)<<16)|(uint32_t(r.retries)<<24)};
+    portENTER_CRITICAL(&release_memory_lock);
+    if(e!=diagnostic::WsEvent::FirstWrite&&e!=diagnostic::WsEvent::FirstSent)release_memory_observer.push(life);
+    if(e==diagnostic::WsEvent::FirstPrepared||e==diagnostic::WsEvent::FirstWrite||e==diagnostic::WsEvent::FirstSent||e==diagnostic::WsEvent::Closed)release_memory_observer.push(tx);
+    portEXIT_CRITICAL(&release_memory_lock);
+  }
   uint32_t now(){return millis();}
   bool connected(){return fd>=0;}
   int read(char* p,size_t n){int r=recv(fd,p,n,MSG_DONTWAIT);return r<0?-errno:r;}
@@ -6099,7 +6129,7 @@ bool diagnostic_boot_ready=false;
 void serviceDiagnosticWebSocket(){
   auto& io=diagnostic_socket_io;
   if(!wifi_connection_ready||!wifi_log_server_started){
-    diagnostic_websocket.disconnect(io);
+    diagnostic_websocket.disconnect(io,diagnostic::WsReason::WiFiLost);
     if(diagnostic_listener>=0){::close(diagnostic_listener);diagnostic_listener=-1;}
     return;
   }

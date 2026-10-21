@@ -21,7 +21,7 @@ if(typeof module!=='undefined')module.exports={DiagnosticHistory,SIGNALS,DEFAULT
 if(typeof window!=='undefined')window.startLogger=function(){
 const el=id=>document.getElementById(id),history=new DiagnosticHistory();
 let socket=null,request=0,pending=0,generation=null,boot=null,lastSeq=null,lastDrop=0,lost=0,paused=false,lastMessage=0;
-let accepted=[],charts=[],lastDraw=0;
+let accepted=[],charts=[],lastDraw=0,first=null;
 const selected=()=>Array.from(el('fields').querySelectorAll('input:checked'),n=>n.value);
 for(const [key,label,unit] of SIGNALS){const labelNode=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=key;input.checked=DEFAULTS.includes(key);labelNode.append(input,document.createTextNode(`${label} [${unit}]`));el('fields').appendChild(labelNode);}
 function graphs(){el('graphs').replaceChildren();charts=[];
@@ -37,13 +37,13 @@ signals.forEach(([key],i)=>{c.strokeStyle=`hsl(${i*67%360} 70% 35%)`;c.beginPath
 for(const row of history.rows){const v=row.values[key],x=65+(row.time-start)/60000*925,y=155-(v-lo)/(hi-lo)*130;if(!Number.isFinite(v)){pen=false;continue;}if(previous!==null&&row.time-previous>150)pen=false;if(pen)c.lineTo(x,y);else c.moveTo(x,y);pen=true;previous=row.time;}c.stroke();});}
 }
 function subscribe(stop=false){if(!socket||socket.readyState!==1){el('connection').textContent='未接続：再接続してください';return;}const fields=selected();if(!stop&&!fields.length){el('subscription').textContent='項目を1つ以上選択してください';return;}
-pending=++request;socket.send(JSON.stringify(stop?{type:'stop',request_id:pending}:{type:'subscribe',request_id:pending,period_ms:50,fields}));el('subscription').textContent='購読応答待ち…';}
+pending=++request;socket.send(JSON.stringify(stop?{type:'stop',request_id:pending}:{type:'subscribe',request_id:pending,period_ms:50,fields}));el('subscription').textContent='配信応答待ち…';}
 function connect(){if(socket&&socket.readyState<2)return;
-el('connection').textContent='WebSocket接続中…';generation=null;
+el('connection').textContent='WebSocket接続中…';generation=first=null;
 const ws=new WebSocket(`ws://${location.hostname}:81/diagnostics`);socket=ws;
-ws.onopen=()=>{if(socket!==ws)return;lastMessage=Date.now();el('connection').textContent='接続：購読設定中';subscribe();};
+ws.onopen=()=>{if(socket!==ws)return;lastMessage=Date.now();el('connection').textContent='接続：配信設定中';subscribe();};
 ws.onmessage=event=>{if(socket!==ws)return;let s;try{s=JSON.parse(event.data);}catch{el('connection').textContent='不正なJSONを受信';ws.close();return;}lastMessage=Date.now();
-if(s.type==='error'){el('subscription').textContent=`購読拒否: ${s.reason}`;return;}
+if(s.type==='error'){el('subscription').textContent=`配信設定拒否: ${s.reason}`;return;}
 if(s.type==='subscribed'){if(s.request_id!==pending)return;generation=s.subscription_id;if(s.streaming)accepted=s.fields;el('subscription').textContent=`世代 ${generation} / ${s.period_ms} ms / ${s.streaming?'配信中':'配信停止'} / ${accepted.join(', ')}`;if(s.streaming){graphs();draw();}return;}
 if(s.type!=='sample'&&s.type!=='status')return;
 if(boot!==s.boot_id){if(boot!==null)history.clear();boot=s.boot_id;lastSeq=null;lastDrop=0;lost=0;}
@@ -53,15 +53,15 @@ el('connection').textContent=`接続 / boot ${boot} / 取得 ${s.sample_ms} ms /
 el('health').textContent=`最新停止: ${s.stop_reason} @ ${s.stop_ms} ms / 異常bit: ${s.faults} / ${s.running?'動作中':'停止中'} / 出力遮断:${s.disabled} / FOC:${s.foc_ready} / PS4:${s.ps4}`;
 el('loss').textContent=`欠落推定: ${lost} / 機体の送信破棄累計: ${s.dropped} / seq: ${s.seq}`;
 if(s.subscription_id!==generation||!Object.keys(s.values).length)return;
-history.push(s);if(!paused&&Date.now()-lastDraw>=100){draw();lastDraw=Date.now();}
+history.push(s);if(!paused&&Date.now()-lastDraw>=100){draw();lastDraw=Date.now();}if(first!==generation){first=generation;console.info('WS_FIRST_SAMPLE',generation,s.seq,s.sample_ms);}
 };
 ws.onerror=()=>{if(socket===ws)el('connection').textContent='WebSocket通信失敗（自動再接続なし）';};
-ws.onclose=event=>{if(socket===ws)el('connection').textContent=`切断 code=${event.code}（過去表示を保持、再接続は手動）`;};
+ws.onclose=event=>{if(socket===ws)el('connection').textContent=`切断 code=${event.code}（再接続は手動）`;};
 }
 el('start').onclick=()=>subscribe();el('stop').onclick=()=>subscribe(true);el('reconnect').onclick=connect;
 el('pause').onclick=()=>{paused=!paused;el('pause').textContent=paused?'表示再開':'表示一時停止';if(!paused)draw();};
 el('clear').onclick=()=>{history.clear();draw();};
 el('save').onclick=()=>{const url=URL.createObjectURL(new Blob([history.csv()],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='esp32-browser.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-setInterval(()=>{if(socket&&socket.readyState===1&&Date.now()-lastMessage>6000){el('connection').textContent='診断データが6秒以上更新されません。再接続してください';socket.close();}},1000);
+setInterval(()=>{if(socket&&socket.readyState===1&&Date.now()-lastMessage>6000){el('connection').textContent='更新停止（6秒）。再接続してください';socket.close();}},1000);
 connect();
 };

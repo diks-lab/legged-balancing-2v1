@@ -9,6 +9,8 @@ def fn(name):
  return source[m.start():i]
 prefix=r'''
 #include "ReleaseMemoryObservation.h"
+#include "DiagnosticWebSocket.h"
+#include "SerialDiagnostics.h"
 #include "AllocationResponseObserver.h"
 int allocationBegins=0,allocationEnds=0;
 void beginAllocationResponse(){++allocationBegins;}
@@ -113,5 +115,25 @@ int main(){
 with tempfile.TemporaryDirectory() as td:
  p=Path(td);cpp=p/'test.cpp';cpp.write_text(code);exe=p/'test'
  flags=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('MEMORY_OBSERVATION_SANITIZERS') else []
- subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude','-pthread',str(cpp),'-o',str(exe)]+flags,check=True)
+ subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude','-pthread','-DSERIAL_DIAGNOSTICS=1',str(cpp),'-o',str(exe)]+flags,check=True)
  subprocess.run([str(exe)],check=True)
+
+# Normal configuration discards detail records but keeps WS lifecycle/first sample.
+quiet=code[:code.index('int main(){')]+r'''
+int main(){
+ Serial.room=128;
+ observeReleaseMemory(MemHttpTxEnd,1,0);observeReleaseMemory(MemPs4Ready,0,0);
+ release_memory_observer.push({0,1,1,MemWsLife,uint16_t(diagnostic::WsEvent::FirstPrepared),0});
+ release_memory_observer.push({0,0,600,MemWsTx,uint16_t(diagnostic::WsEvent::FirstPrepared),0});
+ for(int i=0;i<2000;++i){clock_ms+=10;serviceReleaseMemoryObservation();}
+ assert(strstr(Serial.output,"WS event=FIRST_PREPARED"));
+ assert(strstr(Serial.output,"WS_TX event=FIRST_PREPARED"));
+ assert(!strstr(Serial.output,"MEM HTTP")&&!strstr(Serial.output,"HTTP_END")&&!strstr(Serial.output,"MEM event="));
+ assert(release_memory_observer.count==0);
+ puts("PASS: normal serial suppresses periodic MEM/HTTP details, drains fixed ring, retains WS first-sample events");
+}
+'''
+with tempfile.TemporaryDirectory() as td:
+ p=Path(td);(p/'q.cpp').write_text(quiet)
+ subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude','-pthread','-DSERIAL_DIAGNOSTICS=0',str(p/'q.cpp'),'-o',str(p/'q')],check=True)
+ subprocess.run([str(p/'q')],check=True)

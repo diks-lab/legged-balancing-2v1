@@ -205,7 +205,7 @@ with tempfile.TemporaryDirectory(prefix='foc-observe-') as directory:
     code=prelude+'\n'+function(app,'gateWheelOutputsOffFrom')+'\n'+baseline+'\n'+'\n'.join(function(patched,n) for n in ['FOCMotor::initFOC','FOCMotor::alignSensor'])
     code+='\n'+function(app,'printFocAlignmentObservation')+'\n'+function(app,'initializeWheelFoc')+checks
     cpp.write_bytes(code.encode('utf-8'))
-    subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-pthread','-Iinclude',str(cpp),'-o',str(binary)],check=True)
+    subprocess.run(['c++','-std=c++17','-DSERIAL_DIAGNOSTICS=1','-Wall','-Wextra','-Werror','-pthread','-Iinclude',str(cpp),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
 # Hooks only consume cached getters or local values. No extra sensor update or wait.
 for n in ['FOCMotor::initFOC','FOCMotor::alignSensor']:

@@ -31,6 +31,7 @@ prelude = r'''
 #include "BoundedHttpResponse.h"
 #include "DiagnosticTelemetry.h"
 #include "DiagnosticWebSocket.h"
+#define SERIAL_DIAGNOSTICS 1
 #include "ContinuingHttpFile.h"
 #include "ReleaseMemoryObservation.h"
 #include "AllocationResponseObserver.h"
@@ -240,6 +241,7 @@ void beginPs4DriveStopping(uint32_t){ps4_drive_state=Ps4DriveState::Stopping;}
 '''
 checks = r'''
 struct ParkedWsIO {
+ void observe(const diagnostic::WsObservation&){}
  bool open=true;unsigned sends=0;std::string input;
  uint32_t now(){return nowMs;}bool connected(){return open;}void close(){open=false;}
  int read(char*p,size_t n){if(input.empty())return -EAGAIN;size_t k=std::min(n,input.size());memcpy(p,input.data(),k);input.erase(0,k);return k;}
@@ -601,10 +603,10 @@ int main(){
   ps4_diagnostic_serial_last_ms=0;nowMs+=1000;Serial.output.clear();Serial.room=0;
   ps4_diagnostics.dirty=true;servicePs4DiagnosticSerial();assert(Serial.output.empty());
   const auto staged=ps4_diagnostic_serial_size;
-  Serial.room=5;servicePs4DiagnosticSerial();assert(Serial.output.size()==5);
+  Serial.room=5;servicePs4DiagnosticSerial();assert(Serial.output.size()==(SERIAL_DIAGNOSTICS?5u:0u));
   Serial.room=128;servicePs4DiagnosticSerial();assert(Serial.output.size()<=53);
   for(int i=0;i<30;++i)servicePs4DiagnosticSerial();
-  assert(Serial.output.size()==staged && Serial.output.find("event=DISCONNECTED")!=String::npos);
+  assert(Serial.output.size()==staged);assert((Serial.output.find("event=DISCONNECTED")!=String::npos)==bool(SERIAL_DIAGNOSTICS));
   ps4_diagnostics.dirty=true;const auto count=Serial.output.size();
   servicePs4DiagnosticSerial();assert(Serial.output.size()==count); // Still inside 500 ms limit.
   Serial.room=128;
@@ -614,9 +616,9 @@ int main(){
   const auto before_io=Serial.output.size();servicePs4DiagnosticSerial();
   assert(Serial.output.size()==before_io);
   captureHttpStatus();serviceHttpPs4DiagnosticSerial();
-  assert(Serial.output.size()>before_io && Serial.output.size()<=before_io+48);
+  assert(Serial.output.size()<=before_io+48);assert((Serial.output.size()>before_io)==bool(SERIAL_DIAGNOSTICS));
   for(int i=0;i<30;++i)serviceHttpPs4DiagnosticSerial();
-  assert(Serial.output.find("PS4 init=OK connected=0")!=String::npos);
+  assert((Serial.output.find("PS4 init=OK connected=0")!=String::npos)==bool(SERIAL_DIAGNOSTICS));
   http_task_ready.store(false);
 
   // Longest named button sets and decision data must fit in the Web status copy.
@@ -755,7 +757,7 @@ int main(){
   ps4_diagnostic_serial_offset=ps4_diagnostic_serial_size=0;
   ps4_diagnostic_serial_last_ms=nowMs-1000;Serial.room=128;
   captureHttpStatus();const auto diagnosticBefore=Serial.output.size();
-  serviceHttpPs4DiagnosticSerial();assert(Serial.output.size()>diagnosticBefore);
+  serviceHttpPs4DiagnosticSerial();assert((Serial.output.size()>diagnosticBefore)==bool(SERIAL_DIAGNOSTICS));
   ++nowMs;serviceHttpFileResponse();assert(httpSendCalls==sendsBeforeBackoff&&http_response_pending);
   while(http_response_pending){++nowMs;serviceHttpFileResponse();}
 
@@ -793,6 +795,7 @@ with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
               .replace('free(http_trace_snapshot)','csvFree(http_trace_snapshot)')
               .replace('memcpy(http_trace_snapshot->','copyCsvSnapshot(http_trace_snapshot->') for n in names]
     prototypes = '\n'.join(body[:body.index('{')]+';' for body in bodies)
+    prelude=prelude.replace('#define SERIAL_DIAGNOSTICS 1','#define SERIAL_DIAGNOSTICS '+os.environ.get('DRIVE_SERIAL_DIAGNOSTICS','1'))
     cpp.write_text(prelude+prefix+prototypes+stubs+'\n'.join(bodies)+'}\n'+checks)
     sanitizer_flags = ['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('CSV_TEST_SANITIZERS') else []
     subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',

@@ -5,6 +5,7 @@ source=Path('src/main.cpp').read_text()
 body=source[source.index('struct DiagnosticSocketIO {'):source.rindex('\n}')].replace('::close(', '::fakeClose(')
 pre=r'''
 #include "DiagnosticWebSocket.h"
+#include "ReleaseMemoryObservation.h"
 #include <cassert>
 #include <cstring>
 #include <cstdio>
@@ -18,6 +19,7 @@ int lock=0,diagnostic_snapshot_lock=0;
 #define portENTER_CRITICAL(x) (++lock)
 #define portEXIT_CRITICAL(x) (--lock)
 diagnostic::Snapshot diagnostic_latest;
+int release_memory_lock=0;ReleaseMemoryObserver release_memory_observer;
 const unsigned MALLOC_CAP_INTERNAL=1,MALLOC_CAP_8BIT=2;
 unsigned heap_caps_get_free_size(unsigned){assert(!lock);return 10000;}
 unsigned heap_caps_get_largest_free_block(unsigned){assert(!lock);return 8000;}
