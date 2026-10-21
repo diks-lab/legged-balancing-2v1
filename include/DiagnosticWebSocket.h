@@ -59,7 +59,7 @@ template<class IO> class WebSocket {
   if(op==9){memcpy(tx_,payload,length);frame(io,10,length);}
   if(op==1){Subscription s;const bool valid=!memchr(payload,0,length)&&SubscriptionParser(payload).parse(s);
    if(!valid){strcpy(tx_,"{\"type\":\"error\",\"reason\":\"invalid_subscription\"}");frame(io,1,strlen(tx_));}
-   else {++generation_;mask_=s.stop?0:s.mask;due_=io.now()+50;
+   else {if(!s.stop)s.mask|=PermanentMask;++generation_;mask_=s.stop?0:s.mask;due_=io.now()+50;
     if(!ack(tx_,2048,s,generation_,boot_)){end(io,WsReason::JsonError);return;}frame(io,1,strlen(tx_));firstPrepared_=firstWritten_=false;emit(io,WsEvent::Subscribed);}
   }
   // recv is limited to precisely this frame, so no next-frame bytes are lost.

@@ -96,6 +96,7 @@ class OverlayPlot {
     const visible = this.signals.filter(s => !this.hidden.has(s[0]));
     const units = [...new Set(visible.map(s => s[2]))];
     // Angle/reference share the nearest left axis, regardless of selection order.
+    if (this.fixedAttitude && !units.includes('deg')) units.unshift('deg');
     if (units.includes('deg')) {
       units.splice(units.indexOf('deg'), 1);
       units.unshift('deg');
@@ -113,7 +114,7 @@ class OverlayPlot {
     const scales = new Map();
     units.forEach((unit, index) => {
       const keys = visible.filter(s => s[2] === unit).map(s => s[0]);
-      const [lo, hi] = axisRange(rows, keys, unit, this.autoScale);
+      const [lo, hi] = this.fixedAttitude ? [-30, 30] : axisRange(rows, keys, unit, this.autoScale);
       scales.set(unit, { lo, hi });
       const x = index % 2 === 0
         ? left - 8 - Math.floor(index / 2) * 76
@@ -139,6 +140,14 @@ class OverlayPlot {
     c.textAlign = 'center';
     c.fillText('ESP32取得時刻 [s] ／ 単位ごとに独立した縦軸',
       (left + right) / 2, height - 8);
+    c.save();
+    c.beginPath(); c.rect(left, top, right - left, bottom - top); c.clip();
+    if (this.fixedAttitude) {
+      c.strokeStyle = '#526379'; c.lineWidth = 1.5;
+      c.setLineDash([5, 4]); c.beginPath();
+      c.moveTo(left, (top + bottom) / 2); c.lineTo(right, (top + bottom) / 2);
+      c.stroke(); c.setLineDash([]);
+    }
     for (const signal of visible) {
       const [key, , unit] = signal;
       const { lo, hi } = scales.get(unit);
@@ -155,6 +164,7 @@ class OverlayPlot {
       }
       c.stroke();
     }
+    c.restore();
   }
 }
 if (typeof module !== 'undefined') module.exports = { signalSegments, axisRange, MINIMUM_RANGES };

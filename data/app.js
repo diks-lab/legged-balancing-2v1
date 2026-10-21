@@ -2,15 +2,16 @@
 window.startLogger = function () {
   const el = id => document.getElementById(id);
   const history = new DiagnosticHistory();
-  const plot = new OverlayPlot(el('plot'), el('legend'), history);
+  const dashboard = new Dashboard(el, history);
+  const plot = dashboard.aux;
   let socket = null, generation = null;
   let boot = null, lastSeq = null, lastDrop = 0, lost = 0;
   let paused = false, lastMessage = 0, lastDraw = 0, first = null;
   let accepted = [];
-  const selected = () => Array.from(
-    el('fields').querySelectorAll('input:checked'), n => n.value);
+  const auxiliary = () => Array.from(el('fields').querySelectorAll('input:checked'), n => n.value);
+  const selected = () => [...new Set([...PERMANENT, ...auxiliary()])];
 
-  for (const [key, label, unit] of SIGNALS) {
+  for (const [key, label, unit] of SIGNALS.filter(s => !['angle_deg', 'reference_deg'].includes(s[0]))) {
     const node = document.createElement('label');
     const input = document.createElement('input');
     input.type = 'checkbox';
@@ -24,10 +25,12 @@ window.startLogger = function () {
     message => { el('subscription').textContent = message; },
     (response, empty) => {
       generation = response.subscription_id;
+      dashboard.live = response.streaming;
+      dashboard.status();
       if (response.streaming || empty) {
         accepted = response.fields;
-        plot.select(accepted);
-        plot.draw();
+        plot.select(accepted.filter(key => auxiliary().includes(key)));
+        dashboard.draw();
       }
     });
   el('fields').onchange = () => subscription.changed();
@@ -39,7 +42,13 @@ window.startLogger = function () {
     subscription.changed();
   };
   plot.select(DEFAULTS);
-  new ResizeObserver(() => plot.draw()).observe(el('plot'));
+  new ResizeObserver(() => dashboard.draw()).observe(el('plot'));
+  el('aux-toggle').onclick = () => {
+    const collapsed = el('auxiliary').classList.toggle('collapsed');
+    el('workspace').classList.toggle('no-aux', collapsed);
+    el('aux-toggle').setAttribute('aria-expanded', String(!collapsed));
+    dashboard.draw();
+  };
   el('autoscale').onchange = () => {
     plot.autoScale = el('autoscale').checked;
     plot.draw();
@@ -55,7 +64,7 @@ window.startLogger = function () {
     if (boot !== s.boot_id) {
       if (boot !== null) {
         history.clear();
-        plot.setPaused(paused);
+        dashboard.pause(paused);
       }
       boot = s.boot_id;
       lastSeq = null;
@@ -74,15 +83,13 @@ window.startLogger = function () {
     lastDrop = s.dropped;
     el('connection').textContent = `接続 / boot ${boot} / ` +
       `取得 ${s.sample_ms} ms / age ${s.age_ms} ms`;
-    el('health').textContent = `${s.running ? '倒立／試験中' : '停止中'} / ` +
-      `停止理由: ${s.stop_reason} @ ${s.stop_ms} ms / 異常bit: ${s.faults} / ` +
-      `出力遮断:${s.disabled} / FOC:${s.foc_ready} / PS4:${s.ps4}`;
+    dashboard.update(s);
     el('loss').textContent = `欠落推定: ${lost} / ` +
       `機体の送信破棄累計: ${s.dropped} / seq: ${s.seq}`;
     if (s.subscription_id !== generation || !Object.keys(s.values).length) return;
     history.push(s);
     if (!paused && Date.now() - lastDraw >= 100) {
-      plot.draw();
+      dashboard.draw();
       lastDraw = Date.now();
     }
     if (first !== generation) {
@@ -96,6 +103,7 @@ window.startLogger = function () {
     el('connection').textContent = 'WebSocket接続中…';
     generation = first = null;
     subscription.disconnected();
+    dashboard.stop();
     // Keep old lines separate even if reconnect preserves the device generation.
     history.breakNext = true;
     const ws = new WebSocket(`ws://${location.hostname}:81/diagnostics`);
@@ -125,23 +133,24 @@ window.startLogger = function () {
     ws.onclose = event => {
       if (socket === ws) {
         subscription.disconnected();
+    dashboard.stop();
         el('connection').textContent = `切断 code=${event.code}（再接続は手動）`;
       }
     };
   }
 
   el('start').onclick = () => subscription.start();
-  el('stop').onclick = () => subscription.start(false);
+  el('stop').onclick = () => { dashboard.stop(); subscription.start(false); };
   el('reconnect').onclick = connect;
   el('pause').onclick = () => {
     paused = !paused;
-    plot.setPaused(paused);
+    dashboard.pause(paused);
     el('pause').textContent = paused ? '表示再開' : '表示一時停止';
-    if (!paused) plot.draw();
+    if (!paused) dashboard.draw();
   };
   el('clear').onclick = () => {
     history.clear();
-    plot.setPaused(paused);
+    dashboard.pause(paused);
     plot.draw();
   };
   el('save').onclick = () => {

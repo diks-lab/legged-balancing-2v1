@@ -249,12 +249,14 @@ struct ParkedWsIO {
  bool acceptKey(const char*,char*out){strcpy(out,"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");return true;}
  void snapshot(diagnostic::Snapshot&s){s=diagnostic_latest;}
 };
-void near(float x,float y){assert(std::fabs(x-y)<1e-5f);}
+void nearAt(float x,float y,int line){if(!(std::fabs(x-y)<1e-5f))fprintf(stderr,"near line=%d x=%f y=%f\n",line,x,y);assert(std::fabs(x-y)<1e-5f);}
+#define near(x,y) nearAt(x,y,__LINE__)
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
   resetLqrTestState(); cancelBalanceWait();
   lqr_test_mode=mode;
   test_system_ready=true; startup_foc_ready.store(true); emergency_stop_active=false;
+  sensor1.fault=sensor2.fault=false;
   motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=4;
   lqr_diagnostic_armed=true; lqr_direction_test_armed=true;
   LQR_angle=LQR_gyro=LQR_speed=LQR_distance=0;
@@ -270,6 +272,7 @@ void step(float speed=0){
   LQR_speed=diag_LQR_speed_10ms=speed;
   motor1.shaft_velocity=motor2.shaft_velocity=speed;
   control_dt_ms=10;
+  diagnostic_imu_initialized.store(true);noteImuMeasurement();
   updateLqrDiagnostic();
 }
 void start(float sign){
@@ -817,6 +820,14 @@ int main(){
   near(diagnostic_latest.values[1],-0.8f);
   near(diagnostic_latest.values[3],1.6f);
   assert(std::isnan(diagnostic_latest.values[26])&&std::isnan(diagnostic_latest.values[8]));
+  const auto measurement_ms=diagnostic_imu_ms,measurement_seq=diagnostic_imu_seq;
+  nowMs+=300;publishDiagnosticSnapshot();
+  assert(!diagnostic_latest.imu_valid&&diagnostic_latest.imu_reason==8);
+  assert(diagnostic_latest.imu_ms==measurement_ms&&diagnostic_latest.imu_seq==measurement_seq);
+  assert(std::isnan(diagnostic_latest.values[0]));
+  sensor2.fault=true;nowMs+=50;publishDiagnosticSnapshot();
+  assert(diagnostic_latest.state==6&&diagnostic_latest.imu_reason==5);
+  sensor2.fault=false;
   Serial.output.clear();printLqrStatus();
   assert(Serial.output.find("speed_control=0.000000")!=std::string::npos);
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";

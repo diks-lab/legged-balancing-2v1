@@ -34,10 +34,8 @@ const SIGNALS = [
   ['speed_raw_rad_s', '速度LPF前（比較用）', 'rad/s']
 ];
 
-const DEFAULTS = [
-  'angle_deg', 'reference_deg', 'gyro_deg_s',
-  'right_command_v', 'left_command_v'
-];
+const PERMANENT = ['angle_deg', 'reference_deg', 'right_command_v', 'left_command_v'];
+const DEFAULTS = ['gyro_deg_s'];
 const CONTROL_FIELDS = [
   'control_angle_error_deg', 'gyro_deg_s', 'mean_velocity_rad_s',
   'right_velocity_rad_s', 'left_velocity_rad_s',
@@ -64,5 +62,5 @@ const COLORS = [
   '#15aabf', '#868e96'
 ];
 if (typeof module !== 'undefined') {
-  module.exports = { SIGNALS, DEFAULTS, PRESETS, COLORS };
+  module.exports = { SIGNALS, DEFAULTS, PRESETS, COLORS, PERMANENT };
 }

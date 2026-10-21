@@ -17,6 +17,8 @@ def function(name):
 code = r'''
 #include <cassert>
 #include <atomic>
+std::atomic<bool> diagnostic_startup_failed{false};
+std::atomic<const char*> diagnostic_startup_phase{"WEB_WAIT"};
 #include <cstdint>
 #include <cstring>
 #include <cstdio>

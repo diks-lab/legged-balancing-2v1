@@ -3,82 +3,91 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ESP32 制御グラフ</title>
+  <title>ESP32 姿勢・左右出力</title>
   <link rel="icon" href="data:,">
 </head>
 <body>
   <main>
     <header class="status">
-      <h1>ESP32 制御グラフ <small>診断専用・基本操作はPS4</small></h1>
-      <p id="connection" role="status">HTML解析中…</p>
-      <p id="health">倒立／停止・異常／停止理由：未取得</p>
-      <p id="loss">欠落：未取得</p>
-      <p id="subscription" role="status">配信未設定</p>
+      <h1>ESP32 姿勢・左右出力 <small>基本操作はPS4・Webは診断専用</small></h1>
+      <div class="connection-row">
+        <p id="connection" role="status">HTML解析中…</p>
+        <p id="subscription" role="status">配信未設定</p>
+        <p id="loss">欠落：未取得</p>
+      </div>
+      <p id="health">初期化状態：未取得</p>
+      <p id="measurement">測定更新：未取得</p>
     </header>
-    <section class="plot" aria-label="制御値の重ね描き">
-      <canvas id="plot" aria-label="ESP32取得時刻を共通横軸とするグラフ"></canvas>
-    </section>
-    <section aria-label="凡例と基本操作">
-      <div id="legend" aria-label="クリックで線の表示切替"></div>
-      <nav>
-        <button id="start">配信開始</button>
-        <button id="stop">配信停止</button>
-        <button id="pause">表示一時停止</button>
-        <button id="clear">ブラウザー履歴消去</button>
-        <button id="reconnect">再接続</button>
-        <label class="scale-option">
-          <input id="autoscale" type="checkbox">自動スケール（微小変動）
-        </label>
-      </nav>
-      <p class="axis-note">主軸：姿勢角・基準角［deg］。
-        異なる単位の軸の線が交差しても、数値が等しい意味ではありません。</p>
-    </section>
+    <div id="workspace">
+      <section class="instruments">
+        <div class="pose-panel">
+          <div class="panel-title"><strong>機体姿勢 ±30°固定</strong><span id="pose-value">測定待ち</span></div>
+          <div class="pose-canvas"><canvas id="pose" aria-label="姿勢角と基準角、±30度固定、中央0度"></canvas></div>
+          <div id="pose-legend"></div>
+        </div>
+        <div class="meters" aria-label="左右の実際の指令電圧">
+          <section class="meter">
+            <h2>左出力</h2>
+            <div class="meter-body"><canvas id="left-meter" aria-label="左指令電圧、真上0V"></canvas><strong id="left-reading">更新停止／不明</strong></div>
+            <p id="left-limit">指令電圧・±1 V＝半周</p>
+          </section>
+          <section class="meter">
+            <h2>右出力</h2>
+            <div class="meter-body"><canvas id="right-meter" aria-label="右指令電圧、真上0V"></canvas><strong id="right-reading">更新停止／不明</strong></div>
+            <p id="right-limit">指令電圧・±1 V＝半周</p>
+          </section>
+        </div>
+      </section>
+      <section id="auxiliary">
+        <button id="aux-toggle" aria-expanded="true">補助の制御グラフ（クリックで折りたたみ）</button>
+        <div class="aux-body">
+        <div class="plot"><canvas id="plot" aria-label="補助制御値、姿勢グラフと共通の時間軸"></canvas></div>
+        <div id="legend"></div>
+        </div>
+      </section>
+    </div>
+    <nav>
+      <button id="start">配信開始</button><button id="stop">配信停止</button>
+      <button id="pause">表示一時停止</button><button id="clear">ブラウザー履歴消去</button>
+      <button id="reconnect">再接続</button>
+      <label class="scale-option"><input id="autoscale" type="checkbox">補助軸の自動スケール</label>
+    </nav>
     <details id="selection">
-      <summary>観測項目を選ぶ（配信中は変更を自動反映）</summary>
+      <summary>補助グラフの項目選択（配信中は200 msで自動反映）</summary>
       <label>プリセット
         <select id="preset">
-          <option value="stationary">自立静止（姿勢・出力）</option>
+          <option value="stationary">姿勢・出力＋角速度</option>
           <option value="control">制御入力の比較</option>
           <option value="position">位置保持</option>
           <option value="drive">PS4走行・旋回</option>
         </select>
       </label>
+      <p>姿勢角・基準角・左右指令電圧は常設配信。ここを全解除しても常設表示は継続します。</p>
       <div id="fields"></div>
     </details>
     <details id="details">
       <summary>詳細診断・単位・取得時点・CSV保存</summary>
       <div class="explanation">
-        <p>1クライアント・20 Hz。履歴はブラウザー内の60秒／最大1200点。
-          表示一時停止中も受信・履歴・異常表示を継続します。
-          配信停止は走行停止ではありません。未接続中の履歴は復元できません。</p>
-        <p>姿勢角・基準角との差はMPU Y軸［deg］。
-          制御角度誤差は実際の姿勢PID入力（目標傾斜・既存バイアスを含む）。
-          機体角速度は同じ周期のGyroY［deg/s］。停止中も姿勢角・基準角・角速度を表示します。
-          無効／未使用の制御項はnullで描画しません。</p>
-        <p>通常の最低表示範囲：degは±20、deg/sは±100、Vは±1、rad/sは±6。
-          範囲外は拡張します。自動スケールは微小変動の比較用です。
-          表示範囲は転倒閾値や電圧制限とは別で、データ加工はしません。
-          選択変更は配信中だけ200 msでまとめて反映。全項目解除は配信停止とし、
-          再開は「配信開始」。停止中の選択変更では配信しません。</p>
-        <p>左右車輪の位置［rad］・速度［rad/s］はSimpleFOC shaft値
-          （センサー方向補正・速度LPF後に既存の車体前進符号を適用、前進が正）。
-          車体姿勢とは別の回転量です。
-          制御平均速度は速度PIDへ渡す既存の選択済み値：通常は既存速度LPF後、
-          PS4走行中は既存ウィンドウ速度。左右方向係数には平均化が含まれるため再度2で割りません。
-          速度LPF前は車体速度LPF前の比較用で、SimpleFOC内部LPF後です。
-          PS4ウィンドウ速度とは異なります。</p>
-        <p>基準位置誤差＝基準位置−方向補正済み左右位置の和。
-          目標速度は速度誤差の基準。目標傾斜角は姿勢PIDへ適用した傾斜＋バイアス。
-          旋回指令［V］は既存ヘッドルーム制限後（右は減算・左は加算後に出力方向補正）。</p>
-        <p>制御項は既存の符号・モードを保持し、未使用項はnull。
-          指令電圧は制限・旋回・停止判定後のmove直前。
-          FOC q電圧はloopFOC直後・同周期move前のキャッシュ（foc_capture_us）。
-          指令とFOCの取得時点は異なります。追加I2C読み取りはありません。</p>
-        <p>sample_msは50 msごとの制御ループ末尾の整合スナップショット時刻。
-          周期・処理時間は既存計測値、内部RAM［B］は通信タスクの送信準備時。
-          異常bit：1右センサー、2左センサー、4FOC初期化失敗。
-          停止時刻stop_msは最新停止イベント。age_msは取得後の経過時間。
-          欠落・無効値・世代の切替は線をつなぎません。フィルターは追加しません。</p>
+        <p>1クライアント・20 Hz、ブラウザー履歴60秒／最大1200点。
+          配信開始／停止は診断通信だけの操作です。表示一時停止中も受信・履歴・異常表示とメーターは更新。
+          未接続・配信停止・欠落中の過去履歴は復元できません。</p>
+        <p>姿勢角は既存相補フィルター後のAngleY。実測時刻imu_ms／更新番号imu_seqを追跡し、
+          測定停止時は線を切ります。基準角は設定値で、走行目標傾斜と別です。
+          ±30°は表示範囲で、倒立開始／転倒判定の閾値ではありません。</p>
+        <p>メーターは制限・旋回・安全判定後のmove直前の左右指令電圧です。
+          真上0 V、正は青・時計回り、負は赤紫・反時計回り。±1 Vで半周。
+          超過時も実数値と警告を表示。トルク・電流・FOC実出力とは別です。
+          通信／配信停止、250 msを超える古いスナップショット、無効値を現在出力として表示しません。</p>
+        <p>補助グラフは単位別の独立軸。異なる単位の線の交差は同じ数値を意味しません。
+          通常の最低範囲はdeg±20、deg/s±100、V±1、rad/s±6。姿勢専用軸は自動スケール対象外。
+          無効／未使用制御値はnull。新しいフィルターや追加I2C読み取りはありません。</p>
+        <p>制御角度誤差は実際の姿勢PID入力（基準＋目標傾斜＋既存バイアスとの差）。
+          車輪位置・速度はSimpleFOCの方向補正・既存LPF後に車体前進符号を適用。
+          平均速度は制御が実際に選んだ通常LPF後／PS4速度窓で、再度2で割りません。
+          FOC q電圧はloopFOC後・同周期move前のキャッシュ（foc_capture_us）。指令と取得時点が異なります。</p>
+        <p>sample_msは制御状態コピー時刻で、IMU実測時刻と別です。
+          メモリーは通信タスクの送信準備時。凡例は表示だけを切り替え、配信選択と別。
+          表示一時停止の履歴も60秒で消え、古い点は復元しません。</p>
         <button id="save">直近60秒をCSV保存</button>
       </div>
     </details>
@@ -96,17 +105,17 @@
         return await response.text();
       }
       try {
-        const style = document.createElement('style');
-        style.textContent = await asset(target);
-        document.head.appendChild(style);
-        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/app.js']) {
+        for (target of ['/style.css', '/panels.css']) {
+          const style = document.createElement('style');
+          style.textContent = await asset(target);
+          document.head.appendChild(style);
+        }
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/dashboard.js', '/app.js']) {
           const script = document.createElement('script');
           script.textContent = await asset(target);
           document.head.appendChild(script);
         }
-        if (typeof window.startLogger !== 'function') {
-          throw new Error('JSの準備が完了しませんでした');
-        }
+        if (typeof window.startLogger !== 'function') throw new Error('JS準備失敗');
         target = 'JS初期化';
         window.startLogger();
       } catch (error) {

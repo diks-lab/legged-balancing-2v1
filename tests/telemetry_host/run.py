@@ -51,10 +51,10 @@ int main(){
  std::string bad=sub;bad.replace(bad.find("50"),2,"10");assert(!diagnostic::SubscriptionParser(bad.c_str()).parse(s));
  bad=sub;bad.replace(bad.find("right_velocity_rad_s"),20,"angle_error_deg");assert(!diagnostic::SubscriptionParser(bad.c_str()).parse(s));
  diagnostic::Snapshot snap;for(auto&v:snap.values)v=NAN;strcpy(snap.stop_reason,"quote\"\\\n");char json[2048];assert(diagnostic::sample(json,sizeof(json),snap,"0123456789abcdef",1,1,0,UINT32_MAX,0));assert(strstr(json,"null")&&strstr(json,"quote\\\"\\\\\\u000a"));char tiny[8];assert(!diagnostic::sample(tiny,sizeof(tiny),snap,"x",1,1,0,1,0));
- {IO i;WS w;handshake(w,i);i.message(sub);poll(w,i,25);assert(w.generation()==1&&w.mask()==((1u<<2)|(1u<<6)));size_t at=0;auto ack=payload(i,at);assert(ack.find("subscribed")!=ack.npos);poll(w,i,40);bool saw=false;while(at<i.out){auto msg=payload(i,at);if(msg.find("sample")!=msg.npos){assert(msg.find("angle_error_deg")!=msg.npos&&msg.find("right_velocity_rad_s")!=msg.npos&&msg.find("left_velocity_rad_s")==msg.npos&&msg.find("internal_free_b")==msg.npos);puts(msg.c_str());saw=true;}}assert(saw);
-  auto generation=w.generation();i.message("{\"type\":\"pid\",\"value\":99}");poll(w,i,30);assert(w.generation()==generation&&w.mask()==((1<<2)|(1<<6)));
-  i.message("{\"type\":\"subscribe\",\"request_id\":2,\"period_ms\":50,\"fields\":[\"gyro_deg_s\"]}");poll(w,i,30);assert(w.generation()==2&&w.mask()==(1u<<3));
-  i.message("{\"type\":\"stop\",\"request_id\":3}");poll(w,i,30);assert(w.generation()==3&&w.mask()==0);w.disconnect(i);assert(i.closes==1);i.open=true;i.in=i.pos=i.out=0;handshake(w,i);assert(w.mask()==0&&w.generation()==3);i.message(sub);poll(w,i,25);assert(w.generation()==4&&w.mask()==((1u<<2)|(1u<<6)));w.disconnect(i);assert(i.closes==2);
+ {IO i;WS w;handshake(w,i);i.message(sub);poll(w,i,25);assert(w.generation()==1&&w.mask()==(diagnostic::PermanentMask|(1u<<2)|(1u<<6)));size_t at=0;auto ack=payload(i,at);assert(ack.find("subscribed")!=ack.npos);poll(w,i,40);bool saw=false;while(at<i.out){auto msg=payload(i,at);if(msg.find("sample")!=msg.npos){assert(msg.find("angle_error_deg")!=msg.npos&&msg.find("right_velocity_rad_s")!=msg.npos&&msg.find("left_velocity_rad_s")==msg.npos&&msg.find("internal_free_b")==msg.npos);puts(msg.c_str());saw=true;}}assert(saw);
+  auto generation=w.generation();i.message("{\"type\":\"pid\",\"value\":99}");poll(w,i,30);assert(w.generation()==generation&&w.mask()==(diagnostic::PermanentMask|(1u<<2)|(1u<<6)));
+  i.message("{\"type\":\"subscribe\",\"request_id\":2,\"period_ms\":50,\"fields\":[\"gyro_deg_s\"]}");poll(w,i,30);assert(w.generation()==2&&w.mask()==(diagnostic::PermanentMask|(1u<<3)));
+  i.message("{\"type\":\"stop\",\"request_id\":3}");poll(w,i,30);assert(w.generation()==3&&w.mask()==0);w.disconnect(i);assert(i.closes==1);i.open=true;i.in=i.pos=i.out=0;handshake(w,i);assert(w.mask()==0&&w.generation()==3);i.message(sub);poll(w,i,25);assert(w.generation()==4&&w.mask()==(diagnostic::PermanentMask|(1u<<2)|(1u<<6)));w.disconnect(i);assert(i.closes==2);
  }
  // Reproduce real time advancing during snapshot/JSON and timer reads.
  for(unsigned cost:{1u,5u})for(unsigned step:{0u,1u}){
@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory() as td:
  samples=[]
  for line in result.stdout.splitlines():
   if line.startswith('{'):
-   sample=json.loads(line);assert set(sample['values'])=={'angle_error_deg','right_velocity_rad_s'};assert sample['age_ms']<1000;samples.append(sample)
+   sample=json.loads(line);assert set(sample['values'])=={'angle_error_deg','right_velocity_rad_s','angle_deg','reference_deg','right_command_v','left_command_v'};assert sample['age_ms']<1000;samples.append(sample)
   else:print(line)
 
  if os.environ.get("TELEMETRY_SAMPLE_OUTPUT"):Path(os.environ["TELEMETRY_SAMPLE_OUTPUT"]).write_text(json.dumps(samples))

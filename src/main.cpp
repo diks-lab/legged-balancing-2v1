@@ -565,6 +565,7 @@ size_t lqr_drive_sign_trace_count = 0;
 uint32_t lqr_drive_sign_trace_start_ms = 0, lqr_drive_sign_trace_last_ms = 0;
 bool lqr_drive_sign_trace_active = false;
 float diagnostic_right_command=0,diagnostic_left_command=0;
+uint32_t diagnostic_command_ms=0;bool diagnostic_command_valid=false;
 uint32_t diagnostic_loop_us=0,diagnostic_right_foc_us=0,diagnostic_left_foc_us=0,diagnostic_imu_us=0,diagnostic_move_us=0;
 struct FocOutputSnapshot {
   float right_voltage_q, left_voltage_q;
@@ -757,6 +758,16 @@ int16_t leftLegPositionFromPercent(float percent);
 void moveBothLegsToPercent(float percent);
 void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
                                float left_output);
+std::atomic<bool> diagnostic_imu_initialized{false},diagnostic_imu_calibrating{false};
+std::atomic<bool> diagnostic_startup_failed{false};
+std::atomic<const char*> diagnostic_startup_phase{"WEB_WAIT"};
+uint32_t diagnostic_imu_ms=0,diagnostic_imu_seq=0;
+bool diagnostic_imu_finite=false;
+void noteImuMeasurement(){
+  diagnostic_imu_ms=millis();++diagnostic_imu_seq;
+  diagnostic_imu_finite=isfinite(LQR_angle)&&isfinite(LQR_gyro);
+}
+
 // Captured at the actual control call sites, not reconstructed by the UI.
 struct DiagnosticControlInputs {
   float angle_error = NAN, speed = NAN, position_error = NAN;
@@ -877,6 +888,7 @@ void initializeRobotHardware() {
   }
   printHttpStartupMemory("before_mpu6050");
   mpu6050.begin();
+  diagnostic_imu_initialized.store(true);
   calibrateMpu6050();
   printHttpStartupMemory("after_mpu6050");
 
@@ -1530,6 +1542,8 @@ bool stopOnWheelFault() {
 }
 
 void setBothTargetsToZero() {
+  diagnostic_right_command=diagnostic_left_command=0;
+  diagnostic_command_ms=millis();diagnostic_command_valid=true;
   right_target_voltage = 0.0f;
   left_target_voltage = 0.0f;
   motor1.target = 0.0f;
@@ -1573,7 +1587,9 @@ bool i2cDeviceIsPresent(TwoWire& bus, uint8_t address) {
 void calibrateMpu6050() {
   stopBothMotorsAtZero();
   Serial.println("MPU6050 calibration starting. Keep the robot completely still.");
+  diagnostic_imu_calibrating.store(true);
   mpu6050.calcGyroOffsets(true);
+  diagnostic_imu_calibrating.store(false);
   Serial.println("MPU6050 calibration complete; both motor targets remain 0 V.");
 }
 
@@ -1596,6 +1612,7 @@ void updateLqrState() {
   motor2.shaft_velocity = motor2.shaftVelocity();
   LQR_angle = mpu6050.getAngleY();
   LQR_gyro = mpu6050.getGyroY();
+  noteImuMeasurement();
   LQR_distance = motor1.shaft_angle * m1_direction +
                  motor2.shaft_angle * m2_direction;
   LQR_speed = motor1.shaft_velocity * m1_direction +
@@ -1711,6 +1728,7 @@ void updateLqrControlTrace(float right_output, float left_output,
                            bool force_sample) {
   diagnostic_right_command=right_output;
   diagnostic_left_command=left_output;
+  diagnostic_command_ms=millis();diagnostic_command_valid=true;
   if(force_sample && emergency_stop_active)captureFocOutputSnapshot();
 }
 
@@ -4062,6 +4080,20 @@ void publishDiagnosticSnapshot(){
   s.running=lqr_direction_test_armed||balance_wait_active||polarity_test_active;
   s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=test_system_ready;
   s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
+  s.imu_ms=diagnostic_imu_ms;s.imu_seq=diagnostic_imu_seq;
+  s.imu_reason=!diagnostic_imu_initialized.load()?1:
+      diagnostic_imu_calibrating.load()?2:!diagnostic_imu_seq?3:
+      sensor1.fault?(sensor2.fault?6:4):sensor2.fault?5:!diagnostic_imu_finite?7:0;
+  s.reference_valid=lqr_zero_set;
+  s.command_ms=diagnostic_command_ms;s.command_valid=diagnostic_command_valid;
+  s.state=(sensor1.fault||sensor2.fault)?6:
+      diagnostic_startup_failed.load()&&!test_system_ready?7:
+      emergency_stop_active?(!strcmp(last_stop_reason,"TILT_STOP")?5:4):!test_system_ready?0:
+      lqr_direction_test_armed?3:balance_wait_active?2:
+      strcmp(last_stop_reason,"NONE")?(!strcmp(last_stop_reason,"TILT_STOP")?5:4):1;
+  snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
+  snprintf(s.right_error,sizeof(s.right_error),"%s",sensor1.error);
+  snprintf(s.left_error,sizeof(s.left_error),"%s",sensor2.error);
   const float values[]={LQR_angle,angle_zeropoint,LQR_angle-angle_zeropoint,LQR_gyro,
     motor1.shaft_angle*kRightForwardSign,motor2.shaft_angle*kLeftForwardSign,
     motor1.shaft_velocity*kRightForwardSign,motor2.shaft_velocity*kLeftForwardSign,
@@ -4087,6 +4119,7 @@ void publishDiagnosticSnapshot(){
       s.values[12]=NAN; // Outer tilt loop; no direct speed contribution.
     if (drive_recovery_state!=DriveRecoveryState::Inactive) s.values[12]=NAN;
   }
+  diagnostic::freshness(s,now);
   portENTER_CRITICAL(&diagnostic_snapshot_lock);diagnostic_latest=s;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
 }
 struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
@@ -4138,6 +4171,8 @@ void handleStopBalanceTest() { enqueueHttpCommand('d'); }
 
 void publishStartupPhase(const char* stage) {
   startup_phase = stage;
+  diagnostic_startup_phase.store(stage);
+  if(!strcmp(stage,"READY"))diagnostic_startup_failed.store(false);
   if (http_status_queue) captureHttpStatus();
 }
 
@@ -4449,6 +4484,8 @@ void startWifiHttpServer() {
     wifi_log_server.on("/history.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/history.js", "application/javascript"); });
     wifi_log_server.on("/signals.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/signals.js", "application/javascript"); });
     wifi_log_server.on("/subscribe.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/subscribe.js", "application/javascript"); });
+    wifi_log_server.on("/panels.css", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/panels.css", "text/css"); });
+    wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
                        [](){HttpMemoryRequest observed{5};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
@@ -4536,6 +4573,8 @@ void printStartupMemoryResult(const char* result) {
 }
 
 void reportStartupFailure(const char* stage) {
+  diagnostic_startup_failed.store(true);
+  diagnostic_startup_phase.store(stage);
   if(foc_alignment_observer.active()){foc_deferred_http_failure.store(stage);return;}
   char text[384];
   snprintf(text, sizeof(text),
@@ -6157,6 +6196,11 @@ struct DiagnosticSocketIO {
   }
   void snapshot(diagnostic::Snapshot&s){
     portENTER_CRITICAL(&diagnostic_snapshot_lock);s=diagnostic_latest;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
+    if(diagnostic_imu_calibrating.load())s.imu_reason=2;
+    if(!diagnostic_imu_initialized.load())s.imu_reason=1;
+    if(diagnostic_startup_failed.load()&&!s.foc_ready)s.state=7;
+    snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
+    diagnostic::freshness(s,millis());
     constexpr uint32_t caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
     s.values[24]=heap_caps_get_free_size(caps);s.values[25]=heap_caps_get_largest_free_block(caps);
   }

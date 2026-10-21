@@ -13,7 +13,7 @@ header=(core/'libraries/Network/src/NetworkClient.h').read_text()
 assert 'std::shared_ptr<NetworkClientSocketHandle> clientSocketHandle' in header
 assert 'std::shared_ptr<NetworkClientRxBuffer> _rxBuffer' in header
 assets=[]
-for name in ['index.html','style.css','app.js','signals.js','history.js','plot.js','subscribe.js']:
+for name in ['index.html','style.css','app.js','signals.js','history.js','plot.js','subscribe.js','dashboard.js','panels.css']:
  raw=(Path('data')/name).read_bytes().replace(b'\r\n',b'\n')
  for data in [raw,raw.replace(b'\n',b'\r\n')]:
   assets.append('"'+''.join('\\x%02x'%v for v in data)+'"')

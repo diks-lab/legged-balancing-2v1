@@ -3,9 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'dashboard.js', 'app.js'];
 const context = vm.createContext({});
-for (const name of ['signals.js', 'history.js', 'plot.js']) {
+for (const name of ['signals.js', 'history.js', 'plot.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -34,8 +34,18 @@ vm.runInContext(`
   const parts = signalSegments(h.rows, 'x');
   if (JSON.stringify(parts.map(p => p.length)) !== '[2,1,1,1,1,1]') throw Error('gaps');
   if (SIGNALS.length !== 32 || new Set(COLORS).size !== 32) throw Error('fields/colors');
-  if (DEFAULTS.includes('right_velocity_rad_s') || !DEFAULTS.includes('angle_deg') ||
-    !DEFAULTS.includes('reference_deg')) throw Error('attitude defaults');
+  const output = value => ({ type: 'sample', age_ms: 0, disabled: false,
+    command_valid: true, values: { left_command_v: value } });
+  for (const v of [0, 0.35, -0.2, 1, -1, 1.5, -1.5]) {
+    const r = outputReading(output(v), 'left_command_v', true);
+    if (r.arc !== Math.min(Math.abs(v), 1) * Math.PI || r.ccw !== (v < 0) ||
+      r.over !== (Math.abs(v) > 1)) throw Error('arc');
+  }
+  if (outputReading({ ...output(0.2), disabled: true }, 'left_command_v', true).text !== '遮断') throw Error('disabled');
+  if (outputReading(output(0.2), 'left_command_v', false).state !== 'unknown' ||
+    outputReading(output(null), 'left_command_v', true).state !== 'unknown') throw Error('stale');
+  if (DEFAULTS.length !== 1 || DEFAULTS[0] !== 'gyro_deg_s' ||
+    !PERMANENT.includes('angle_deg') || !PERMANENT.includes('reference_deg')) throw Error('permanent');
   for (const [unit, range] of Object.entries(MINIMUM_RANGES)) {
     const rows = [{ values: { x: 0.0001 } }, { values: { x: -0.0001 } }];
     if (JSON.stringify(axisRange(rows, ['x'], unit)) !== JSON.stringify(range)) throw Error('minimum');
@@ -46,7 +56,7 @@ vm.runInContext(`
     const invalid = axisRange([{ values: { x: null } }], ['x'], unit);
     if (JSON.stringify(invalid) !== JSON.stringify(range)) throw Error('invalid scale');
   }
-  if (DEFAULTS.length !== 5 || PRESETS.position.length !== 8 || PRESETS.drive.length !== 10) throw Error('presets');
+  if (DEFAULTS.length !== 1 || PRESETS.position.length !== 8 || PRESETS.drive.length !== 10) throw Error('presets');
 `, context);
 for (const file of assets) {
   const text = source(file);

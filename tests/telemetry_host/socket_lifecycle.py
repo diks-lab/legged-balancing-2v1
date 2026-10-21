@@ -13,6 +13,9 @@ pre=r'''
 #include <fcntl.h>
 #include <errno.h>
 #include <string>
+#include <atomic>
+std::atomic<bool> diagnostic_imu_initialized{true},diagnostic_imu_calibrating{false},diagnostic_startup_failed{false};
+std::atomic<const char*> diagnostic_startup_phase{"READY"};
 uint32_t tick=0;uint32_t millis(){return tick;}
 bool wifi_connection_ready=true,wifi_log_server_started=true;
 int lock=0,diagnostic_snapshot_lock=0;
