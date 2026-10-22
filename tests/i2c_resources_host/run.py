@@ -88,6 +88,7 @@ struct {
   void print(const char*){}
 } Serial;
 '''
+code += re.search(r'constexpr uint8_t kWheelRightSda=.*?;', app).group(0)+'\n'
 code += extract(app, 'void prepareI2cResources() {')
 code += r'''
 void reset(){

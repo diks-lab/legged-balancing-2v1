@@ -6,6 +6,9 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <LittleFS.h>
+#include <Preferences.h>
+#include "WheelCalibration.h"
+#include "FallAutoRecovery.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
@@ -82,6 +85,7 @@ namespace {
 // Hardware / Control Objects
 //==================================================
 constexpr uint8_t motor1EnablePin = 27;
+constexpr uint8_t kWheelRightSda=19,kWheelRightScl=18,kWheelLeftSda=23,kWheelLeftScl=5;
 
 constexpr uint8_t motor2EnablePin = 32;
 constexpr uint8_t ledPin = 22;
@@ -395,6 +399,14 @@ BLDCMotor motor2(7);
 BLDCDriver3PWM driver2(26, 25, 33, motor2EnablePin);
 TwoWire I2Ctwo(1);
 CheckedWheelSensor sensor2(I2Ctwo, gateLeftSensorFault);
+uint32_t calibrationConfig(){
+  const uint32_t words[]={240,uint32_t(motor1.pole_pairs),uint32_t(motor2.pole_pairs),
+      uint32_t(driver1.pwmA),uint32_t(driver1.pwmB),uint32_t(driver1.pwmC),motor1EnablePin,
+      uint32_t(driver2.pwmA),uint32_t(driver2.pwmB),uint32_t(driver2.pwmC),motor2EnablePin,
+      kWheelRightSda,kWheelRightScl,kWheelLeftSda,kWheelLeftScl,kAs5600Address,uint32_t(kWheelAlignVoltage*1000),uint32_t(kWheelSupplyVoltage*1000)};
+  uint32_t h=2166136261u;for(auto w:words)h=(h^w)*16777619u;return h;
+}
+
 
 //==================================================
 // Control Variables
@@ -404,12 +416,23 @@ float left_target_voltage = 0.0f;
 bool test_system_ready = false;
 bool emergency_stop_active = false;
 BootAutoStart boot_auto_start;
+FallAutoRecovery fall_auto_recovery;
+wheelcal::Record saved_wheel_calibration;
+int saved_calibration_slot=-1;
+bool calibration_loaded=false,calibration_load_attempted=false;
+std::atomic<bool> calibration_active{false},calibration_abort{false},calibration_request_pending{false};
+const char* calibration_status="NOT_LOADED";
+std::atomic<uint8_t> calibration_commit_phase{0}; // 0 scan, 1 aborted, 2 commit begun
+// Fingerprint of calibration-relevant configuration: schema/lib revision, poles,
+// PWM order/EN, I2C pins/address, alignment voltage and supply (mV).
+
 const char* last_stop_reason = "NONE";
 char diagnostic_stop_reason[64]="NONE";
 uint32_t diagnostic_stop_ms=0;
 void recordDiagnosticStop(const char* reason){
   if(!strcmp(reason,"NONE"))return;
   boot_auto_start.cancel();
+  fall_auto_recovery.cancel();
   size_t i=0;for(;reason[i]&&i+1<sizeof(diagnostic_stop_reason);++i)diagnostic_stop_reason[i]=reason[i];
   diagnostic_stop_reason[i]=0;diagnostic_stop_ms=millis();
 }
@@ -726,6 +749,11 @@ void cancelBalanceWait();
 void updateBalanceWait();
 bool bootAutoMeasurementsReady();
 void serviceBootAutoStart();
+void serviceFallAutoRecovery();
+void publishDiagnosticSnapshot(bool force);
+void requestWheelCalibration();
+void loadWheelCalibration();
+bool saveWheelCalibration();
 bool startBalanceTest(bool boot_immediate);
 bool stopBalanceTest();
 bool motionCommandAllowed();
@@ -828,7 +856,7 @@ void prepareI2cResources() {
   // begin() reserves BOTH Wire buffers, locks and the IDF master driver.
   char resource_result[160];
   printHttpStartupMemory("before_i2c0");
-  i2c0_resources_ready = I2Cone.begin(19, 18, 400000);
+  i2c0_resources_ready = I2Cone.begin(kWheelRightSda, kWheelRightScl, 400000);
   if (i2c0_resources_ready) I2Cone.setTimeOut(5);
   printHttpStartupMemory("after_i2c0");
   snprintf(resource_result, sizeof(resource_result), "I2C resources bus=I2C_0 sda=19 scl=18 hz=400000 rx_bytes=%u tx_bytes=%u result=%s\n",
@@ -836,7 +864,7 @@ void prepareI2cResources() {
       i2c0_resources_ready ? "READY" : "FAILED");
   Serial.print(resource_result);
   printHttpStartupMemory("before_i2c1");
-  i2c1_resources_ready = I2Ctwo.begin(23, 5, 400000);
+  i2c1_resources_ready = I2Ctwo.begin(kWheelLeftSda, kWheelLeftScl, 400000);
   if (i2c1_resources_ready) I2Ctwo.setTimeOut(5);
   printHttpStartupMemory("after_i2c1");
   snprintf(resource_result, sizeof(resource_result), "I2C resources bus=I2C_1 sda=23 scl=5 hz=400000 rx_bytes=%u tx_bytes=%u result=%s\n",
@@ -855,7 +883,7 @@ void initializeRobotHardware() {
   esp_timer_create_args_t alignArgs = {};
   alignArgs.callback = wheelAlignTimeout;
   alignArgs.name = "wheel_align_guard";
-  const esp_err_t align_timer_result = esp_timer_create(&alignArgs, &wheelAlignTimer);
+  const esp_err_t align_timer_result = wheelAlignTimer ? ESP_OK : esp_timer_create(&alignArgs, &wheelAlignTimer);
   printHttpStartupMemory("after_wheel_align_timer");
   if (align_timer_result != ESP_OK) {
     disableBothDrivers();
@@ -905,13 +933,21 @@ void initializeRobotHardware() {
   calibrateMpu6050();
   printHttpStartupMemory("after_mpu6050");
 
+  if(diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load()){
+    disableBothDrivers();publishStartupPhase("IMU_CALIBRATION_FAILED");reportStartupFailure(startup_phase);return;
+  }
+  if(!calibration_loaded&&!calibration_active.load()){
+    disableBothDrivers();publishStartupPhase("CALIBRATION_REQUIRED");
+    Serial.printf("FOC: calibration required (%s); no alignment started.\n",calibration_status);
+    return;
+  }
   driver1.voltage_power_supply = kWheelSupplyVoltage;
   driver1.voltage_limit = kWheelSupplyVoltage;
   startup_stage = "RIGHT_DRIVER";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
   printHttpStartupMemory("before_right_driver");
-  const int right_driver_result = driver1.init();
+  const int right_driver_result = driver1_initialized ? 1 : driver1.init();
   printHttpStartupMemory("after_right_driver");
   if (!right_driver_result) {
     Serial.println("ERROR: Right driver initialization failed.");
@@ -975,7 +1011,7 @@ void initializeRobotHardware() {
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
   printHttpStartupMemory("before_left_driver");
-  const int left_driver_result = driver2.init();
+  const int left_driver_result = driver2_initialized ? 1 : driver2.init();
   printHttpStartupMemory("after_left_driver");
   if (!left_driver_result) {
     Serial.println("ERROR: Left driver initialization failed.");
@@ -1043,8 +1079,17 @@ void initializeRobotHardware() {
 
   if (!startupHardwareStepAllowed()) return;
   setBothTargetsToZero();
-  driver1.enable();
-  driver2.enable();
+  if(calibration_active.load()){
+    disableBothDrivers();
+    if(!saveWheelCalibration()){
+      calibration_status="SAVE_FAILED";publishStartupPhase("CALIBRATION_SAVE_FAILED");reportStartupFailure(startup_phase);return;
+    }
+    calibration_status="SAVED_STOPPED";
+    last_stop_reason="CALIBRATION_DONE";recordDiagnosticStop(last_stop_reason);
+  } else {
+    driver1.enable();driver2.enable();
+    calibration_status="RESTORED";
+  }
   test_system_ready = true;
   lqr_diagnostic_armed = false;
   lqr_direction_test_armed = false;
@@ -1070,7 +1115,7 @@ void enforceStartupOutputGate() {
 bool startupHardwareStepAllowed() {
   if (i2c0_resources_ready && i2c1_resources_ready &&
       startup_web_ready.load() && startup_foc_gate.load() != StartupFocGate::Aborted &&
-      !emergency_stop_active) return true;
+      !emergency_stop_active && !(calibration_active.load()&&calibration_abort.load())) return true;
   test_system_ready = false;
   disableBothDrivers();
   publishStartupPhase(!i2c0_resources_ready ? "I2C0_RESOURCES_FAILED" :
@@ -1081,6 +1126,11 @@ bool startupHardwareStepAllowed() {
 }
 
 void advanceStartup() {
+  if(calibration_active.load()&&calibration_abort.load()){
+    disableBothDrivers();calibration_active=false;calibration_status="ABORTED";
+    foc_initialization_attempted=true;publishStartupPhase("CALIBRATION_ABORTED");
+    publishDiagnosticSnapshot(true);return;
+  }
   // Only the main loop may admit FOC or use either I2C bus.
   if (foc_initialization_attempted || test_system_ready) return;
   gateWheelOutputsOff();
@@ -1091,6 +1141,7 @@ void advanceStartup() {
     return;
   }
   if (!startup_web_ready.load()) return;
+  if(!calibration_load_attempted)loadWheelCalibration();
   foc_initialization_attempted = true; // Hardware failures still require reboot.
   startup_foc_gate.store(StartupFocGate::Initializing);
   initializeRobotHardware();
@@ -1099,6 +1150,7 @@ void advanceStartup() {
   const bool committed = test_system_ready &&
       startup_foc_gate.compare_exchange_strong(expected, StartupFocGate::Ready);
   if (committed) {
+    if(calibration_active.load())emergency_stop_active=true;
     publishStartupPhase("READY");
     startup_foc_ready.store(true);
   } else {
@@ -1106,7 +1158,7 @@ void advanceStartup() {
     test_system_ready = false;
     disableBothDrivers();
     startup_foc_gate.store(StartupFocGate::Waiting);
-    foc_initialization_failed = true;
+    foc_initialization_failed = strcmp(startup_phase,"CALIBRATION_REQUIRED")!=0;
     if (late_abort) {
       publishStartupPhase("WEB_LOST_DURING_FOC");
       reportStartupFailure(startup_phase);
@@ -1114,6 +1166,15 @@ void advanceStartup() {
       publishStartupPhase(startup_phase); // Preserve the exact failed stage.
     }
   }
+  if(calibration_active.load()){
+    if(!committed){
+      if(calibration_abort.load())calibration_status="ABORTED";
+      else if(strcmp(calibration_status,"SAVE_FAILED"))calibration_status="FAILED";
+      disableBothDrivers();
+    }
+    calibration_active.store(false);
+  }
+  publishDiagnosticSnapshot(true);
 }
 
 }  // namespace
@@ -1125,6 +1186,9 @@ void loop() {
   if (!test_system_ready) {
     gateWheelOutputsOff();
     handleSerialCommand();
+    if(diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()&&wheelSensorsOK()){
+      mpu6050.update();LQR_angle=mpu6050.getAngleY();LQR_gyro=mpu6050.getGyroY();noteImuMeasurement();
+    }
     serviceHttpRequests();
     advanceStartup();
     delay(10);
@@ -1155,6 +1219,7 @@ void loop() {
 
   updateLqrState();
   serviceBootAutoStart();
+  serviceFallAutoRecovery();
 
   updateWheelVelocityDiagnostic();
   updateLqrDiagnostic();
@@ -1455,6 +1520,7 @@ void stopForActualFall(float& right_output, float& left_output) {
   Serial.println(
       "SAFETY STOP: mode=FULL_STOP reason=TILT_STOP drivers=DISABLED balance=OFF");
   disableLegServoTorqueForTestEnd("TILT_STOP");
+  fall_auto_recovery.arm();
 }
 
 bool wheelSensorsOK() {
@@ -1475,18 +1541,25 @@ bool initializeWheelFoc(BLDCMotor& motor) {
   foc_quiet_print.clear();
   int raw=-1,start=-1,stop=-1;
   bool raw_called=false;
-  if (wheelSensorsOK() && wheelAlignTimer) {
+  if (wheelSensorsOK() && wheelAlignTimer && (calibration_active.load()||calibration_loaded)) {
     wheelAlignExpired.store(false);
     start=esp_timer_start_once(wheelAlignTimer,6000000);
     if(start==ESP_OK) {
 #ifndef SIMPLEFOC_DISABLE_DEBUG
       SimpleFOCDebug::enable(&foc_quiet_print);
 #endif
-      // Never reuse calibration after phases/magnets/channels were reassembled.
-      // Reset only alignment inputs; keep poles, voltage and guard unchanged.
-      motor.sensor_direction=Direction::UNKNOWN;
-      motor.zero_electric_angle=NOT_SET;
-      motor.pp_check_result=false;
+      // Explicit calibration remeasures; ordinary boot restores validated values.
+      // Keep poles, voltage and the existing timeout guard unchanged.
+      if(calibration_active.load()){
+        motor.sensor_direction=Direction::UNKNOWN;
+        motor.zero_electric_angle=NOT_SET;
+        motor.pp_check_result=false;
+      } else {
+        const auto& saved=saved_wheel_calibration.wheels[slot];
+        motor.sensor_direction=static_cast<Direction>(saved.direction);
+        motor.zero_electric_angle=saved.zero;
+        motor.pp_check_result=saved.pp==1;
+      }
       raw_called=true;
       raw=motor.initFOC();
       gateWheelOutputsOffFrom(FocGateSource::Cleanup);
@@ -1500,7 +1573,7 @@ bool initializeWheelFoc(BLDCMotor& motor) {
   if(!raw_called)gateWheelOutputsOffFrom(FocGateSource::Cleanup);
   const bool expired=wheelAlignExpired.load();
   const bool sensors_ok=wheelSensorsOK();
-  const bool accepted=raw_called && static_cast<bool>(raw) && !expired && motor.pp_check_result && sensors_ok;
+  const bool accepted=raw_called && static_cast<bool>(raw) && !expired && motor.pp_check_result && sensors_ok && !calibration_abort.load();
   foc_alignment_observer.end(raw,start,stop,expired,motor.pp_check_result,
       sensors_ok,accepted,micros());
   // Essential result is always printed, only after EN is LOW. No extra reads.
@@ -1509,8 +1582,8 @@ bool initializeWheelFoc(BLDCMotor& motor) {
       (motor.sensor_direction==Direction::CCW ? "CCW" : "UNKNOWN");
   char result[320];
   snprintf(result,sizeof(result),
-      "FOC ALIGN wheel=%s direction=%s zero_rad=%.7f zero_measured=%d poles=%d pp=%s estimated_pp=%.4f raw=%d accepted=%d expired=%d sensors_ok=%d\n",
-      slot==0?"RIGHT":"LEFT",direction,motor.zero_electric_angle,
+      "FOC ALIGN wheel=%s source=%s direction=%s zero_rad=%.7f zero_measured=%d poles=%d pp=%s estimated_pp=%.4f raw=%d accepted=%d expired=%d sensors_ok=%d\n",
+      slot==0?"RIGHT":"LEFT",calibration_active.load()?"MEASURED":"SAVED_PP_PASS",direction,motor.zero_electric_angle,
       (r.valid & (1u<<4))!=0,motor.pole_pairs,
       !r.pp_observed?"NOT_RUN":(r.pp_pass?"PASS":"FAIL"),
       r.pp_observed && r.moved>0 ? 6.28318530718f/r.moved : NAN,
@@ -3439,6 +3512,84 @@ bool bootAutoMeasurementsReady(){
       wheelSensorsOK()&&isfinite(LQR_distance)&&isfinite(LQR_speed)&&
       isfinite(LQR_angle)&&isfinite(LQR_gyro);
 }
+// Runs only on the stopped main/control task; Preferences never touches a motor.
+struct CalibrationNvs {
+  Preferences prefs;bool read_failed=false;
+  size_t read(int slot,void* data,size_t size){
+    const char* key=slot==0?"slot0":"slot1";
+    const size_t n=prefs.getBytesLength(key);
+    if(n!=size)return n;
+    const size_t got=prefs.getBytes(key,data,size);
+    if(got!=size)read_failed=true;
+    return got;
+  }
+  bool write(int slot,const void* data,size_t size){
+    return prefs.putBytes(slot==0?"slot0":"slot1",data,size)==size;
+  }
+};
+void loadWheelCalibration(){
+  calibration_load_attempted=true;CalibrationNvs storage;
+  if(!storage.prefs.begin("wheel-foc",true)){calibration_status="MISSING_OR_NVS_ERROR";return;}
+  calibration_loaded=wheelcal::load(storage,calibrationConfig(),saved_wheel_calibration,saved_calibration_slot)==wheelcal::Load::Valid&&!storage.read_failed;
+  calibration_status=calibration_loaded?"VALID_SAVED":"MISSING_INVALID_CONFIG";
+}
+bool saveWheelCalibration(){
+  if(!calibration_active.load()||calibration_abort.load()||!wheelSensorsOK()||
+      !diagnostic_calibration_ok.load())return false;
+  for(unsigned i=0;i<2;++i){const auto&r=foc_alignment_observer.records[i];
+    if(!r.accepted||!r.pp_observed||!r.pp_pass||r.expired)return false;}
+  wheelcal::Record candidate;
+  candidate.wheels[0]={static_cast<int32_t>(motor1.sensor_direction),static_cast<uint32_t>(motor1.pole_pairs),motor1.zero_electric_angle,1};
+  candidate.wheels[1]={static_cast<int32_t>(motor2.sensor_direction),static_cast<uint32_t>(motor2.pole_pairs),motor2.zero_electric_angle,1};
+  uint8_t scanning=0;
+  if(!calibration_commit_phase.compare_exchange_strong(scanning,2))return false;
+  calibration_status="SAVING_OUTPUTS_OFF";
+  CalibrationNvs storage;if(!storage.prefs.begin("wheel-foc",false))return false;
+  // Re-read the protected slot even if the initial read-only open failed.
+  wheelcal::Record retained;int retained_slot=-1;
+  wheelcal::load(storage,calibrationConfig(),retained,retained_slot);
+  if(storage.read_failed)return false;
+  if(retained_slot>=0){saved_wheel_calibration=retained;saved_calibration_slot=retained_slot;}
+  if(!wheelcal::save(storage,calibrationConfig(),candidate,saved_wheel_calibration,saved_calibration_slot))return false;
+  calibration_loaded=true;return true;
+}
+void requestWheelCalibration(){
+  if(calibration_abort.load()){calibration_status="ABORTED";return;}
+  if(calibration_active.load()||lqr_direction_test_armed||balance_wait_active||polarity_test_active||
+      right_target_voltage!=0||left_target_voltage!=0){calibration_status="REJECTED_ACTIVE";return;}
+  if(sensor1.fault||sensor2.fault||!startup_web_ready.load()){
+    calibration_status="REJECTED_FAULT_OR_WEB";return;
+  }
+  disableBothDrivers();recordDiagnosticStop("CALIBRATION_REQUESTED");
+  calibration_active.store(true);calibration_status="CALIBRATING_WHEELS_MOVE";
+  emergency_stop_active=false;test_system_ready=false;startup_foc_ready.store(false);
+  foc_initialization_attempted=false;foc_initialization_failed=false;
+  publishStartupPhase("CALIBRATING_WHEELS_MOVE");
+  publishDiagnosticSnapshot(true);
+}
+void serviceFallAutoRecovery(){
+  if(!fall_auto_recovery.pending)return;
+  if(strcmp(last_stop_reason,"TILT_STOP")){fall_auto_recovery.cancel();return;}
+  const bool healthy=test_system_ready&&startup_foc_ready.load()&&calibration_loaded&&
+      !calibration_active.load()&&!foc_initialization_failed&&bootAutoMeasurementsReady()&&
+      diagnostic_calibration_done.load()&&driver1_initialized&&driver2_initialized&&
+      motor1.motor_status==FOCMotorStatus::motor_ready&&motor2.motor_status==FOCMotorStatus::motor_ready;
+  const char* wait=abs(LQR_angle)>kBalanceWaitAngleLimitDeg?"ANGLE_OUTSIDE_2_DEG":
+      abs(LQR_gyro)>kBalanceWaitGyroLimitDegPerSec?"GYRO_TOO_FAST":
+      abs(LQR_speed)>kBalanceWaitWheelSpeedLimit?"WHEELS_MOVING":nullptr;
+  if(!fall_auto_recovery.tick(healthy,wait==nullptr,millis())){
+    if(healthy&&wait)fall_auto_recovery.reason=wait;
+    return;
+  }
+  setBothTargetsToZero();emergency_stop_active=false;
+  driver1.enable();driver2.enable();
+  if(!startBalanceTest(true)){
+    disableBothDrivers();emergency_stop_active=true;fall_auto_recovery.reason="RESTART_REJECTED";
+  } else {
+    fall_auto_recovery.reason="RECOVERED";
+    Serial.println("FALL RECOVERY: BALANCING; reference=0 deg; new position origin.");
+  }
+}
 void serviceBootAutoStart(){
   if(boot_auto_start.phase==BootAutoStart::Phase::Finished||
      boot_auto_start.phase==BootAutoStart::Phase::Cancelled)return;
@@ -3764,6 +3915,7 @@ bool startBalanceTest(bool boot_immediate) {
     return false;
   }
 
+  fall_auto_recovery.cancel();
   if(!boot_auto_start.invoking)boot_auto_start.cancel();
   Serial.printf("LQR TEST MODE: %s\n", lqrTestModeDisplayName());
   Serial.printf("LQR SPEED SOURCE: %s\n", lqrSpeedSourceName());
@@ -4072,7 +4224,12 @@ void terminateLqrDriveSession(const char* reason, bool require_recenter) {
 }
 
 bool stopBalanceTest() {
+  if(calibration_active.load()){
+    gateWheelOutputsOff();calibration_abort.store(true);calibration_commit_phase.store(1);
+  }
   boot_auto_start.cancel();
+  fall_auto_recovery.cancel();
+  fall_auto_recovery.reason="EXPLICIT_STOP";
   if(!strcmp(diagnostic_stop_reason,"NONE"))recordDiagnosticStop("MANUAL_STOP");
   // A redundant STOP after a fall must not overwrite its diagnostic reason.
   if (lqr_direction_test_armed || balance_wait_active || polarity_test_active) {
@@ -4162,9 +4319,9 @@ std::atomic<bool> http_task_ready{false};
 
 diagnostic::Snapshot diagnostic_latest;
 portMUX_TYPE diagnostic_snapshot_lock=portMUX_INITIALIZER_UNLOCKED;
-void publishDiagnosticSnapshot(){
+void publishDiagnosticSnapshot(bool force){
   static uint32_t last=0,seq=0;
-  const uint32_t now=millis();if(uint32_t(now-last)<50)return;last=now;
+  const uint32_t now=millis();if(!force&&uint32_t(now-last)<50)return;last=now;
   diagnostic::Snapshot s;s.sample_ms=now;s.source_seq=++seq;s.foc_capture_us=last_foc_output.capture_us;
   s.stop_ms=diagnostic_stop_ms;memcpy(s.stop_reason,diagnostic_stop_reason,sizeof(s.stop_reason));
   s.running=lqr_direction_test_armed||balance_wait_active||polarity_test_active;
@@ -4176,6 +4333,8 @@ void publishDiagnosticSnapshot(){
       diagnostic_imu_calibrating.load()?2:diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load()?10:diagnostic_imu_io_seen&&!diagnostic_imu_io_ok?9:!diagnostic_imu_seq?3:
       sensor1.fault?(sensor2.fault?6:4):sensor2.fault?5:!diagnostic_imu_finite?7:0;
   s.reference_valid=lqr_zero_set;
+  snprintf(s.calibration,sizeof(s.calibration),"%s",calibration_status);
+  snprintf(s.recovery,sizeof(s.recovery),"%s",fall_auto_recovery.reason);
   s.command_ms=diagnostic_command_ms;s.command_valid=diagnostic_command_valid;
   s.state=(sensor1.fault||sensor2.fault||s.imu_reason==9||s.imu_reason==7||s.imu_reason==10)?6:
       diagnostic_startup_failed.load()&&!test_system_ready?7:
@@ -4190,6 +4349,10 @@ void publishDiagnosticSnapshot(){
       else if(!strcmp(diagnostic_stop_reason,"MANUAL_STOP")||!strcmp(diagnostic_stop_reason,"DISARM"))s.state=4;
     }
   }
+  if(s.state==5&&!strcmp(fall_auto_recovery.reason,"EXPLICIT_STOP"))s.state=4;
+  if(calibration_active.load())s.state=10;
+  else if(!calibration_loaded&&!test_system_ready&&!foc_initialization_failed&&s.imu_reason!=9&&s.imu_reason!=10&&!sensor1.fault&&!sensor2.fault)s.state=9;
+  else if(fall_auto_recovery.pending)s.state=11;
   snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
   snprintf(s.right_error,sizeof(s.right_error),"%s",sensor1.error);
   snprintf(s.left_error,sizeof(s.left_error),"%s",sensor2.error);
@@ -4218,6 +4381,8 @@ void publishDiagnosticSnapshot(){
       s.values[12]=NAN; // Outer tilt loop; no direct speed contribution.
     if (drive_recovery_state!=DriveRecoveryState::Inactive) s.values[12]=NAN;
   }
+  // Alignment phase voltages are not normal move() command voltages.
+  if(calibration_active.load()){s.command_valid=false;s.disabled=false;}
   diagnostic::freshness(s,now);
   portENTER_CRITICAL(&diagnostic_snapshot_lock);diagnostic_latest=s;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
 }
@@ -4229,11 +4394,15 @@ void captureHttpStatus();
 void formatHttpResources(char* text, size_t capacity);
 
 void serviceHttpRequests() {
-  publishDiagnosticSnapshot();
+  publishDiagnosticSnapshot(false);
   if (!http_status_queue) return;
   char command = 0;
   if (xQueueReceive(http_command_queue, &command, 0) == pdTRUE) {
     switch (command) {
+      case 'c':
+        if(calibration_abort.load()&&calibration_commit_phase.load()==1)calibration_status="ABORTED";
+        else requestWheelCalibration();
+        calibration_request_pending.store(false);break;
       case 't': executeOperatorCommand(OperatorCommand::Start); break;
       case 'd': executeOperatorCommand(OperatorCommand::EndTest); break;
       case 'g': executeOperatorCommand(OperatorCommand::CycleMode); break;
@@ -4262,6 +4431,33 @@ void enqueueHttpCommand(char command) {
     return;
   }
   sendSmallHttpResponse(202, "Command queued; check status for result\n");
+}
+void handleWheelCalibrationRequest(){
+  bool expected=false;
+  if(calibration_active.load()||!calibration_request_pending.compare_exchange_strong(expected,true)){
+    sendSmallHttpResponse(409,"Calibration already pending/active\n");return;
+  }
+  calibration_abort=false;calibration_commit_phase=0;
+  const char command='c';
+  if(xQueueSend(http_command_queue,&command,0)!=pdTRUE){
+    calibration_request_pending.store(false);sendSmallHttpResponse(409,"Command pending\n");return;
+  }
+  sendSmallHttpResponse(202,"Calibration queued; wheels will move; check status\n");
+}
+void handleWheelCalibrationAbort(){
+  if(calibration_request_pending.load()&&!calibration_active.load()){
+    calibration_commit_phase.store(1);calibration_abort.store(true);
+  }
+  if(calibration_active.load()){
+    // Immediate GPIO gate only; no I2C, Preferences or motor method on HTTP task.
+    gateWheelOutputsOffFrom(FocGateSource::WebAbort);
+    uint8_t scanning=0;
+    if(!calibration_commit_phase.compare_exchange_strong(scanning,1)){
+      sendSmallHttpResponse(409,"Alignment already ended; storage commit started, outputs off\n");return;
+    }
+    calibration_abort.store(true);
+  }
+  sendSmallHttpResponse(200,"Calibration abort requested\n");
 }
 void handleCycleLqrTestMode() { enqueueHttpCommand('g'); }
 void handleCycleLqrSpeedSource() { enqueueHttpCommand('i'); }
@@ -4592,6 +4788,8 @@ void startWifiHttpServer() {
                        [](){HttpMemoryRequest observed{6};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
     wifi_log_server.on("/trace/lqr.csv", HTTP_GET,
                        [](){HttpMemoryRequest observed{7};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
+    wifi_log_server.on("/calibration/start", HTTP_POST,handleWheelCalibrationRequest);
+    wifi_log_server.on("/calibration/abort", HTTP_POST,handleWheelCalibrationAbort);
     wifi_log_server.on("/control/mode", HTTP_POST,
                        [](){HttpMemoryRequest observed{8};handleCycleLqrTestMode();});
     wifi_log_server.on("/control/speed-source", HTTP_POST,

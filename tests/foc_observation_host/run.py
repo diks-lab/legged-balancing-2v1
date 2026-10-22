@@ -30,6 +30,7 @@ def function(source,name):
 app=Path('src/main.cpp').read_text(encoding='utf-8')
 prelude=r'''
 #include "FocAlignmentObservation.h"
+#include "WheelCalibration.h"
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -46,6 +47,9 @@ uint32_t now_us=100;
 uint32_t micros(){return now_us;}
 uint32_t _micros(){return now_us;}
 bool en[2]={true,true},bus_ok=true;
+std::atomic<bool> calibration_active{true},calibration_abort{false};
+bool calibration_loaded=false;
+wheelcal::Record saved_wheel_calibration;
 int fault_mode=0,timer_start_result=0,timer_stop_result=0;
 std::vector<unsigned long> delays;
 std::vector<float> commands;
@@ -130,7 +134,7 @@ void observeFocLibraryDisable(uint32_t now){foc_alignment_observer.gate(FocGateS
 '''
 checks=r'''
 void reset(){
- now_us=100;en[0]=en[1]=bus_ok=true;fault_mode=0;wheelAlignExpired=false;
+ now_us=100;en[0]=en[1]=bus_ok=true;calibration_active=true;calibration_abort=false;calibration_loaded=false;fault_mode=0;wheelAlignExpired=false;
  timer_start_result=timer_stop_result=0;wheelAlignTimer=reinterpret_cast<void*>(1);
  sensor1=FakeSensor{};sensor2=FakeSensor{};motor1=BLDCMotor{};motor2=BLDCMotor{};
  delays.clear();commands.clear();Serial.output.clear();foc_quiet_print.clear();
@@ -144,6 +148,19 @@ int main(){
   assert(foc_alignment_observer.records[1].raw_result==raw && motor2.pp_check_result==base_pp);
   assert(delays==base_delays && commands==base_commands && sensor2.updates==base_updates);
  }
+ // Saved direction/zero use SimpleFOC's standard skip path: no phase commands.
+ for(auto* motor:{&motor1,&motor2}){
+  reset();calibration_active=false;calibration_loaded=true;
+  saved_wheel_calibration.wheels[motor==&motor1?0:1]={-1,7,1.25f,1};
+  assert(initializeWheelFoc(*motor));
+  assert(commands.empty());
+  assert(delays.empty());
+  assert(motor->sensor_direction==Direction::CCW && motor->zero_electric_angle==1.25f);
+  assert(!foc_alignment_observer.records[motor==&motor1?0:1].pp_observed);
+  assert(Serial.output.find("source=SAVED_PP_PASS")!=std::string::npos);
+ }
+ reset();calibration_active=false;assert(!initializeWheelFoc(motor2));assert(commands.empty());
+ reset();calibration_abort=true;assert(!initializeWheelFoc(motor2));
  // Both slots must ignore stale/fixed direction, zero and PP success.
  for(auto* motor:{&motor1,&motor2}){
   reset();motor->sensor_direction=Direction::CW;

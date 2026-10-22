@@ -31,6 +31,8 @@ prelude = r'''
 #include "BoundedHttpResponse.h"
 #include "DiagnosticTelemetry.h"
 #include "BootAutoStart.h"
+#include "WheelCalibration.h"
+#include "FallAutoRecovery.h"
 #include "DiagnosticWebSocket.h"
 #define SERIAL_DIAGNOSTICS 1
 #include "ContinuingHttpFile.h"
@@ -60,11 +62,20 @@ std::atomic<bool> http_task_ready{false};
 #include <cassert>
 #include <iostream>
 #include <vector>
+#include <map>
 #include <cstring>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
 #include <cstdlib>
+struct Preferences {
+ inline static std::map<std::string,std::vector<uint8_t>> data;
+ inline static bool failOpen=false,failWrite=false,failRead=false;
+ bool begin(const char*,bool){return !failOpen;}
+ size_t getBytesLength(const char* k){return data[k].size();}
+ size_t getBytes(const char*k,void*p,size_t n){if(failRead||data[k].size()!=n)return 0;memcpy(p,data[k].data(),n);return n;}
+ size_t putBytes(const char*k,const void*p,size_t n){if(failWrite)return 0;const auto*b=static_cast<const uint8_t*>(p);data[k].assign(b,b+n);return n;}
+};
 using portMUX_TYPE=std::mutex;
 ReleaseMemoryObserver release_memory_observer;
 portMUX_TYPE release_memory_lock;
@@ -158,17 +169,19 @@ struct {
   void attach(void (*cb)()){input_cb=cb;}
   bool begin(){++begins;return ok;} // No pairing-argument overload is allowed here.
 } PS4;
+enum class FOCMotorStatus { motor_ready=4, motor_calib_failed=5 };
 struct DriveTestMotor {
   explicit DriveTestMotor(int) {}
+  Direction sensor_direction=Direction::CCW;int pole_pairs=7;float zero_electric_angle=1;
   float shaft_angle=0,shaft_velocity=0,target=0,current_sp=0;
-  int enabled=0,motor_status=0;
+  int enabled=0;FOCMotorStatus motor_status=FOCMotorStatus::motor_ready;
   struct {float q=0,d=0;} voltage;
   float shaftAngle(){return shaft_angle;}
   float shaftVelocity(){return shaft_velocity;}
   void move(float v){target=current_sp=v;}
 };
 struct DriveTestDriver {
-  int en; DriveTestDriver(int,int,int,int e):en(e){}
+  int en,pwmA,pwmB,pwmC; DriveTestDriver(int a,int b,int c,int e):en(e),pwmA(a),pwmB(b),pwmC(c){}
   void disable(){digitalWrite(en,LOW);}
   void enable(){digitalWrite(en,HIGH);}
   void setPwm(float,float,float){}
@@ -199,8 +212,9 @@ bridge_end = source.index('void captureHttpStatus();', bridge_start)
 prefix += source[bridge_start:bridge_end]
 prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
 prefix += source[source.index('struct HttpResponseTransport {'):source.index('void serviceHttpFileResponse()')]
+prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 names = [
-    'bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','serviceFallAutoRecovery','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -233,6 +247,7 @@ void printPs4DriveStopSummary(uint32_t){}
 void printLqrDriveSnapshot(const char*){}
 void printLqrDriveSignTrace(const char*){}
 void printLqrStopTrace(const char*){}
+void publishStartupPhase(const char* stage){diagnostic_startup_phase.store(stage);}
 void printAndResetLqrRunTime(){}
 void disableLegServoTorqueForTestEnd(const char*){}
 void printVelocityTrace(){}
@@ -257,12 +272,13 @@ void nearAt(float x,float y,int line){if(!(std::fabs(x-y)<1e-5f))fprintf(stderr,
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
   boot_auto_start=BootAutoStart{false};
+  fall_auto_recovery.cancel();calibration_loaded=true;calibration_active=false;calibration_abort=false;calibration_commit_phase=0;
   resetLqrTestState(); cancelBalanceWait();
   lqr_test_mode=mode;
   test_system_ready=true; startup_foc_ready.store(true); emergency_stop_active=false;
   sensor1.fault=sensor2.fault=false;
   diagnostic_calibration_done.store(true);diagnostic_calibration_ok.store(true);
-  motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=4;
+  motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=FOCMotorStatus::motor_ready;
   lqr_diagnostic_armed=true; lqr_direction_test_armed=true;
   LQR_angle=LQR_gyro=LQR_speed=LQR_distance=0;
   angle_zeropoint=distance_zeropoint=0;
@@ -831,7 +847,7 @@ int main(){
   near(lqr_drive_origin_distance,4.25f);near(lqr_drive_start_distance,4.25f);
   assert(boot_auto_start.phase==BootAutoStart::Phase::Finished);
   assert(test_LQR_u>0); // Uses actual 5 deg error, not a learned startup tilt.
-  setBothTargetsToZero();nowMs+=50;noteImuMeasurement();publishDiagnosticSnapshot();
+  setBothTargetsToZero();nowMs+=50;noteImuMeasurement();publishDiagnosticSnapshot(false);
   near(diagnostic_latest.values[0],5);near(diagnostic_latest.values[1],0);
   stopBalanceTest();
   for(int n=0;n<1000;++n){nowMs+=10;noteImuMeasurement();serviceBootAutoStart();}
@@ -853,14 +869,87 @@ int main(){
     serviceBootAutoStart();assert(!lqr_direction_test_armed);
   }
 
+  // Fall only: strict continuous upright hold; current state differs from history.
+  bootFixture();serviceBootAutoStart();br=bl=0;stopForActualFall(br,bl);
+  assert(fall_auto_recovery.pending && emergency_stop_active);
+  LQR_angle=0;LQR_gyro=0;LQR_speed=0;
+  auto recoverFrame=[&](unsigned ms){nowMs+=ms;noteImuMeasurement();serviceFallAutoRecovery();};
+  recoverFrame(0);recoverFrame(1000);assert(!lqr_direction_test_armed);
+  LQR_angle=3;recoverFrame(100);LQR_angle=.5f;recoverFrame(100);
+  recoverFrame(1499);assert(!lqr_direction_test_armed);
+  LQR_distance=6.5f;recoverFrame(1);assert(lqr_direction_test_armed&&!emergency_stop_active);
+  near(angle_zeropoint,0);near(distance_zeropoint,6.5f);
+  nowMs+=50;noteImuMeasurement();publishDiagnosticSnapshot(false);
+  assert(diagnostic_latest.state==3 && std::string(diagnostic_latest.stop_reason)=="TILT_STOP");
+  for(int kind=0;kind<4;++kind){
+    bootFixture();serviceBootAutoStart();stopForActualFall(br,bl);
+    if(kind==0)executeOperatorCommand(OperatorCommand::FullStop);
+    if(kind==1)stopBalanceTest();
+    if(kind==2)diagnostic_imu_io_ok=false;
+    if(kind==3)calibration_loaded=false;
+    LQR_angle=LQR_gyro=LQR_speed=0;recoverFrame(0);recoverFrame(2000);
+    assert(!lqr_direction_test_armed&&!fall_auto_recovery.pending);
+  }
+  // Explicit calibration never queues from running control; success path is
+  // exercised through the real FOC wrapper + two-slot storage suite.
+  setupCase();requestWheelCalibration();assert(!calibration_active.load());
+  setupCase();lqr_diagnostic_armed=lqr_direction_test_armed=false;
+  startup_web_ready.store(true);requestWheelCalibration();
+  assert(calibration_active.load()&&!test_system_ready&&!boot_auto_start.pending());
+  assert(!fall_auto_recovery.pending);
+  calibration_active=false;
+
+  // Production persistence admission: never save unsuccessful/aborted records.
+  Preferences::data.clear();Preferences::failWrite=false;
+  calibration_loaded=false;loadWheelCalibration();assert(!calibration_loaded);
+  setupCase();calibration_active=true;calibration_commit_phase=0;
+  for(auto&r:foc_alignment_observer.records){r={};r.accepted=r.pp_observed=r.pp_pass=true;}
+  saved_calibration_slot=-1;
+  assert(saveWheelCalibration());assert(calibration_loaded);
+  const auto oldStorage=Preferences::data;
+  for(int failure=0;failure<7;++failure){
+    calibration_commit_phase=0;calibration_abort=false;
+    for(auto&r:foc_alignment_observer.records){r.accepted=r.pp_observed=r.pp_pass=true;r.expired=false;}
+    if(failure==0)foc_alignment_observer.records[0].accepted=false;
+    if(failure==1)foc_alignment_observer.records[1].pp_pass=false;
+    if(failure==2)foc_alignment_observer.records[0].expired=true;
+    if(failure==3)calibration_abort=true;
+    if(failure==4)Preferences::failWrite=true;
+    if(failure==5)Preferences::failOpen=true;
+    if(failure==6)Preferences::failRead=true;
+    assert(!saveWheelCalibration());assert(Preferences::data==oldStorage);
+    Preferences::failWrite=false;Preferences::failOpen=false;Preferences::failRead=false;
+  }
+  calibration_active=false;calibration_abort=false;calibration_loaded=false;
+  saved_wheel_calibration={};saved_calibration_slot=-1;
+  loadWheelCalibration();assert(calibration_loaded && saved_calibration_slot>=0);
+  // Calibration request cancels automatic boot intent; completion stays stopped.
+  setupCase();lqr_direction_test_armed=lqr_diagnostic_armed=false;
+  requestWheelCalibration();test_system_ready=true;startup_foc_ready=true;
+  calibration_active=false;emergency_stop_active=true;serviceBootAutoStart();
+  assert(!lqr_direction_test_armed&&!boot_auto_start.pending());
+
+  // Cancellation covers queued requests and running scans without closing shared I2C.
+  setupCase();http_command_queue->full=false;calibration_request_pending=false;
+  handleWheelCalibrationRequest();assert(calibration_request_pending);
+  handleWheelCalibrationAbort();serviceHttpRequests();
+  assert(!calibration_request_pending&&!calibration_active);
+  assert(!strcmp(calibration_status,"ABORTED"));
+  setupCase();lqr_direction_test_armed=lqr_diagnostic_armed=false;requestWheelCalibration();
+  calibration_commit_phase=0;handleWheelCalibrationAbort();
+  assert(calibration_abort && calibration_commit_phase==1&&!pins[27]&&!pins[32]);
+  setupCase();calibration_active=true;calibration_commit_phase=2;
+  handleWheelCalibrationAbort();assert(!calibration_abort&&calibration_commit_phase==2);
+  calibration_active=false;
+
   // Latest telemetry reports selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);
-  nowMs+=50;publishDiagnosticSnapshot();
+  nowMs+=50;publishDiagnosticSnapshot(false);
   assert(std::isnan(diagnostic_latest.values[11])); // Drive disables position feedback.
   near(diagnostic_latest.values[9]+diagnostic_latest.values[10]+diagnostic_latest.values[12],diagnostic_latest.values[13]);
   // Exact PID inputs, signed/filtered speed selection and no second averaging.
   setupCase();LQR_angle=0.4f;LQR_gyro=-0.2f;LQR_distance=0.3f;
-  step(0.6f);nowMs+=50;publishDiagnosticSnapshot();
+  step(0.6f);nowMs+=50;publishDiagnosticSnapshot(false);
   near(diagnostic_latest.values[26],diagnostic_control_inputs.angle_error);
   near(diagnostic_latest.values[26],LQR_angle-angle_zeropoint);
   near(diagnostic_latest.values[3],LQR_gyro);
@@ -870,33 +959,33 @@ int main(){
   near(diagnostic_latest.values[27],distance_zeropoint-LQR_distance);
   near(diagnostic_latest.values[28],lqr_target_speed);
   near(diagnostic_latest.values[31],lqr_speed_raw_for_control);
-  setupCase(LqrTestMode::AttitudeOnly);step();nowMs+=50;publishDiagnosticSnapshot();
+  setupCase(LqrTestMode::AttitudeOnly);step();nowMs+=50;publishDiagnosticSnapshot(false);
   assert(std::isnan(diagnostic_latest.values[8]));
   assert(std::isnan(diagnostic_latest.values[11])&&std::isnan(diagnostic_latest.values[12]));
   setupCase();start(1);ps4_drive_state=Ps4DriveState::DriveRequested;
-  lqr_ps4_window_speed=0.27f;step(0.9f);nowMs+=50;publishDiagnosticSnapshot();
+  lqr_ps4_window_speed=0.27f;step(0.9f);nowMs+=50;publishDiagnosticSnapshot(false);
   near(diagnostic_latest.values[8],0.27f);
   near(diagnostic_latest.values[26],LQR_angle-angle_zeropoint-lqr_ps4_target_tilt_deg-lqr_drive_angle_bias);
   near(diagnostic_latest.values[29],lqr_ps4_target_tilt_deg+lqr_drive_angle_bias);
   assert(std::isnan(diagnostic_latest.values[12]));
   assert(stopBalanceTest());
   LQR_angle=12.5f;LQR_gyro=-3.2f;
-  angle_zeropoint=-0.8f;step();nowMs+=50;publishDiagnosticSnapshot();
+  angle_zeropoint=-0.8f;step();nowMs+=50;publishDiagnosticSnapshot(false);
   near(diagnostic_latest.values[0],12.5f);
   near(diagnostic_latest.values[1],-0.8f);
   near(diagnostic_latest.values[3],-3.2f);
   assert(!diagnostic_latest.running);
-  LQR_angle=-8.25f;LQR_gyro=1.6f;step();nowMs+=50;publishDiagnosticSnapshot();
+  LQR_angle=-8.25f;LQR_gyro=1.6f;step();nowMs+=50;publishDiagnosticSnapshot(false);
   near(diagnostic_latest.values[0],-8.25f);
   near(diagnostic_latest.values[1],-0.8f);
   near(diagnostic_latest.values[3],1.6f);
   assert(std::isnan(diagnostic_latest.values[26])&&std::isnan(diagnostic_latest.values[8]));
   const auto measurement_ms=diagnostic_imu_ms,measurement_seq=diagnostic_imu_seq;
-  nowMs+=300;publishDiagnosticSnapshot();
+  nowMs+=300;publishDiagnosticSnapshot(false);
   assert(!diagnostic_latest.imu_valid&&diagnostic_latest.imu_reason==8);
   assert(diagnostic_latest.imu_ms==measurement_ms&&diagnostic_latest.imu_seq==measurement_seq);
   assert(std::isnan(diagnostic_latest.values[0]));
-  sensor2.fault=true;nowMs+=50;publishDiagnosticSnapshot();
+  sensor2.fault=true;nowMs+=50;publishDiagnosticSnapshot(false);
   assert(diagnostic_latest.state==6&&diagnostic_latest.imu_reason==5);
   sensor2.fault=false;
   Serial.output.clear();printLqrStatus();

@@ -95,6 +95,12 @@ struct {
   void setAutoReconnect(bool){}
   void begin(const char*,const char*){assert(http_task_handle);}
 } WiFi;
+std::atomic<bool> calibration_active{false},calibration_abort{false};
+bool calibration_load_attempted=true;
+const char* calibration_status="RESTORED";
+void loadWheelCalibration(){calibration_load_attempted=true;}
+void publishDiagnosticSnapshot(bool){}
+constexpr uint8_t kWheelRightSda=19,kWheelRightScl=18,kWheelLeftSda=23,kWheelLeftScl=5;
 bool http_response_pending=false;
 bool fail_listen=false;
 bool test_system_ready=false, emergency_stop_active=false, fail_foc=false, lose_preflight_during_foc=false;
@@ -131,6 +137,8 @@ void handleWifiStatusPage(){}
 void handleVelocityTraceDownload(){}
 void handleLoopTimingTraceDownload(){}
 void handleLqrControlTraceDownload(){}
+void handleWheelCalibrationRequest(){}
+void handleWheelCalibrationAbort(){}
 void handleCycleLqrTestMode(){}
 void handleCycleLqrSpeedSource(){}
 void handleStartBalanceTest(){}
@@ -173,6 +181,7 @@ code += '\n'.join(function(n) for n in
                    'updateWifiLogServer'])
 code += r'''
 void reset(){
+  calibration_active=false;calibration_abort=false;calibration_load_attempted=true;
   foc_alignment_observer.measuring=false;foc_deferred_http_failure.store(nullptr);foc_deferred_http_started=foc_deferred_ip_announcement=false;
   if(http_status_queue)delete http_status_queue;
   if(http_command_queue)delete http_command_queue;
@@ -202,6 +211,7 @@ int main(){
   reset();foc_alignment_observer.measuring=true;
   printHttpStartupMemory("during_alignment");reportStartupFailure("WEB_LOST_DURING_FOC");
   assert(Serial.text.empty() && String(foc_deferred_http_failure.load())=="WEB_LOST_DURING_FOC");
+  calibration_active=false;calibration_abort=false;calibration_load_attempted=true;
   foc_alignment_observer.measuring=false;
   reportStartupFailure(foc_deferred_http_failure.exchange(nullptr));
   assert(Serial.text.find("WEB_LOST_DURING_FOC")!=String::npos);
@@ -281,6 +291,7 @@ int main(){
   WiFi.connection_status=0;WiFi.ip.value=0;tick();
   foc_alignment_observer.measuring=true;Serial.text.clear();connect();tick();
   assert(Serial.text.empty() && foc_deferred_ip_announcement);
+  calibration_active=false;calibration_abort=false;calibration_load_attempted=true;
   foc_alignment_observer.measuring=false;tick();
   assert(Serial.text.find("http://192.168.1.42/")!=String::npos && !foc_deferred_ip_announcement);
   // IP change and reconnect announce the numeric URL again, without another menu.
@@ -371,7 +382,10 @@ assert 'sensor1.begin(' not in function('initializeRobotHardware')
 assert 'sensor2.begin(' not in function('initializeRobotHardware')
 assert 'after_both_wheels_initialized' in function('initializeRobotHardware')
 hardware = function('initializeRobotHardware')
-assert hardware.count('return;') == hardware.count('reportStartupFailure(startup_stage);') + hardware.count('if (!startupHardwareStepAllowed()) return;')
+# Three stopped exits are deliberate: require calibration, IMU calibration failure, save failure.
+assert hardware.count('return;') == hardware.count('reportStartupFailure(startup_stage);') + hardware.count('if (!startupHardwareStepAllowed()) return;') + 3
+assert hardware.index('if(!calibration_loaded&&!calibration_active.load())') < hardware.index('driver1.init()')
+assert hardware.index('saveWheelCalibration()') < hardware.index('test_system_ready = true')
 assert 'startup_foc_ready.store(true)' not in hardware
 assert function('advanceStartup').index('initializeRobotHardware();') < function('advanceStartup').index('startup_foc_ready.store(true)')
 assert 'MDNS.begin' not in source and 'ESPmDNS.h' not in source
