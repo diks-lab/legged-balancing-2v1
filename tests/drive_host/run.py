@@ -831,7 +831,7 @@ int main(){
     last_stop_reason="NONE";diagnostic_startup_failed.store(false);
     diagnostic_imu_initialized.store(true);diagnostic_imu_calibrating.store(false);
     diagnostic_imu_io_ok=diagnostic_imu_io_seen=true;
-    LQR_angle=5;LQR_gyro=3;LQR_speed=1;LQR_distance=4.25f;
+    LQR_angle=1.9f;LQR_gyro=3;LQR_speed=1;LQR_distance=4.25f;
     noteImuMeasurement();
   };
   bootFixture();test_system_ready=false;serviceBootAutoStart();assert(!lqr_direction_test_armed);
@@ -839,16 +839,23 @@ int main(){
   startup_foc_ready.store(true);diagnostic_imu_calibrating.store(true);serviceBootAutoStart();assert(!lqr_direction_test_armed);
   diagnostic_imu_calibrating.store(false);diagnostic_calibration_done.store(false);serviceBootAutoStart();assert(!lqr_direction_test_armed);
   diagnostic_calibration_done.store(true);
-  // One service call, no time advancement, deliberately outside former gates.
+  // Tilted boot stays gated off, with fixed reference visible and live attitude.
+  LQR_angle=15;noteImuMeasurement();
+  for(int n=0;n<10;++n){serviceBootAutoStart();assert(!lqr_direction_test_armed&&!pins[27]&&!pins[32]);}
+  publishDiagnosticSnapshot(true);assert(diagnostic_latest.state==8&&diagnostic_latest.reference_valid);
+  near(diagnostic_latest.values[0],15);near(diagnostic_latest.values[1],0);
+  LQR_distance=6.25f;LQR_angle=1.9f;noteImuMeasurement();
+  // First in-range call: no hold or stationary-speed gate, no time advancement.
   const auto immediateMs=millis();serviceBootAutoStart();updateLqrDiagnostic();
   assert(millis()==immediateMs && lqr_direction_test_armed && lqr_zero_set);
+  assert(pins[27]&&pins[32]);
   assert(!balance_wait_active&&!balance_prepare_active);
-  near(angle_zeropoint,0);near(distance_zeropoint,4.25f);
-  near(lqr_drive_origin_distance,4.25f);near(lqr_drive_start_distance,4.25f);
+  near(angle_zeropoint,0);near(distance_zeropoint,6.25f);
+  near(lqr_drive_origin_distance,6.25f);near(lqr_drive_start_distance,6.25f);
   assert(boot_auto_start.phase==BootAutoStart::Phase::Finished);
-  assert(test_LQR_u>0); // Uses actual 5 deg error, not a learned startup tilt.
+  assert(test_LQR_u>0); // Uses actual 1.9 deg error, not the tilted startup pose.
   setBothTargetsToZero();nowMs+=50;noteImuMeasurement();publishDiagnosticSnapshot(false);
-  near(diagnostic_latest.values[0],5);near(diagnostic_latest.values[1],0);
+  near(diagnostic_latest.values[0],1.9f);near(diagnostic_latest.values[1],0);
   stopBalanceTest();
   for(int n=0;n<1000;++n){nowMs+=10;noteImuMeasurement();serviceBootAutoStart();}
   assert(!lqr_direction_test_armed);
@@ -867,6 +874,17 @@ int main(){
     assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
     diagnostic_imu_io_ok=true;diagnostic_calibration_ok.store(true);diagnostic_imu_finite=true;sensor2.fault=false;
     serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  }
+
+  // Stop/fault during tilted boot wait cannot be revived by raising the body.
+  for(int blocked=0;blocked<3;++blocked){
+    bootFixture();LQR_angle=15;noteImuMeasurement();serviceBootAutoStart();
+    if(blocked==0)executeOperatorCommand(OperatorCommand::FullStop);
+    if(blocked==1){diagnostic_imu_io_ok=false;serviceBootAutoStart();}
+    if(blocked==2){motor1.motor_status=FOCMotorStatus::motor_calib_failed;serviceBootAutoStart();}
+    diagnostic_imu_io_ok=true;motor1.motor_status=FOCMotorStatus::motor_ready;
+    emergency_stop_active=false;LQR_angle=1;noteImuMeasurement();serviceBootAutoStart();
+    assert(!lqr_direction_test_armed&&!boot_auto_start.pending());
   }
 
   // First in-range sample, even while rotating/moving; no time advancement.
