@@ -88,9 +88,10 @@ constexpr uint8_t ledPin = 22;
 constexpr float kWheelSupplyVoltage = 8.3f;
 constexpr float kWheelAlignVoltage = 2.0f;
 constexpr float kWheelRunVoltageLimit = 1.0f;
-// Verified with wheel_diagnostic: positive motor commands drive forward on BOTH.
+// Reassembled hardware: forward hand rotation decreases right shaft_angle,
+// increases left shaft_angle. Use the same mapping for commands and feedback.
 // These vehicle signs are independent of SimpleFOC's electrical sensor direction.
-constexpr float kRightForwardSign = 1.0f;
+constexpr float kRightForwardSign = -1.0f;
 constexpr float kLeftForwardSign = 1.0f;
 
 struct FocObservationLock {

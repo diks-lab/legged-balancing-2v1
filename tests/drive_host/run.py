@@ -163,6 +163,8 @@ struct DriveTestMotor {
   float shaft_angle=0,shaft_velocity=0,target=0,current_sp=0;
   int enabled=0,motor_status=0;
   struct {float q=0,d=0;} voltage;
+  float shaftAngle(){return shaft_angle;}
+  float shaftVelocity(){return shaft_velocity;}
   void move(float v){target=current_sp=v;}
 };
 struct DriveTestDriver {
@@ -216,7 +218,7 @@ names = [
     'onPs4Connect','onPs4Disconnect','onPs4Input','raisePs4ControlBarrier',
     'observePs4InputOnly','rearmPs4AfterFoc','updatePs4Controller',
     'setupPs4Controller','servicePs4DiagnosticSerial','serviceHttpPs4DiagnosticSerial','drainPs4DiagnosticSerial','executePs4Command','ps4CommandName','ps4CommandRejectionReason',
-    'updateWheelVelocityDiagnostic',
+    'updateWheelVelocityDiagnostic','updateLqrState',
 ]
 # No control behavior is stubbed: these functions only print or store logs.
 stubs = r'''
@@ -273,7 +275,8 @@ void setupCase(LqrTestMode mode=LqrTestMode::Full){
 void step(float speed=0){
   delay(10);
   LQR_speed=diag_LQR_speed_10ms=speed;
-  motor1.shaft_velocity=motor2.shaft_velocity=speed;
+  motor1.shaft_velocity=speed*kRightForwardSign;
+  motor2.shaft_velocity=speed*kLeftForwardSign;
   control_dt_ms=10;
   diagnostic_imu_initialized.store(true);diagnostic_imu_io_ok=diagnostic_imu_io_seen=true;noteImuMeasurement();
   updateLqrDiagnostic();
@@ -289,6 +292,24 @@ void start(float sign){
   assert(speed_direct_control==0); // preserve the old tilt-only drive profile
 }
 int main(){
+  // Measured forward rotation: right shaft decreases, left increases.
+  static_assert(kRightForwardSign==-1 && kLeftForwardSign==1);
+  static_assert(m1_direction==-0.5f && m2_direction==0.5f);
+  for(float direction:{-1.0f,1.0f}){
+    setupCase();
+    motor1.shaft_angle=-2*direction;motor2.shaft_angle=2*direction;
+    motor1.shaft_velocity=-3*direction;motor2.shaft_velocity=3*direction;
+    updateLqrState();near(LQR_distance,2*direction);near(LQR_speed,3*direction);
+    previous_velocity_diagnostic_us=micros();
+    previous_right_angle=motor1.shaft_angle;previous_left_angle=motor2.shaft_angle;
+    delay(10);motor1.shaft_angle-=.03f*direction;motor2.shaft_angle+=.03f*direction;
+    updateWheelVelocityDiagnostic();near(diag_LQR_speed_10ms,3*direction);
+    const float right=lqrMotorVoltage(.4f*direction,kRightForwardSign,1);
+    const float left=lqrMotorVoltage(.4f*direction,kLeftForwardSign,1);
+    near(right,-.4f*direction);near(left,.4f*direction);
+    // Same vehicle-frame direction on both sides; no second averaging.
+    near(right*kRightForwardSign,left*kLeftForwardSign);
+  }
   // Resource reservation and post-Web sensor sampling stay separate.
   {
     TwoWire prepared_bus(0);
@@ -369,7 +390,7 @@ int main(){
   // Wait brake opposes forward motion, but comparison mode has no brake.
   setupCase();balance_wait_active=true;balance_prepare_active=true;
   balance_prepare_start_ms=millis();balance_brake_enabled=true;
-  step(.2f);updateBalanceWait();assert(balance_brake_right<0 && balance_brake_left<0);
+  step(.2f);updateBalanceWait();assert(balance_brake_right>0 && balance_brake_left<0);
   lqr_test_mode=LqrTestMode::AttitudeOnly;step(.2f);updateBalanceWait();
   assert(balance_brake_right==0 && balance_brake_left==0);
   // e and the existing drive-only fault path keep attitude control alive.
@@ -528,10 +549,10 @@ int main(){
   near(ps4_yaw_output,.1f);
   float turnRight=0,turnLeft=0;
   test_LQR_u=.2f;applyPs4Steering(turnRight,turnLeft);
-  near(turnRight,.1f);near(turnLeft,.3f);
+  near(turnRight,-.1f);near(turnLeft,.3f);
   test_LQR_u=.98f;applyPs4Steering(turnRight,turnLeft);
-  near(turnRight,.96f);near(turnLeft,1);near((turnRight+turnLeft)/2,.98f);
-  test_LQR_u=1.5f;applyPs4Steering(turnRight,turnLeft);near(turnRight,1);near(turnLeft,1);
+  near(turnRight,-.96f);near(turnLeft,1);near((turnRight*kRightForwardSign+turnLeft*kLeftForwardSign)/2,.98f);
+  test_LQR_u=1.5f;applyPs4Steering(turnRight,turnLeft);near(turnRight,-1);near(turnLeft,1);
   packet.right_stick_x=-127;
   for(int i=0;i<25;++i)processPs4Input(packet,nowMs+=50);
   assert(ps4_yaw_output<0);
