@@ -2,7 +2,7 @@
 #include <stdint.h>
 namespace imu_config {
 // Change only this value for the independent DLPF comparison commit.
-constexpr uint8_t DlpfConfig=0x00;
+constexpr uint8_t DlpfConfig=0x03;
 struct Result { uint8_t config=255, divider=255, gyro=255, accel=255; };
 // Only during initialization, with motors disabled and before gyro calibration.
 // Do not use the library's unchecked byte-returning read helper.
