@@ -363,3 +363,12 @@ PS4の操作一覧・共通指令経路・実機未検証範囲は
 
 
 Web診断は[WebSocket・JSON・ブラウザー60秒履歴](docs/websocket-diagnostics.md)へ移行しています。ファームとLittleFSの両方を更新してください。操作の中心はPS4です。
+
+## ベースプロジェクト
+
+本プロジェクトは、fuwei007/Navbot-EN01の制御実装をベースに、
+本機体のハードウェア構成に合わせて移植・変更しています。
+
+- 参照元：https://github.com/fuwei007/Navbot-EN01
+- 主な参照対象：Src/wl_pro_robot/wl_pro_robot.ino
+- 由来・差分・変更時の方針：[docs/upstream-origin.md](docs/upstream-origin.md)
