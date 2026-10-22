@@ -144,6 +144,17 @@ int main(){
   assert(foc_alignment_observer.records[1].raw_result==raw && motor2.pp_check_result==base_pp);
   assert(delays==base_delays && commands==base_commands && sensor2.updates==base_updates);
  }
+ // Both slots must ignore stale/fixed direction, zero and PP success.
+ for(auto* motor:{&motor1,&motor2}){
+  reset();motor->sensor_direction=Direction::CW;
+  motor->zero_electric_angle=0.49f;motor->pp_check_result=true;
+  assert(initializeWheelFoc(*motor));
+  const auto& record=foc_alignment_observer.records[motor==&motor1?0:1];
+  assert(record.pp_observed && record.valid==31 && record.accepted);
+  assert(Serial.output.find(motor==&motor1?"wheel=RIGHT":"wheel=LEFT")!=std::string::npos);
+  assert(Serial.output.find("pp=PASS")!=std::string::npos);
+  assert(Serial.output.find("zero_measured=1")!=std::string::npos);
+ }
  reset();assert(initializeWheelFoc(motor2));
  auto r=foc_alignment_observer.records[1];
  assert(r.raw_result==1 && r.pp_observed && r.pp_pass && r.valid==31 && r.accepted);
@@ -158,10 +169,15 @@ int main(){
   reset();sensor2.estimated_pp=estimate;assert(!initializeWheelFoc(motor2));
   r=foc_alignment_observer.records[1];assert(r.raw_result==1 && !r.pp_pass && r.pp_observed && r.valid==31);
   assert(std::fabs(r.moved-_2PI/estimate)<0.00001f);
+  assert(Serial.output.find("pp=FAIL")!=std::string::npos);
+  assert(Serial.output.find("raw=1 accepted=0")!=std::string::npos);
  }
  reset();sensor2.estimated_pp=100000;assert(!initializeWheelFoc(motor2));
  r=foc_alignment_observer.records[1];assert(r.raw_result==0 && !r.pp_observed && r.valid==7);
  assert(r.gates[static_cast<unsigned>(FocGateSource::LibraryDisable)].count==1);
+ assert(Serial.output.find("pp=NOT_RUN")!=std::string::npos);
+ assert(Serial.output.find("direction=UNKNOWN")!=std::string::npos);
+ assert(Serial.output.find("zero_measured=0")!=std::string::npos);
  for(int fault:{1,2,3}){
   reset();fault_mode=fault;assert(!initializeWheelFoc(motor2));r=foc_alignment_observer.records[1];
   unsigned source=static_cast<unsigned>(fault==1?FocGateSource::Timer:(fault==2?FocGateSource::WebAbort:FocGateSource::LeftSensor));
@@ -206,6 +222,12 @@ with tempfile.TemporaryDirectory(prefix='foc-observe-') as directory:
     code+='\n'+function(app,'printFocAlignmentObservation')+'\n'+function(app,'initializeWheelFoc')+checks
     cpp.write_bytes(code.encode('utf-8'))
     subprocess.run(['c++','-std=c++17','-DSERIAL_DIAGNOSTICS=1','-Wall','-Wextra','-Werror','-pthread','-Iinclude',str(cpp),'-o',str(binary)],check=True)
+    subprocess.run([str(binary)],check=True)
+    # Essential summary survives normal diagnostics-OFF firmware.
+    quiet=code.replace('assert(Serial.output.find("raw_initFOC=1")!=std::string::npos);',
+                       'assert(Serial.output.find("FOC ALIGN")!=std::string::npos);')
+    cpp.write_text(quiet)
+    subprocess.run(['c++','-std=c++17','-DSERIAL_DIAGNOSTICS=0','-Wall','-Wextra','-Werror','-pthread','-Iinclude',str(cpp),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
 # Hooks only consume cached getters or local values. No extra sensor update or wait.
 for n in ['FOCMotor::initFOC','FOCMotor::alignSensor']:

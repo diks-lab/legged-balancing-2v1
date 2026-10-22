@@ -800,6 +800,7 @@ void setup() {
   delay(1000);
   initializeUartAllocationDiagnostics();
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
+  Serial.println("BOOT AUTO: DISABLED; manual start only. FOC alignment still moves wheels.");
   prepareI2cResources(); // Buffers and bus drivers only; wheel EN remains LOW.
   printHttpStartupMemory("before_ps4");
   observeReleaseMemory(MemPs4Before,0,0);
@@ -1479,6 +1480,11 @@ bool initializeWheelFoc(BLDCMotor& motor) {
 #ifndef SIMPLEFOC_DISABLE_DEBUG
       SimpleFOCDebug::enable(&foc_quiet_print);
 #endif
+      // Never reuse calibration after phases/magnets/channels were reassembled.
+      // Reset only alignment inputs; keep poles, voltage and guard unchanged.
+      motor.sensor_direction=Direction::UNKNOWN;
+      motor.zero_electric_angle=NOT_SET;
+      motor.pp_check_result=false;
       raw_called=true;
       raw=motor.initFOC();
       gateWheelOutputsOffFrom(FocGateSource::Cleanup);
@@ -1495,6 +1501,19 @@ bool initializeWheelFoc(BLDCMotor& motor) {
   const bool accepted=raw_called && static_cast<bool>(raw) && !expired && motor.pp_check_result && sensors_ok;
   foc_alignment_observer.end(raw,start,stop,expired,motor.pp_check_result,
       sensors_ok,accepted,micros());
+  // Essential result is always printed, only after EN is LOW. No extra reads.
+  const auto& r=foc_alignment_observer.records[slot];
+  const char* direction=motor.sensor_direction==Direction::CW ? "CW" :
+      (motor.sensor_direction==Direction::CCW ? "CCW" : "UNKNOWN");
+  char result[320];
+  snprintf(result,sizeof(result),
+      "FOC ALIGN wheel=%s direction=%s zero_rad=%.7f zero_measured=%d poles=%d pp=%s estimated_pp=%.4f raw=%d accepted=%d expired=%d sensors_ok=%d\n",
+      slot==0?"RIGHT":"LEFT",direction,motor.zero_electric_angle,
+      (r.valid & (1u<<4))!=0,motor.pole_pairs,
+      !r.pp_observed?"NOT_RUN":(r.pp_pass?"PASS":"FAIL"),
+      r.pp_observed && r.moved>0 ? 6.28318530718f/r.moved : NAN,
+      r.raw_result,r.accepted,r.expired,r.sensors_ok);
+  Serial.print(result);
   if(SERIAL_DIAGNOSTICS)printFocAlignmentObservation(slot);
   return accepted;
 }

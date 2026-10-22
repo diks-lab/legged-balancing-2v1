@@ -798,7 +798,14 @@ int main(){
     nowMs+=10;diagnostic_imu_io_ok=diagnostic_imu_io_seen=true;noteImuMeasurement();serviceBootAutoStart();
     updateLqrDiagnostic();updateBalanceWait();
   };
-  bootFixture();test_system_ready=false;
+  // Production default is OFF even with healthy sensors and permitted pose.
+  bootFixture();
+  assert(!boot_auto_start.pending());
+  for(int n=0;n<1000;++n)bootFrame();
+  assert(!balance_wait_active&&!lqr_direction_test_armed&&!lqr_zero_set);
+  assert(executeOperatorCommand(OperatorCommand::Start));
+  assert(balance_wait_active); // Existing manual path remains usable.
+  bootFixture();boot_auto_start=BootAutoStart{true};test_system_ready=false;
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!balance_wait_active&&!lqr_direction_test_armed);
   test_system_ready=true;startup_foc_ready.store(false);
@@ -840,11 +847,11 @@ int main(){
   float bootRight=0.1f,bootLeft=0.1f;stopForActualFall(bootRight,bootLeft);
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!lqr_direction_test_armed);
-  bootFixture();assert(executeOperatorCommand(OperatorCommand::FullStop));
+  bootFixture();boot_auto_start=BootAutoStart{true};assert(executeOperatorCommand(OperatorCommand::FullStop));
   emergency_stop_active=false;
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!balance_wait_active);
-  bootFixture();
+  bootFixture();boot_auto_start=BootAutoStart{true};
   diagnostic_imu_io_seen=true;diagnostic_imu_io_ok=false;noteImuMeasurement();
   const auto failedReadSeq=diagnostic_imu_seq,failedReadMs=diagnostic_imu_ms;
   serviceBootAutoStart();nowMs+=50;publishDiagnosticSnapshot();
@@ -853,7 +860,7 @@ int main(){
   assert(diagnostic_imu_seq==failedReadSeq&&diagnostic_imu_ms==failedReadMs);
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!balance_wait_active&&!lqr_direction_test_armed);
-  bootFixture();
+  bootFixture();boot_auto_start=BootAutoStart{true};
   for(int n=0;n<160;++n) { bootFrame(); }
   assert(balance_wait_active);
   diagnostic_imu_io_ok=false;noteImuMeasurement();serviceBootAutoStart();
@@ -862,12 +869,12 @@ int main(){
   assert(std::string(diagnostic_stop_reason)=="AUTO_IMU_INVALID");
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!balance_wait_active);
-  bootFixture();diagnostic_calibration_ok.store(false);serviceBootAutoStart();
+  bootFixture();boot_auto_start=BootAutoStart{true};diagnostic_calibration_ok.store(false);serviceBootAutoStart();
   assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
   diagnostic_calibration_ok.store(true);
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!balance_wait_active);
-  bootFixture();sensor2.fault=true;assert(stopOnWheelFault());
+  bootFixture();boot_auto_start=BootAutoStart{true};sensor2.fault=true;assert(stopOnWheelFault());
   for(int n=0;n<600;++n) { bootFrame(); }
   assert(!lqr_direction_test_armed);
 
