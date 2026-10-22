@@ -801,7 +801,7 @@ void setup() {
   delay(1000);
   initializeUartAllocationDiagnostics();
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
-  Serial.println("BOOT AUTO: DISABLED; manual start only. FOC alignment still moves wheels.");
+  Serial.println("BOOT AUTO: ENABLED; after initialization, allowed pose and reference capture. Stops cancel auto restart.");
   prepareI2cResources(); // Buffers and bus drivers only; wheel EN remains LOW.
   printHttpStartupMemory("before_ps4");
   observeReleaseMemory(MemPs4Before,0,0);

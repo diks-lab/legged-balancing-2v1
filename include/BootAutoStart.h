@@ -4,9 +4,9 @@
 class BootAutoStart {
  public:
   enum class Phase : uint8_t { Initializing, WaitingPose, Preparing, Finished, Cancelled };
-  // Reassembly: default OFF. Manual PS4/serial start remains available.
-  // Explicit opt-in is retained for host regression of the former boot path.
-  explicit BootAutoStart(bool enabled=false)
+  // Boot-only auto start is enabled. Stops permanently cancel this boot intent.
+  // Explicit OFF remains available to isolated host fixtures.
+  explicit BootAutoStart(bool enabled=true)
       : phase(enabled ? Phase::Initializing : Phase::Cancelled) {}
   Phase phase;
   bool invoking=false;
