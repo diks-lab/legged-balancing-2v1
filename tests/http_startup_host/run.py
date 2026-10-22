@@ -382,8 +382,8 @@ assert 'sensor1.begin(' not in function('initializeRobotHardware')
 assert 'sensor2.begin(' not in function('initializeRobotHardware')
 assert 'after_both_wheels_initialized' in function('initializeRobotHardware')
 hardware = function('initializeRobotHardware')
-# Three stopped exits are deliberate: require calibration, IMU calibration failure, save failure.
-assert hardware.count('return;') == hardware.count('reportStartupFailure(startup_stage);') + hardware.count('if (!startupHardwareStepAllowed()) return;') + 3
+# Four stopped exits: require calibration, IMU register/calibration failure, save failure.
+assert hardware.count('return;') == hardware.count('reportStartupFailure(startup_stage);') + hardware.count('if (!startupHardwareStepAllowed()) return;') + 4
 assert hardware.index('if(!calibration_loaded&&!calibration_active.load())') < hardware.index('driver1.init()')
 assert hardware.index('saveWheelCalibration()') < hardware.index('test_system_ready = true')
 assert 'startup_foc_ready.store(true)' not in hardware

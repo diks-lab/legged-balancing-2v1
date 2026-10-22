@@ -36,13 +36,19 @@ class DiagnosticHistory {
     const keys = SIGNALS.map(s => s[0]).filter(k =>
       this.rows.some(r => k in r.values));
     const quote = v => '"' + String(v ?? '').replaceAll('"', '""') + '"';
+    const windowKeys = this.rows.some(r => Array.isArray(r.gyro_window)) ? [
+      'imu_config', 'gyro_window_end_ms', 'gyro_window_us', 'gyro_window_count',
+      'gyro_window_invalid', 'gyro_window_min_dt_us', 'gyro_window_max_dt_us',
+      'gyro_rms_deg_s', 'gyro_peak_deg_s'
+    ] : [];
     const head = [
       'boot_id', 'subscription_id', 'seq', 'source_seq', 'sample_ms',
       'foc_capture_us', 'age_ms', 'dropped', 'stop_ms', 'stop_reason',
-      'faults', 'running', 'disabled', 'ps4', 'foc_ready', ...keys
+      'faults', 'running', 'disabled', 'ps4', 'foc_ready', ...windowKeys, ...keys
     ];
     return head.join(',') + '\n' + this.rows.map(s =>
-      head.map(k => quote(k in s ? s[k] : s.values[k])).join(',')
+      head.map(k => quote(windowKeys.includes(k)
+        ? s.gyro_window?.[windowKeys.indexOf(k)] : k in s ? s[k] : s.values[k])).join(',')
     ).join('\n');
   }
 }

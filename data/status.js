@@ -71,8 +71,36 @@ function renderDashboardStatus(view) {
       `${!current ? '診断配信停止／通信更新停止' : IMU_REASONS[s.imu_reason] || s.imu_reason}` +
       `${s.imu_reason === 'IMU_I2C_FAILED' ? `（tx=${s.imu_tx} rx=${s.imu_rx}/14）` : ''}` +
       ` / 実測 ${s.imu_ms} ms・#${s.imu_seq} / 基準角:${s.reference_valid ? '有効な設定値' : '未確定の設定値'}`;
+    renderGyroWindow(view, s, valid);
     const angle = s.values.angle_deg;
     view.el('pose-value').textContent = valid && Number.isFinite(angle)
       ? `${angle > 30 ? '▲ 上限超過 ' : angle < -30 ? '▼ 下限超過 ' : '姿勢角 '}${Math.abs(angle) > 30 ? String(angle) : angle.toFixed(2)}°`
       : '姿勢角：測定更新停止／不明';
+}
+
+// Compact metadata accompanies only the selected gyro signal; no display filter.
+function renderGyroWindow(view, sample, valid) {
+  let node = view.el('gyro-window');
+  if (!node) {
+    node = document.createElement('p');
+    node.id = 'gyro-window';
+    view.el('measurement').after(node);
+    const note = document.createElement('p');
+    note.textContent = '振動比較：内部DLPF後・オフセット補正後の角速度。' +
+      '内部DLPF前の値は取得できません。ソフトLPFなし。' +
+      'RMS・最大絶対値は制御周期ごとの約200 ms集計（時間加重なし）。' +
+      '20 Hz波形では高周波を識別できず、集計でも周波数は特定できません。';
+    node.after(note);
+  }
+  const w = sample.gyro_window;
+  const current = valid && Array.isArray(w) && w.length === 9 &&
+    ((sample.sample_ms - w[1]) >>> 0) + sample.age_ms + Date.now() - view.last <= 500;
+  if (!current || !Number.isFinite(w[7]) || !Number.isFinite(w[8])) {
+    node.textContent = '角速度短区間集計：更新停止／未取得／無効（角速度を選択）';
+    return;
+  }
+  node.textContent = `CONFIG=0x${w[0].toString(16).padStart(2, '0')} / ` +
+    `RMS ${w[7].toFixed(3)} deg/s・最大絶対 ${w[8].toFixed(3)} deg/s / ` +
+    `${(w[2] / 1000).toFixed(1)} ms・${w[3]}点・無効${w[4]} / ` +
+    `取得間隔 ${w[5]}～${w[6]} us / 終了 ${w[1]} ms`;
 }

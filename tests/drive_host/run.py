@@ -30,6 +30,7 @@ prelude = r'''
 #include "Ps4EventInbox.h"
 #include "BoundedHttpResponse.h"
 #include "DiagnosticTelemetry.h"
+#include "Mpu6050Config.h"
 #include "BootAutoStart.h"
 #include "WheelCalibration.h"
 #include "FallAutoRecovery.h"

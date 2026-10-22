@@ -21,6 +21,7 @@
 #include <lwip/sockets.h>
 #include "BoundedHttpResponse.h"
 #include "DiagnosticTelemetry.h"
+#include "Mpu6050Config.h"
 #include "BootAutoStart.h"
 #include "DiagnosticWebSocket.h"
 #include "SerialDiagnostics.h"
@@ -798,6 +799,8 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 std::atomic<bool> diagnostic_imu_initialized{false},diagnostic_imu_calibrating{false};
 std::atomic<bool> diagnostic_startup_failed{false};
 std::atomic<const char*> diagnostic_startup_phase{"WEB_WAIT"};
+diagnostic::GyroVibration gyro_vibration;
+imu_config::Result imu_registers;
 uint32_t diagnostic_imu_ms=0,diagnostic_imu_seq=0;
 bool diagnostic_imu_finite=false,diagnostic_imu_io_ok=false,diagnostic_imu_io_seen=false;
 uint8_t diagnostic_imu_tx=255,diagnostic_imu_rx=0;
@@ -805,6 +808,7 @@ std::atomic<bool> diagnostic_calibration_done{false},diagnostic_calibration_ok{f
 bool diagnostic_calibration_failed=false;uint16_t diagnostic_calibration_samples=0;
 void noteImuMeasurement(){
   diagnostic_imu_finite=diagnostic_imu_io_ok&&isfinite(LQR_angle)&&isfinite(LQR_gyro);
+  gyro_vibration.add(micros(),millis(),LQR_gyro,diagnostic_imu_finite);
   if(!diagnostic_imu_io_ok)return;
   diagnostic_imu_ms=millis();++diagnostic_imu_seq;
 }
@@ -930,6 +934,14 @@ void initializeRobotHardware() {
   }
   printHttpStartupMemory("before_mpu6050");
   mpu6050.begin();
+  const bool imu_config_ok=imu_config::apply(I2Cone,imu_registers);
+  Serial.printf("IMU CONFIG requested=0x%02x read=0x%02x DIV=0x%02x GYRO=0x%02x ACCEL=0x%02x result=%s\n",
+      imu_config::DlpfConfig,imu_registers.config,imu_registers.divider,
+      imu_registers.gyro,imu_registers.accel,imu_config_ok?"OK":"FAILED");
+  if (!imu_config_ok) {
+    disableBothDrivers();publishStartupPhase("IMU_CONFIG_FAILED");
+    reportStartupFailure("IMU_CONFIG_FAILED");return;
+  }
   diagnostic_imu_initialized.store(true);
   calibrateMpu6050();
   printHttpStartupMemory("after_mpu6050");
@@ -4341,6 +4353,7 @@ void publishDiagnosticSnapshot(bool force){
   s.running=lqr_direction_test_armed||balance_wait_active||polarity_test_active;
   s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=test_system_ready;
   s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
+  s.gyro_window=gyro_vibration.latest;s.imu_config=imu_registers.config;
   s.imu_ms=diagnostic_imu_ms;s.imu_seq=diagnostic_imu_seq;
   s.imu_tx=diagnostic_imu_tx;s.imu_rx=diagnostic_imu_rx;
   s.imu_reason=!diagnostic_imu_initialized.load()?1:

@@ -17,6 +17,9 @@ vm.runInContext(`
   }
   if (h.rows.length !== 1200 || h.clock - h.rows[0].time > 60000) throw Error('limit');
   if (!h.csv().includes('""stop""') || h.csv().includes('right_velocity_rad_s')) throw Error('CSV');
+  h.push({ sample_ms: 200000, seq: 4000, subscription_id: 1, boot_id: 'a',
+    dropped: 0, values: { gyro_deg_s: 1 }, gyro_window: [3, 200000, 200000, 101, 0, 2000, 2000, 1.25, 4.5] });
+  if (!h.csv().includes('gyro_rms_deg_s') || !h.csv().includes('"1.25"')) throw Error('window CSV');
   h.clear();
   const sample = (seq, ms, value, generation = 1, dropped = 0) => ({
     seq, sample_ms: ms, subscription_id: generation, boot_id: 'a', dropped,

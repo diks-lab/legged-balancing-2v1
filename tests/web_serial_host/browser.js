@@ -64,6 +64,15 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert.equal(await page.locator('canvas').count(), 4);
       assert.deepEqual(await page.evaluate(() => window.sent[0].fields),
         ['angle_deg', 'reference_deg', 'right_command_v', 'left_command_v', 'gyro_deg_s']);
+      await page.evaluate(() => window.sample({ gyro_window: [3, 50, 200000, 101, 0, 1800, 2200, 1.25, 4.5] }));
+      assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x03'));
+      assert((await page.locator('#gyro-window').textContent()).includes('RMS 1.250'));
+      await page.evaluate(() => window.sample({ gyro_window: [0, 100, 200000, 101, 0, 1800, 2200, 2.5, 8.5] }));
+      assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x00'));
+      await page.evaluate(() => window.sample({ gyro_window: [3, 150, 200000, 100, 1, 1800, 2200, null, null] }));
+      assert((await page.locator('#gyro-window').textContent()).includes('無効'));
+      await page.evaluate(() => window.sample({ gyro_window: [3, 200, 200000, 101, 0, 1800, 2200, 1, 2], imu_valid: false }));
+      assert((await page.locator('#gyro-window').textContent()).includes('更新停止'));
       await page.evaluate(() => { for (let i = 0; i < 1200; i++) window.sample(); });
       await page.click('#pause'); await page.click('#pause');
       assert(await page.evaluate(() => window.axisLabels.some(x => x.id === 'pose' && x.text === '30.0')));
@@ -104,7 +113,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.check('#autoscale');
       await page.click('#pause'); await page.click('#pause');
       await page.uncheck('#autoscale');
-      for (const preset of ['stationary', 'control', 'position', 'drive']) {
+      for (const preset of ['stationary', 'vibration', 'control', 'position', 'drive']) {
         const count = await page.evaluate(() => window.sent.length);
         await page.locator('#selection summary').click(); await page.selectOption('#preset', preset);
         await page.locator('#selection summary').click();

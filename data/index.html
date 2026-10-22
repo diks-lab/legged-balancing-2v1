@@ -57,6 +57,7 @@
       <label>プリセット
         <select id="preset">
           <option value="stationary">姿勢・出力＋角速度</option>
+          <option value="vibration">振動比較</option>
           <option value="control">制御入力の比較</option>
           <option value="position">位置保持</option>
           <option value="drive">PS4走行・旋回</option>
@@ -90,7 +91,7 @@
           通信／配信停止、250 msを超える古いスナップショット、無効値を現在出力として表示しません。</p>
         <p>補助グラフは単位別の独立軸。異なる単位の線の交差は同じ数値を意味しません。
           通常の最低範囲はdeg±20、deg/s±100、V±1、rad/s±6。姿勢専用軸は自動スケール対象外。
-          無効／未使用制御値はnull。新しいフィルターや追加I2C読み取りはありません。</p>
+          無効／未使用制御値はnull。表示用フィルターなし。</p>
         <p>制御角度誤差は実際の姿勢PID入力（基準＋目標傾斜＋既存バイアスとの差）。
           車輪位置・速度はSimpleFOCの方向補正・既存LPF後に車体前進符号を適用。
           平均速度は制御が実際に選んだ通常LPF後／PS4速度窓で、再度2で割りません。

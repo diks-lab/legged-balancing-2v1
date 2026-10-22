@@ -3,7 +3,7 @@ const SIGNALS = [
   ['angle_deg', '姿勢角', 'deg'],
   ['reference_deg', '基準角', 'deg'],
   ['angle_error_deg', '基準角との差', 'deg'],
-  ['gyro_deg_s', '機体角速度', 'deg/s'],
+  ['gyro_deg_s', '機体角速度（内部DLPF後）', 'deg/s'],
   ['right_position_rad', '右位置', 'rad'],
   ['left_position_rad', '左位置', 'rad'],
   ['right_velocity_rad_s', '右車輪速度', 'rad/s'],
@@ -42,6 +42,7 @@ const CONTROL_FIELDS = [
   'right_command_v', 'left_command_v'
 ];
 const PRESETS = {
+  vibration: ['gyro_deg_s', 'angle_term_v', 'gyro_term_v'],
   stationary: DEFAULTS,
   control: CONTROL_FIELDS,
   position: [...CONTROL_FIELDS, 'position_error_rad'],
