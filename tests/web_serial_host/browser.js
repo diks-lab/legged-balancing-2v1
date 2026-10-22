@@ -94,8 +94,12 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert((await page.locator('#measurement').textContent()).includes('校正'));
       await page.evaluate(() => window.sample({ imu_valid: false, imu_reason: 'IMU_I2C_FAILED', imu_tx: 2, imu_rx: 0, state: 'FAULT' }));
       assert((await page.locator('#measurement').textContent()).includes('tx=2 rx=0/14'));
-      await page.evaluate(() => window.sample({ state: 'AUTO_WAIT' }));
-      assert((await page.locator('#health').textContent()).includes('自動開始待ち'));
+      await page.evaluate(() => window.sample({ state: 'AUTO_WAIT', disabled: true, recovery_checks: 14,
+        reference_valid: true, values: { angle_deg: 15, reference_deg: 0, left_command_v: 0, right_command_v: 0 } }));
+      assert((await page.locator('#health').textContent()).includes('起立待ち'));
+      assert((await page.locator('#pose-value').textContent()).includes('15.00'));
+      assert.equal(await page.locator('#right-reading').textContent(), '遮断');
+      assert.equal(await page.locator('#condition-upright').getAttribute('data-ok'), 'false');
       // Fixed attitude scale survives auxiliary autoscale.
       await page.check('#autoscale');
       await page.click('#pause'); await page.click('#pause');

@@ -1,7 +1,7 @@
 'use strict';
 const MACHINE_NAMES = {
   INITIALIZING: '初期化中', READY_WAIT: '開始待機', BALANCE_WAIT: '開始姿勢の安定待ち',
-  AUTO_WAIT: '自動開始待ち', BALANCING: '倒立中', EXPLICIT_STOP: '明示停止',
+  AUTO_WAIT: '起立待ち', BALANCING: '倒立中', EXPLICIT_STOP: '明示停止',
   CALIBRATION_REQUIRED: '要校正', CALIBRATING: '校正中（車輪が動きます）',
   FALL_RECOVERY_WAIT: '転倒復帰待ち', FALL_STOP: '転倒停止', FAULT: '異常', STARTUP_FAILED: '異常（起動失敗）'
 };
