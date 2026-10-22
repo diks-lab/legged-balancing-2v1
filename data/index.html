@@ -15,6 +15,7 @@
         <p id="subscription" role="status">配信未設定</p>
       </div>
       <p id="health">初期化状態：未取得</p>
+      <div id="recovery-checks" aria-label="復帰条件"></div>
       <p id="calibration">校正状態：未取得</p>
     </header>
     <div id="workspace">
@@ -70,6 +71,7 @@
         <p id="connection-details">通信詳細：未取得</p>
         <p id="loss">欠落：未取得</p>
         <p id="measurement">測定更新：未取得</p>
+        <p id="recovery-details">復帰詳細：未取得</p>
         <p id="stop-history">最新停止履歴：未取得</p>
         <p>再校正は磁石・モーター・センサー・相配線変更時のみ。脚・外装だけの変更では不要です。
           PS4等で停止後、機体を保持してください。校正中は車輪が動きます。完了後は自動倒立しません。</p>
@@ -118,7 +120,7 @@
           style.textContent = await asset(target);
           document.head.appendChild(style);
         }
-        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/dashboard.js', '/app.js']) {
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/status.js', '/dashboard.js', '/app.js']) {
           const script = document.createElement('script');
           script.textContent = await asset(target);
           document.head.appendChild(script);

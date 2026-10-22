@@ -3,9 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'status.js', 'dashboard.js', 'app.js'];
 const context = vm.createContext({});
-for (const name of ['signals.js', 'history.js', 'plot.js', 'dashboard.js']) {
+for (const name of ['signals.js', 'history.js', 'plot.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`

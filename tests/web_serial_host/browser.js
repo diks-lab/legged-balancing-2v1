@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
@@ -51,7 +51,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
             boot_id: 'boot-test', subscription_id: request.request_id, seq, source_seq: seq,
             sample_ms: seq * 50, imu_ms: seq * 50, imu_seq: seq, imu_valid: true,
             imu_reason: 'OK', reference_valid: false, command_valid: true, command_ms: seq * 50,
-            age_ms: 0, dropped: 0, state: 'READY_WAIT', startup_reason: 'READY',
+            age_ms: 0, dropped: 0, recovery_checks: 15, state: 'READY_WAIT', startup_reason: 'READY',
             right_error: '', left_error: '', stop_reason: 'NONE', stop_ms: 0,
             faults: 0, running: false, disabled: false, foc_ready: true, ps4: false, values, ...extra };
           window.peer.onmessage({ data: JSON.stringify(sample) });
@@ -89,7 +89,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         state: 'FAULT', faults: 1, right_error: 'I2C_NACK' }));
       assert.equal(await page.locator('#right-reading').textContent(), '更新停止／不明');
       assert((await page.locator('#measurement').textContent()).includes('右車輪異常'));
-      assert((await page.locator('#health').textContent()).includes('I2C_NACK'));
+      assert((await page.locator('#recovery-details').textContent()).includes('I2C_NACK'));
       await page.evaluate(() => window.sample({ imu_valid: false, imu_reason: 'CALIBRATION_FAILED', state: 'FAULT' }));
       assert((await page.locator('#measurement').textContent()).includes('校正'));
       await page.evaluate(() => window.sample({ imu_valid: false, imu_reason: 'IMU_I2C_FAILED', imu_tx: 2, imu_rx: 0, state: 'FAULT' }));
@@ -167,11 +167,35 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.sample({ state: 'CALIBRATION_REQUIRED', calibration: 'MISSING_INVALID_CONFIG' }));
       assert((await page.locator('#health').textContent()).includes('要校正'));
       assert((await page.locator('#calibration').textContent()).includes('設定不一致'));
-      await page.evaluate(() => window.sample({ state: 'FALL_RECOVERY_WAIT', recovery: 'HOLD_1500_MS', calibration: 'RESTORED', stop_reason: 'TILT_STOP' }));
-      assert((await page.locator('#health').textContent()).includes('1.5秒'));
+      await page.evaluate(() => window.sample({ state: 'FALL_RECOVERY_WAIT', recovery: 'UPRIGHT_REQUIRED', calibration: 'RESTORED', stop_reason: 'TILT_STOP' }));
+      assert((await page.locator('#health').textContent()).includes('転倒復帰待ち'));
+      assert((await page.locator('#recovery-details').textContent()).includes('進入待ち'));
       await page.evaluate(() => window.sample({ state: 'BALANCING', running: true, recovery: 'RECOVERED', calibration: 'RESTORED', stop_reason: 'TILT_STOP' }));
-      assert((await page.locator('#health').textContent()).includes('復帰完了'));
+      assert((await page.locator('#recovery-details').textContent()).includes('復帰完了'));
       assert(!(await page.locator('#health').textContent()).includes('転倒停止'));
+      const labels = ['直立範囲', 'IMU', '車輪センサー', 'FOC'];
+      assert.deepEqual(await page.locator('#recovery-checks strong').allTextContents(), labels);
+      await page.evaluate(() => window.sample({ state: 'FALL_RECOVERY_WAIT', recovery_checks: 14,
+        values: { angle_deg: 2.01, reference_deg: 0 } }));
+      assert.equal(await page.locator('#condition-upright').getAttribute('data-ok'), 'false');
+      assert((await page.locator('#condition-upright').textContent()).includes('× 2.01° / ±2°'));
+      for (const key of ['imu', 'wheels', 'foc']) {
+        assert.equal(await page.locator(`#condition-${key}`).getAttribute('data-ok'), 'true');
+        assert((await page.locator(`#condition-${key}`).textContent()).includes('○'));
+      }
+      await page.evaluate(() => window.sample({ state: 'BALANCING', recovery_checks: 15,
+        values: { angle_deg: -1.9, reference_deg: 0 } }));
+      assert.equal(await page.locator('#condition-upright').getAttribute('data-ok'), 'true');
+      await page.evaluate(() => window.sample({ state: 'EXPLICIT_STOP', recovery_checks: 15 }));
+      assert.equal(await page.locator('#health').textContent(), '明示停止');
+      await page.evaluate(() => window.sample({ state: 'FAULT', imu_valid: false,
+        imu_reason: 'IMU_I2C_FAILED', recovery_checks: 4 }));
+      assert.equal(await page.locator('#condition-imu').getAttribute('data-ok'), 'false');
+      assert.equal(await page.locator('#condition-foc').getAttribute('data-ok'), 'false');
+      assert.deepEqual(await page.locator('#recovery-checks strong').allTextContents(), labels);
+      await page.waitForFunction(() => document.getElementById('condition-imu').dataset.ok === 'unknown');
+      assert((await page.locator('#condition-imu').textContent()).includes('？'));
+      await page.evaluate(() => window.sample());
       assert(await page.locator('#connection-details').evaluate(n => n.closest('details').open === false));
       assert(await page.locator('#measurement').evaluate(n => !!n.closest('details')));
       await page.locator('#details summary').click();

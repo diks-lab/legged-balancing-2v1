@@ -36,3 +36,9 @@ nav { flex: none; margin: 0; }
   .instruments { grid-template-columns: 1fr; }
   .instruments { grid-template-rows: 180px 200px; }
 }
+
+#recovery-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.condition { padding: 2px 6px; border: 1px solid #aab4bf; border-radius: 4px; background: #eef0f3; }
+.condition[data-ok='true'] { color: #075923; background: #d7f4df; border-color: #24834a; }
+.condition[data-ok='false'] { color: #6d2830; background: #f3e8e9; }
+.condition[data-ok='unknown'] { color: #556170; }
