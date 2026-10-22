@@ -15,6 +15,7 @@ class BootAutoStart {
     if(!ready){phase=Phase::Initializing;holding=false;return false;}
     phase=Phase::WaitingPose;
     if(!allowed){holding=false;return false;}
+    if(hold_ms==0){phase=Phase::Preparing;return true;}
     if(!holding){since=now;holding=true;return false;}
     if(uint32_t(now-since)<hold_ms)return false;
     phase=Phase::Preparing;holding=false;return true;

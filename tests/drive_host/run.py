@@ -200,7 +200,7 @@ prefix += source[bridge_start:bridge_end]
 prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
 prefix += source[source.index('struct HttpResponseTransport {'):source.index('void serviceHttpFileResponse()')]
 names = [
-    'bootAutoPoseAllowed','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -330,7 +330,7 @@ int main(){
   // AUTO START still requires an explicit t-equivalent and starts at rest.
   setupCase(); lqr_direction_test_armed=false; lqr_diagnostic_armed=false;
   assert(!requestLqrDrive(.3f,'>'));
-  assert(startBalanceTest());
+  assert(startBalanceTest(false));
   for(int i=0;i<500 && !lqr_direction_test_armed;++i){
     step(); updateBalanceWait();
   }
@@ -440,7 +440,7 @@ int main(){
   captureHttpStatus();handleWifiStatusPage();assert(wifi_log_server.status==200);
   handleStopBalanceTest();serviceHttpRequests();assert(std::string(last_stop_reason)=="TILT_STOP");
   handleStartBalanceTest();serviceHttpRequests();assert(std::string(last_stop_reason)=="TILT_STOP");
-  emergency_stop_active=false;assert(startBalanceTest());
+  emergency_stop_active=false;assert(startBalanceTest(false));
   assert(std::string(diagnostic_stop_reason)=="TILT_STOP"); // restart keeps latest event
   assert(std::string(last_stop_reason)=="NONE" && balance_wait_active);
   assert(stopBalanceTest());assert(std::string(last_stop_reason)=="MANUAL_STOP");
@@ -449,7 +449,7 @@ int main(){
   sensor1.begin(19,18);sensor2.begin(23,5);
   setupCase();sensor2.fault=true;gateWheelOutputsOff();assert(stopOnWheelFault());
   assert(!pins[27] && !pins[32] && !test_system_ready && !lqr_direction_test_armed);
-  assert(!startBalanceTest());
+  assert(!startBalanceTest(false));
   captureHttpStatus();handleWifiStatusPage();
   assert(wifi_log_server.body.find("System initialized: no")!=String::npos);
   assert(wifi_log_server.body.find("fault=1")!=String::npos);
@@ -806,103 +806,52 @@ int main(){
   PS4.input.cross=true;PS4.input_cb();updatePs4Controller();assert(emergency_stop_active&&!pins[27]&&!pins[32]);
   ws.disconnect(wsio);assert(!wsio.open);
 
-  // Boot-only auto start: actual shared start/wait path, no fabricated reference.
+  // Boot starts immediately with fixed zero reference, using shared start reset.
   auto bootFixture=[&](){
-    setupCase(LqrTestMode::Full);
+    setupCase(LqrTestMode::AttitudeOnly);
     boot_auto_start=BootAutoStart{};
     sensor1.begin(19,18);sensor2.begin(23,5);
     lqr_diagnostic_armed=lqr_direction_test_armed=false;lqr_zero_set=false;
     last_stop_reason="NONE";diagnostic_startup_failed.store(false);
     diagnostic_imu_initialized.store(true);diagnostic_imu_calibrating.store(false);
-    LQR_angle=0.8f;LQR_gyro=0.2f;LQR_speed=0;
+    diagnostic_imu_io_ok=diagnostic_imu_io_seen=true;
+    LQR_angle=5;LQR_gyro=3;LQR_speed=1;LQR_distance=4.25f;
+    noteImuMeasurement();
   };
-  auto bootFrame=[&](){
-    nowMs+=10;diagnostic_imu_io_ok=diagnostic_imu_io_seen=true;noteImuMeasurement();serviceBootAutoStart();
-    updateLqrDiagnostic();updateBalanceWait();
-  };
-  // Explicit OFF remains inert; production default is exercised below.
-  bootFixture();boot_auto_start=BootAutoStart{false};
-  assert(!boot_auto_start.pending());
-  for(int n=0;n<1000;++n)bootFrame();
-  assert(!balance_wait_active&&!lqr_direction_test_armed&&!lqr_zero_set);
-  assert(executeOperatorCommand(OperatorCommand::Start));
-  assert(balance_wait_active); // Existing manual path remains usable.
-  bootFixture();assert(boot_auto_start.pending());test_system_ready=false;
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active&&!lqr_direction_test_armed);
-  test_system_ready=true;startup_foc_ready.store(false);
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  startup_foc_ready.store(false);test_system_ready=false;diagnostic_startup_failed.store(true);
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  diagnostic_startup_failed.store(false);test_system_ready=true;startup_foc_ready.store(true);diagnostic_imu_initialized.store(false);
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  diagnostic_imu_initialized.store(true);LQR_angle=12;
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active&&!lqr_zero_set);
-  LQR_angle=0.8f;LQR_gyro=3;
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  LQR_gyro=0.2f;diagnostic_imu_calibrating.store(true);
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  diagnostic_imu_calibrating.store(false);
-  bootFrame();setBothTargetsToZero();nowMs+=50;noteImuMeasurement();publishDiagnosticSnapshot();
-  assert(!lqr_direction_test_armed&&!balance_wait_active);
-  near(diagnostic_latest.values[0],LQR_angle);
-  near(diagnostic_latest.values[14],0);near(diagnostic_latest.values[15],0);
-  for(int n=0;n<160;++n)bootFrame();
-  assert(balance_wait_active&&!lqr_direction_test_armed&&!lqr_zero_set);
-  assert(boot_auto_start.phase==BootAutoStart::Phase::Preparing);
-  LQR_angle=12;
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!lqr_direction_test_armed&&!lqr_zero_set);
-  LQR_angle=0.8f;
-  for(int n=0;n<400;++n)bootFrame();
-  assert(lqr_direction_test_armed&&lqr_zero_set&&!balance_wait_active);
-  near(angle_zeropoint,0.8f);assert(lqr_test_mode==LqrTestMode::Full);
+  bootFixture();test_system_ready=false;serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  test_system_ready=true;startup_foc_ready.store(false);serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  startup_foc_ready.store(true);diagnostic_imu_calibrating.store(true);serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  diagnostic_imu_calibrating.store(false);diagnostic_calibration_done.store(false);serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  diagnostic_calibration_done.store(true);
+  // One service call, no time advancement, deliberately outside former gates.
+  const auto immediateMs=millis();serviceBootAutoStart();updateLqrDiagnostic();
+  assert(millis()==immediateMs && lqr_direction_test_armed && lqr_zero_set);
+  assert(!balance_wait_active&&!balance_prepare_active);
+  near(angle_zeropoint,0);near(distance_zeropoint,4.25f);
+  near(lqr_drive_origin_distance,4.25f);near(lqr_drive_start_distance,4.25f);
   assert(boot_auto_start.phase==BootAutoStart::Phase::Finished);
+  assert(test_LQR_u>0); // Uses actual 5 deg error, not a learned startup tilt.
+  setBothTargetsToZero();nowMs+=50;noteImuMeasurement();publishDiagnosticSnapshot();
+  near(diagnostic_latest.values[0],5);near(diagnostic_latest.values[1],0);
   stopBalanceTest();
-  for(int n=0;n<1000;++n) { bootFrame(); }
-  assert(!balance_wait_active&&!lqr_direction_test_armed);
-  assert(executeOperatorCommand(OperatorCommand::Start));
-  for(int n=0;n<400;++n) { bootFrame(); }
-  assert(lqr_direction_test_armed&&lqr_zero_set);
-  float bootRight=0.1f,bootLeft=0.1f;stopForActualFall(bootRight,bootLeft);
-  for(int n=0;n<600;++n) { bootFrame(); }
+  for(int n=0;n<1000;++n){nowMs+=10;noteImuMeasurement();serviceBootAutoStart();}
   assert(!lqr_direction_test_armed);
-  bootFixture();assert(executeOperatorCommand(OperatorCommand::FullStop));
-  emergency_stop_active=false;
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  bootFixture();
-  diagnostic_imu_io_seen=true;diagnostic_imu_io_ok=false;noteImuMeasurement();
-  const auto failedReadSeq=diagnostic_imu_seq,failedReadMs=diagnostic_imu_ms;
-  serviceBootAutoStart();nowMs+=50;publishDiagnosticSnapshot();
-  assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
-  assert(diagnostic_latest.imu_reason==9&&!diagnostic_latest.imu_valid);
-  assert(diagnostic_imu_seq==failedReadSeq&&diagnostic_imu_ms==failedReadMs);
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active&&!lqr_direction_test_armed);
-  bootFixture();
-  for(int n=0;n<160;++n) { bootFrame(); }
-  assert(balance_wait_active);
-  diagnostic_imu_io_ok=false;noteImuMeasurement();serviceBootAutoStart();
-  assert(!balance_wait_active&&!lqr_diagnostic_armed&&!lqr_direction_test_armed);
-  assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
-  assert(std::string(diagnostic_stop_reason)=="AUTO_IMU_INVALID");
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  bootFixture();diagnostic_calibration_ok.store(false);serviceBootAutoStart();
-  assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
-  diagnostic_calibration_ok.store(true);
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!balance_wait_active);
-  bootFixture();sensor2.fault=true;assert(stopOnWheelFault());
-  for(int n=0;n<600;++n) { bootFrame(); }
-  assert(!lqr_direction_test_armed);
+  assert(executeOperatorCommand(OperatorCommand::Start));assert(balance_wait_active); // Manual path unchanged.
+  bootFixture();assert(executeOperatorCommand(OperatorCommand::FullStop));emergency_stop_active=false;
+  serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  bootFixture();serviceBootAutoStart();float br=.1f,bl=.1f;stopForActualFall(br,bl);
+  emergency_stop_active=false;serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  for(int fault=0;fault<4;++fault){
+    bootFixture();
+    if(fault==0)diagnostic_imu_io_ok=false;
+    if(fault==1)diagnostic_calibration_ok.store(false);
+    if(fault==2)diagnostic_imu_finite=false;
+    if(fault==3){sensor2.fault=true;assert(stopOnWheelFault());}
+    serviceBootAutoStart();assert(!lqr_direction_test_armed);
+    assert(boot_auto_start.phase==BootAutoStart::Phase::Cancelled);
+    diagnostic_imu_io_ok=true;diagnostic_calibration_ok.store(true);diagnostic_imu_finite=true;sensor2.fault=false;
+    serviceBootAutoStart();assert(!lqr_direction_test_armed);
+  }
 
   // Latest telemetry reports selected contributions, not unused speed PID.
   setupCase();start(1);near(speed_direct_control,0);

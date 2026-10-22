@@ -724,8 +724,9 @@ void handleLqrControlTraceDownload();
 void setStatusLed(bool on);
 void cancelBalanceWait();
 void updateBalanceWait();
-bool bootAutoPoseAllowed();
+bool bootAutoMeasurementsReady();
 void serviceBootAutoStart();
+bool startBalanceTest(bool boot_immediate);
 bool stopBalanceTest();
 bool motionCommandAllowed();
 
@@ -801,7 +802,7 @@ void setup() {
   delay(1000);
   initializeUartAllocationDiagnostics();
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
-  Serial.println("BOOT AUTO: ENABLED; after initialization, allowed pose and reference capture. Stops cancel auto restart.");
+  Serial.println("BOOT AUTO: ENABLED; immediate after valid initialization, fixed 0 deg. Stops cancel auto restart.");
   prepareI2cResources(); // Buffers and bus drivers only; wheel EN remains LOW.
   printHttpStartupMemory("before_ps4");
   observeReleaseMemory(MemPs4Before,0,0);
@@ -3431,14 +3432,12 @@ void cancelBalanceWait() {
   setStatusLed(false);
 }
 
-// Gravity-referenced gate for BOOT ONLY; manual start keeps its existing rules.
-bool bootAutoPoseAllowed(){
+// Fresh/valid measurements only: boot uses fixed 0 deg, not a pose/hold gate.
+bool bootAutoMeasurementsReady(){
   return diagnostic_imu_initialized.load()&&diagnostic_calibration_ok.load()&&!diagnostic_imu_calibrating.load()&&
       diagnostic_imu_seq&&diagnostic_imu_finite&&uint32_t(millis()-diagnostic_imu_ms)<=250&&
-      wheelSensorsOK()&&isfinite(LQR_speed)&&
-      abs(LQR_angle)<=kBalanceWaitAngleLimitDeg&&
-      abs(LQR_gyro)<=kBalanceWaitGyroLimitDegPerSec&&
-      abs(LQR_speed)<=kBalanceWaitWheelSpeedLimit;
+      wheelSensorsOK()&&isfinite(LQR_distance)&&isfinite(LQR_speed)&&
+      isfinite(LQR_angle)&&isfinite(LQR_gyro);
 }
 void serviceBootAutoStart(){
   if(boot_auto_start.phase==BootAutoStart::Phase::Finished||
@@ -3458,28 +3457,18 @@ void serviceBootAutoStart(){
     boot_auto_start.cancel();return; // A manual owner takes precedence.
   }
   const bool ready=test_system_ready&&startup_foc_ready.load()&&
-      driver1_initialized&&driver2_initialized;
-  if(!boot_auto_start.tick(ready,bootAutoPoseAllowed(),millis(),kBalanceStableTimeMs))return;
+      driver1_initialized&&driver2_initialized&&diagnostic_calibration_done.load();
+  if(!boot_auto_start.tick(ready,bootAutoMeasurementsReady(),millis(),0))return;
   boot_auto_start.invoking=true;
-  const bool accepted=executeOperatorCommand(OperatorCommand::Start);
+  const bool accepted=startBalanceTest(true);
   boot_auto_start.invoking=false;
   if(!accepted)boot_auto_start.cancel();
-  Serial.println(accepted?"BOOT AUTO: BALANCE PREPARE; reference must be captured before balancing.":
+  Serial.println(accepted?"BOOT AUTO: BALANCING; fixed reference=0 deg, position captured at start.":
       "BOOT AUTO: rejected; no automatic retry.");
 }
 
 void updateBalanceWait() {
   if (!balance_wait_active) {
-    return;
-  }
-
-  // Auto boot must never learn an arbitrarily tilted stationary pose as upright.
-  // Keep this extra gravity gate throughout the existing prepare/hold capture.
-  if(boot_auto_start.phase==BootAutoStart::Phase::Preparing&&!bootAutoPoseAllowed()){
-    balance_stable_start_ms=balance_stable_elapsed_ms=0;
-    balance_angle_sum=balance_distance_sum=0;balance_sample_count=0;
-    balance_candidate_angle=0;balance_timer_reset=true;
-    balance_brake_right=balance_brake_left=0;setBothTargetsToZero();
     return;
   }
 
@@ -3757,7 +3746,7 @@ bool cycleLqrSpeedSource() {
   return true;
 }
 
-bool startBalanceTest() {
+bool startBalanceTest(bool boot_immediate) {
   if (!test_system_ready) {
     Serial.println("IGNORED: system initialization is not complete.");
     return false;
@@ -3789,6 +3778,20 @@ bool startBalanceTest() {
   lqr_direction_test_armed = false;
   lqr_startup_diagnostic_active = false;
   lqr_zero_set = false;
+  if (boot_immediate) {
+    // Same reset/start path, but no startup pose learning or timed preparation.
+    cancelBalanceWait();
+    angle_zeropoint = 0.0f;
+    distance_zeropoint = LQR_distance;
+    lqr_zero_set = true;
+    lqr_drive_origin_distance = LQR_distance;
+    lqr_drive_start_distance = LQR_distance;
+    lqr_direction_test_start_ms = millis();
+    lqr_direction_test_armed = true;
+    boot_auto_start.complete();
+    setStatusLed(true);
+    return true;
+  }
   balance_wait_active = true;
   balance_prepare_active = true;
   balance_prepare_start_ms = millis();
@@ -5389,7 +5392,7 @@ void resetPs4MotionInput() {
 bool executeOperatorCommand(OperatorCommand command) {
   switch (command) {
     case OperatorCommand::Start:
-      if (!startBalanceTest()) return false;
+      if (!startBalanceTest(false)) return false;
       resetPs4MotionInput();
       setPs4DriveState(Ps4DriveState::OutsideDeadzone);
       return true;
