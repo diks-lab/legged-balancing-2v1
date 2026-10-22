@@ -10,10 +10,14 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
   try {
     for (const size of [{ width: 1366, height: 768 }, { width: 1920, height: 1080 }]) {
       const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 });
-      const requests = [], errors = [];
+      const requests = [], errors = [], calibrationRequests = [];
       page.on('pageerror', e => errors.push(e.message));
       await page.route('http://127.0.0.1:8765/**', async route => {
         const file = new URL(route.request().url()).pathname.slice(1) || 'index.html';
+        if (file.startsWith('calibration/')) {
+          calibrationRequests.push([file, route.request().method()]);
+          await route.fulfill({ status: 202, body: 'queued' }); return;
+        }
         requests.push(file);
         await route.fulfill({ body: fs.readFileSync(`data/${file}`),
           contentType: file.endsWith('.html') ? 'text/html' : 'text/plain' });
@@ -159,6 +163,26 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.waitForFunction(n => window.sent.length > n, beforeAll);
       await page.evaluate(() => window.sample());
       assert(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight && document.documentElement.scrollWidth <= innerWidth));
+      // Numbers/history are in the closed details, current recovery/calibration stay on top.
+      await page.evaluate(() => window.sample({ state: 'CALIBRATION_REQUIRED', calibration: 'MISSING_INVALID_CONFIG' }));
+      assert((await page.locator('#health').textContent()).includes('要校正'));
+      assert((await page.locator('#calibration').textContent()).includes('設定不一致'));
+      await page.evaluate(() => window.sample({ state: 'FALL_RECOVERY_WAIT', recovery: 'HOLD_1500_MS', calibration: 'RESTORED', stop_reason: 'TILT_STOP' }));
+      assert((await page.locator('#health').textContent()).includes('1.5秒'));
+      await page.evaluate(() => window.sample({ state: 'BALANCING', running: true, recovery: 'RECOVERED', calibration: 'RESTORED', stop_reason: 'TILT_STOP' }));
+      assert((await page.locator('#health').textContent()).includes('復帰完了'));
+      assert(!(await page.locator('#health').textContent()).includes('転倒停止'));
+      assert(await page.locator('#connection-details').evaluate(n => n.closest('details').open === false));
+      assert(await page.locator('#measurement').evaluate(n => !!n.closest('details')));
+      await page.locator('#details summary').click();
+      page.once('dialog', dialog => dialog.accept());
+      await page.click('#calibrate');
+      await page.waitForFunction(() => document.getElementById('calibration-action').textContent.includes('queued'));
+      await page.click('#calibrate-abort');
+      await page.waitForTimeout(50);
+      assert.deepEqual(calibrationRequests, [['calibration/start', 'POST'], ['calibration/abort', 'POST']]);
+      await page.locator('#details summary').click();
+      assert(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight));
       fs.mkdirSync('work/instruments-browser', { recursive: true });
       await page.screenshot({ path: `work/instruments-browser/${size.width}.png` });
       assert.deepEqual(errors, []);

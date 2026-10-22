@@ -1,6 +1,20 @@
 'use strict';
 window.startLogger = function () {
   const el = id => document.getElementById(id);
+  async function calibrationAction(path) {
+    const message = el('calibration-action');
+    try {
+      const response = await fetch(path, { method: 'POST', signal: AbortSignal.timeout(3000) });
+      const result = await response.text();
+      message.textContent = `${response.ok ? '受付' : '拒否'}: ${result}（状態欄で実行結果を確認）`;
+    } catch (error) { message.textContent = `要求失敗: ${error.message}。自動再試行なし`; }
+  }
+  el('calibrate').onclick = () => {
+    if (window.confirm('停止中だけ実行できます。機体を保持してください。両輪が校正回転します。完了後は自動倒立しません。')) {
+      calibrationAction('/calibration/start');
+    }
+  };
+  el('calibrate-abort').onclick = () => calibrationAction('/calibration/abort');
   const history = new DiagnosticHistory();
   const dashboard = new Dashboard(el, history);
   const plot = dashboard.aux;
@@ -81,7 +95,8 @@ window.startLogger = function () {
     }
     lastSeq = s.seq;
     lastDrop = s.dropped;
-    el('connection').textContent = `接続 / boot ${boot} / ` +
+    el('connection').textContent = '接続';
+    el('connection-details').textContent = `boot ${boot} / ` +
       `取得 ${s.sample_ms} ms / age ${s.age_ms} ms`;
     dashboard.update(s);
     el('loss').textContent = `欠落推定: ${lost} / ` +
