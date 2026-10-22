@@ -53,13 +53,11 @@ int main(){
   if(kind==6)r.wheels[1].poles=8;
   r.checksum=wheelcal::crc(r);assert(!wheelcal::valid(r,42));
  }
- FallAutoRecovery f;assert(!f.tick(true,true,10000));f.arm();
- assert(!f.tick(true,true,0));assert(!f.tick(true,true,1499));
- assert(!f.tick(true,false,1500));assert(!f.tick(true,true,1501));
- assert(f.tick(true,true,3001));assert(!f.tick(true,true,9000));
- f.arm();assert(!f.tick(false,true,9001)&&!f.pending);
- f.arm();f.tick(true,true,0xfffffff0);assert(f.tick(true,true,0x5cc));
- puts("PASS: 52-byte dual-slot records, restore, CRC/version/config/range/PP validation, write/power-loss faults preserve previous slot; 1500 ms recovery, interrupted hold and wrap");
+ FallAutoRecovery f;assert(!f.tick(true,true));f.arm();
+ assert(!f.tick(true,false));assert(f.tick(true,true));assert(!f.tick(true,true));
+ f.arm();assert(!f.tick(false,true)&&!f.pending);
+ f.arm();assert(f.tick(true,true));
+ puts("PASS: 52-byte dual-slot records, restore, CRC/version/config/range/PP validation, write/power-loss faults preserve previous slot; immediate recovery with no clock, health failure cancels");
 }
 '''
 with tempfile.TemporaryDirectory() as td:

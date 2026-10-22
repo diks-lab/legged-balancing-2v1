@@ -1,18 +1,14 @@
 #pragma once
-#include <cstdint>
-// Only a confirmed fall may arm this intent. Other stops cancel it.
+// Only a confirmed fall may arm this intent. No timer or stationary-speed gate.
 struct FallAutoRecovery {
-  bool pending=false,holding=false;uint32_t since=0;
+  bool pending=false;
   const char* reason="NONE";
-  void cancel(){pending=holding=false;reason="NONE";}
-  void arm(){pending=true;holding=false;reason="UPRIGHT_REQUIRED";}
-  bool tick(bool healthy,bool upright,uint32_t now){
+  void cancel(){pending=false;reason="NONE";}
+  void arm(){pending=true;reason="UPRIGHT_REQUIRED";}
+  bool tick(bool healthy,bool upright){
     if(!pending)return false;
     if(!healthy){cancel();reason="HEALTH_FAULT";return false;}
-    if(!upright){holding=false;reason="UPRIGHT_REQUIRED";return false;}
-    reason="HOLD_1500_MS";
-    if(!holding){holding=true;since=now;return false;}
-    if(uint32_t(now-since)<1500)return false;
-    pending=holding=false;reason="RECOVERED";return true;
+    if(!upright){reason="UPRIGHT_REQUIRED";return false;}
+    pending=false;reason="RECOVERED";return true;
   }
 };

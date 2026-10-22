@@ -750,6 +750,7 @@ void updateBalanceWait();
 bool bootAutoMeasurementsReady();
 void serviceBootAutoStart();
 void serviceFallAutoRecovery();
+uint8_t fallRecoveryChecks();
 void publishDiagnosticSnapshot(bool force);
 void requestWheelCalibration();
 void loadWheelCalibration();
@@ -3567,20 +3568,23 @@ void requestWheelCalibration(){
   publishStartupPhase("CALIBRATING_WHEELS_MOVE");
   publishDiagnosticSnapshot(true);
 }
+uint8_t fallRecoveryChecks(){
+  const bool imu=diagnostic_imu_initialized.load()&&diagnostic_calibration_done.load()&&
+      diagnostic_calibration_ok.load()&&!diagnostic_imu_calibrating.load()&&
+      diagnostic_imu_io_seen&&diagnostic_imu_io_ok&&diagnostic_imu_seq&&diagnostic_imu_finite&&
+      uint32_t(millis()-diagnostic_imu_ms)<=250&&isfinite(LQR_angle)&&isfinite(LQR_gyro);
+  const bool wheels=wheelSensorsOK()&&isfinite(LQR_distance)&&isfinite(LQR_speed);
+  const bool foc=test_system_ready&&startup_foc_ready.load()&&calibration_loaded&&
+      !calibration_active.load()&&!foc_initialization_failed&&driver1_initialized&&driver2_initialized&&
+      motor1.motor_status==FOCMotorStatus::motor_ready&&motor2.motor_status==FOCMotorStatus::motor_ready;
+  return (imu&&abs(LQR_angle)<=kBalanceWaitAngleLimitDeg?1u:0u)|
+      (imu?2u:0u)|(wheels?4u:0u)|(foc?8u:0u);
+}
 void serviceFallAutoRecovery(){
   if(!fall_auto_recovery.pending)return;
   if(strcmp(last_stop_reason,"TILT_STOP")){fall_auto_recovery.cancel();return;}
-  const bool healthy=test_system_ready&&startup_foc_ready.load()&&calibration_loaded&&
-      !calibration_active.load()&&!foc_initialization_failed&&bootAutoMeasurementsReady()&&
-      diagnostic_calibration_done.load()&&driver1_initialized&&driver2_initialized&&
-      motor1.motor_status==FOCMotorStatus::motor_ready&&motor2.motor_status==FOCMotorStatus::motor_ready;
-  const char* wait=abs(LQR_angle)>kBalanceWaitAngleLimitDeg?"ANGLE_OUTSIDE_2_DEG":
-      abs(LQR_gyro)>kBalanceWaitGyroLimitDegPerSec?"GYRO_TOO_FAST":
-      abs(LQR_speed)>kBalanceWaitWheelSpeedLimit?"WHEELS_MOVING":nullptr;
-  if(!fall_auto_recovery.tick(healthy,wait==nullptr,millis())){
-    if(healthy&&wait)fall_auto_recovery.reason=wait;
-    return;
-  }
+  const uint8_t checks=fallRecoveryChecks();
+  if(!fall_auto_recovery.tick((checks&14u)==14u,(checks&1u)!=0))return;
   setBothTargetsToZero();emergency_stop_active=false;
   driver1.enable();driver2.enable();
   if(!startBalanceTest(true)){
@@ -4333,6 +4337,7 @@ void publishDiagnosticSnapshot(bool force){
       diagnostic_imu_calibrating.load()?2:diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load()?10:diagnostic_imu_io_seen&&!diagnostic_imu_io_ok?9:!diagnostic_imu_seq?3:
       sensor1.fault?(sensor2.fault?6:4):sensor2.fault?5:!diagnostic_imu_finite?7:0;
   s.reference_valid=lqr_zero_set;
+  s.recovery_checks=fallRecoveryChecks();
   snprintf(s.calibration,sizeof(s.calibration),"%s",calibration_status);
   snprintf(s.recovery,sizeof(s.recovery),"%s",fall_auto_recovery.reason);
   s.command_ms=diagnostic_command_ms;s.command_valid=diagnostic_command_valid;
@@ -4350,6 +4355,7 @@ void publishDiagnosticSnapshot(bool force){
     }
   }
   if(s.state==5&&!strcmp(fall_auto_recovery.reason,"EXPLICIT_STOP"))s.state=4;
+  if(s.state==5&&!strcmp(fall_auto_recovery.reason,"HEALTH_FAULT"))s.state=6;
   if(calibration_active.load())s.state=10;
   else if(!calibration_loaded&&!test_system_ready&&!foc_initialization_failed&&s.imu_reason!=9&&s.imu_reason!=10&&!sensor1.fault&&!sensor2.fault)s.state=9;
   else if(fall_auto_recovery.pending)s.state=11;
@@ -4780,6 +4786,7 @@ void startWifiHttpServer() {
     wifi_log_server.on("/signals.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/signals.js", "application/javascript"); });
     wifi_log_server.on("/subscribe.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/subscribe.js", "application/javascript"); });
     wifi_log_server.on("/panels.css", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/panels.css", "text/css"); });
+    wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
     wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,

@@ -12,7 +12,7 @@ import tempfile
 source = Path('src/main.cpp').read_text()
 def function(name):
     import re
-    match = re.search(r'^(?:void|bool|const char\*|float)\s+' + name + r'\([^;]*?\)\s*\{', source, re.M)
+    match = re.search(r'^(?:void|bool|uint8_t|const char\*|float)\s+' + name + r'\([^;]*?\)\s*\{', source, re.M)
     assert match, name
     start, pos, depth = match.start(), match.end(), 1
     while depth:
@@ -214,7 +214,7 @@ prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void
 prefix += source[source.index('struct HttpResponseTransport {'):source.index('void serviceHttpFileResponse()')]
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','serviceFallAutoRecovery','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -869,26 +869,51 @@ int main(){
     serviceBootAutoStart();assert(!lqr_direction_test_armed);
   }
 
-  // Fall only: strict continuous upright hold; current state differs from history.
+  // First in-range sample, even while rotating/moving; no time advancement.
   bootFixture();serviceBootAutoStart();br=bl=0;stopForActualFall(br,bl);
   assert(fall_auto_recovery.pending && emergency_stop_active);
-  LQR_angle=0;LQR_gyro=0;LQR_speed=0;
+  LQR_angle=2.01f;LQR_gyro=20;LQR_speed=10;
   auto recoverFrame=[&](unsigned ms){nowMs+=ms;noteImuMeasurement();serviceFallAutoRecovery();};
-  recoverFrame(0);recoverFrame(1000);assert(!lqr_direction_test_armed);
-  LQR_angle=3;recoverFrame(100);LQR_angle=.5f;recoverFrame(100);
-  recoverFrame(1499);assert(!lqr_direction_test_armed);
-  LQR_distance=6.5f;recoverFrame(1);assert(lqr_direction_test_armed&&!emergency_stop_active);
+  recoverFrame(0);assert(!lqr_direction_test_armed);
+  publishDiagnosticSnapshot(true);assert(diagnostic_latest.recovery_checks==14);
+  LQR_angle=1.9f;LQR_distance=6.5f;const auto entryMs=millis();
+  recoverFrame(0);assert(millis()==entryMs&&lqr_direction_test_armed&&!emergency_stop_active);
   near(angle_zeropoint,0);near(distance_zeropoint,6.5f);
   nowMs+=50;noteImuMeasurement();publishDiagnosticSnapshot(false);
   assert(diagnostic_latest.state==3 && std::string(diagnostic_latest.stop_reason)=="TILT_STOP");
-  for(int kind=0;kind<4;++kind){
+  // A new confirmed fall after recovery arms a new immediate attempt.
+  stopForActualFall(br,bl);LQR_angle=-2;recoverFrame(0);assert(lqr_direction_test_armed);
+  for(float boundary:{-2.0f,2.0f}){
+    stopForActualFall(br,bl);LQR_angle=boundary;recoverFrame(0);
+    assert(lqr_direction_test_armed);
+  }
+  // Traversing between samples never invents an unseen in-range measurement.
+  stopForActualFall(br,bl);LQR_angle=2.1f;recoverFrame(0);
+  LQR_angle=-2.1f;recoverFrame(0);assert(!lqr_direction_test_armed);
+  LQR_angle=-1.99f;recoverFrame(0);assert(lqr_direction_test_armed);
+  // Invalid/latest failed/stale measurement cannot restart; recovering health alone does not re-arm.
+  for(int invalid=0;invalid<4;++invalid){
+    bootFixture();serviceBootAutoStart();stopForActualFall(br,bl);LQR_angle=0;
+    if(invalid==0)diagnostic_imu_io_ok=false;
+    if(invalid==1)diagnostic_imu_finite=false;
+    if(invalid==2){nowMs+=251;}
+    if(invalid==3)LQR_angle=NAN;
+    serviceFallAutoRecovery();assert(!lqr_direction_test_armed&&!fall_auto_recovery.pending);
+    LQR_angle=0;diagnostic_imu_io_ok=diagnostic_imu_finite=true;noteImuMeasurement();
+    serviceFallAutoRecovery();assert(!lqr_direction_test_armed);
+  }
+  for(int kind=0;kind<5;++kind){
     bootFixture();serviceBootAutoStart();stopForActualFall(br,bl);
     if(kind==0)executeOperatorCommand(OperatorCommand::FullStop);
     if(kind==1)stopBalanceTest();
     if(kind==2)diagnostic_imu_io_ok=false;
     if(kind==3)calibration_loaded=false;
+    if(kind==4)motor1.motor_status=FOCMotorStatus::motor_calib_failed;
     LQR_angle=LQR_gyro=LQR_speed=0;recoverFrame(0);recoverFrame(2000);
     assert(!lqr_direction_test_armed&&!fall_auto_recovery.pending);
+    publishDiagnosticSnapshot(true);
+    if(kind==0)assert(diagnostic_latest.state==4);
+    if(kind==4)assert(diagnostic_latest.state==6 && !(diagnostic_latest.recovery_checks&8));
   }
   // Explicit calibration never queues from running control; success path is
   // exercised through the real FOC wrapper + two-slot storage suite.
