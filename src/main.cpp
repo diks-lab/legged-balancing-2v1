@@ -647,7 +647,7 @@ enum class LqrTestMode {
   AttitudeDistance,
   AttitudeOnly,
 };
-LqrTestMode lqr_test_mode = LqrTestMode::AttitudeOnly;
+LqrTestMode lqr_test_mode = LqrTestMode::Full;
 
 enum class LqrSpeedSource {
   SimpleFoc,
@@ -4024,6 +4024,9 @@ bool startBalanceTest(bool boot_immediate) {
     return false;
   }
 
+  // Automatic upright entry/recovery selects the FULL balance mode.
+  // Reduced modes remain explicit, stopped/manual diagnostic selections.
+  if(boot_immediate)lqr_test_mode=LqrTestMode::Full;
   fall_auto_recovery.cancel();
   if(!boot_auto_start.invoking)boot_auto_start.cancel();
   Serial.printf("LQR TEST MODE: %s\n", lqrTestModeDisplayName());

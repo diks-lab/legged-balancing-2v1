@@ -316,6 +316,7 @@ void start(float sign){
   assert(speed_direct_control==0); // preserve the old tilt-only drive profile
 }
 int main(){
+  assert(lqr_test_mode==LqrTestMode::Full); // Real production global default.
   health_diagnostics=diagnostic::HealthDiagnostics{};
   gateRightSensorFault();
   diagnostic::Snapshot first_health;copyHealthReport(first_health);
@@ -562,7 +563,7 @@ int main(){
     setupCase();handlePs4Connection(false);handlePs4Connection(true);
     packet={};processPs4Input(packet,nowMs+=50);
     packet.left_stick_y=direction;processPs4Input(packet,nowMs+=50);
-    assert(lqr_drive_start_pending);
+    assert(lqr_drive_start_pending&&lqr_test_mode==LqrTestMode::Full);
     startPendingLqrDrive();near(lqr_target_speed,direction<0?.05f:-.05f);
     lqr_speed_for_control=direction<0?.2f:-.2f;
     packet={};processPs4Input(packet,nowMs+=50);
@@ -570,6 +571,8 @@ int main(){
     near(ps4_yaw_output,0);assert(pins[27] && pins[32]);
     step(direction<0?.2f:-.2f);
     assert((direction<0 ? 1:-1)*speed_direct_control>0); // retain verified feedback sign
+    near(speed_control,.25f*(lqr_target_speed-diagnostic_control_inputs.speed)*1.25f);
+    near(speed_direct_control,-speed_control);
   }
   // Pure yaw shares the stable-start gate; saturation preserves common torque.
   setupCase();handlePs4Connection(false);handlePs4Connection(true);
@@ -903,6 +906,28 @@ int main(){
     assert(!lqr_direction_test_armed&&!boot_auto_start.pending());
   }
 
+  // Automatic entry always resets FULL, origin, targets, PID and speed-filter state.
+  bootFixture();lqr_test_mode=LqrTestMode::AttitudeDistance;
+  LQR_angle=1;LQR_distance=4.5f;noteImuMeasurement();
+  lqr_target_speed=.04f;lqr_ps4_target_tilt_deg=.3f;lqr_drive_angle_bias=.2f;
+  serviceBootAutoStart();
+  assert(lqr_test_mode==LqrTestMode::Full&&lqr_direction_test_armed);
+  near(angle_zeropoint,0);near(distance_zeropoint,4.5f);
+  near(lqr_target_speed,0);near(lqr_ps4_target_tilt_deg,0);near(lqr_drive_angle_bias,0);
+  assert(!lqr_control_speed_filter_initialized);
+  near(pid_speed.P,.25f);near(pid_distance.P,.1f);
+  step(.2f);near(speed_control,-.05f);near(speed_direct_control,.05f);
+  LQR_distance=4.6f;step(.2f);near(distance_control,.01f);
+  near(test_LQR_u,angle_control+gyro_control+distance_control+speed_direct_control);
+  // A reduced diagnostic selection cannot silently persist through a fall restart.
+  lqr_test_mode=LqrTestMode::AttitudeOnly;float fullR=0,fullL=0;stopForActualFall(fullR,fullL);
+  LQR_angle=-1;LQR_distance=-3;noteImuMeasurement();serviceFallAutoRecovery();
+  assert(lqr_test_mode==LqrTestMode::Full&&lqr_direction_test_armed);
+  near(angle_zeropoint,0);near(distance_zeropoint,-3);
+  near(lqr_target_speed,0);near(lqr_ps4_target_tilt_deg,0);near(lqr_drive_angle_bias,0);
+  // Explicit manual tuning remains available and does not overwrite the auto policy.
+  stopBalanceTest();emergency_stop_active=false;lqr_test_mode=LqrTestMode::AttitudeOnly;
+  assert(startBalanceTest(false)&&lqr_test_mode==LqrTestMode::AttitudeOnly);
   // First in-range sample, even while rotating/moving; no time advancement.
   bootFixture();serviceBootAutoStart();br=bl=0;stopForActualFall(br,bl);
   assert(fall_auto_recovery.pending && emergency_stop_active);
@@ -1068,6 +1093,10 @@ int main(){
   near(diagnostic_latest.values[26],LQR_angle-angle_zeropoint-lqr_ps4_target_tilt_deg-lqr_drive_angle_bias);
   near(diagnostic_latest.values[29],lqr_ps4_target_tilt_deg+lqr_drive_angle_bias);
   assert(std::isnan(diagnostic_latest.values[12]));
+  assert(lqr_test_mode==LqrTestMode::Full);
+  near(speed_control,.25f*(lqr_target_speed-.27f)*1.25f);
+  near(distance_control,0);near(speed_direct_control,0);
+  near(test_LQR_u,angle_control+gyro_control); // Existing active-PS4 profile, not four simultaneous terms.
   assert(stopBalanceTest());
   LQR_angle=12.5f;LQR_gyro=-3.2f;
   angle_zeropoint=-0.8f;step();nowMs+=50;publishDiagnosticSnapshot(false);
