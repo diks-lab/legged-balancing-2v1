@@ -120,7 +120,7 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
     unsigned(r->reg),unsigned(r->requested),unsigned(r->context),unsigned(r->result));
    first=false;
   }
-  j.add(",%lu]",(unsigned long)d.probes);
+  j.add(",%lu,%lu]",(unsigned long)d.probes,(unsigned long)d.failures);
  }
  j.add("}");return j.ok;
 }

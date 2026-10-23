@@ -24,6 +24,24 @@ class CheckedWheelSensor : public Sensor {
     if (diagnostics.probes != UINT32_MAX) ++diagnostics.probes;
   }
 
+  // One physical acquisition per control cycle; loopFOC then reuses this cache.
+  bool prepareControlCycle() {
+    cycle_cached_=false;runtime_retry_enabled_=ready;
+    update();
+    cycle_cached_=true;
+    return ready&&!fault;
+  }
+  void releaseControlCycle() { cycle_cached_=false;runtime_retry_enabled_=false; }
+  void rebaseVelocity() {
+    velocity=0;vel_angle_prev=angle_prev;vel_full_rotations=full_rotations;
+    vel_angle_prev_ts=angle_prev_ts;
+  }
+  void update() override {
+    if(cycle_cached_)return;
+    const bool recovering=fault&&ready;
+    Sensor::update(); // Negative failure leaves all base caches untouched.
+    if(recovering&&!fault)rebaseVelocity();
+  }
   bool ready = false;
   bool fault = false;
   const char* error = "NOT_INITIALIZED";
@@ -52,21 +70,26 @@ class CheckedWheelSensor : public Sensor {
 
  protected:
   float getSensorAngle() override {
-    if (fault) return -1.0f;
+    if (fault&&!runtime_retry_enabled_) return -1.0f;
     WheelReadRecord r;
     const float angle = readRaw(r);
     if (r.result != 1) {
       // Gate before saving the fixed-size record or producing any diagnostics.
       fail(r.result == 2 ? "I2C_ADDRESS/NACK" : r.result == 3 ?
            "I2C_SHORT_READ/TIMEOUT" : r.result == 4 ? "INVALID_DATA" : "INVALID_ANGLE");
+      if(diagnostics.failures!=UINT32_MAX)++diagnostics.failures;
+      diagnostics.probe=r;
       if (!diagnostics.latched) { diagnostics.first = r; diagnostics.latched = true; }
       return -1.0f;
     }
+    if(diagnostics.latched){diagnostics.probe=r;if(diagnostics.probes!=UINT32_MAX)++diagnostics.probes;}
+    fault=false;
     error = "OK";
     return angle;
   }
 
  private:
+  bool cycle_cached_=false,runtime_retry_enabled_=false;
   uint8_t context_=0;
   uint32_t fall_ms_=0;
   float readRaw(WheelReadRecord& r) {

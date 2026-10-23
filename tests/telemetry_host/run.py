@@ -83,7 +83,7 @@ int main(){
   all.health.barrier=18;all.health.foc_reason[0]=all.health.foc_reason[1]=9;
   all.health.imu_failure=6;all.health.mpu.failure=imu_config::Failure::Mismatch;
   all.health.mpu.reg=0x1b;all.health.mpu.expected=8;all.health.mpu.actual=all.health.mpu.read=255;all.health.mpu.tx=5;all.health.mpu.rx=0;
-  for(auto&d:all.wheel_reads){d.latched=true;d.probes=UINT32_MAX;
+  for(auto&d:all.wheel_reads){d.latched=true;d.probes=d.failures=UINT32_MAX;
    for(auto*r:{&d.first,&d.probe}){r->ms=r->elapsed_us=r->fall_ms=UINT32_MAX;r->tx=5;r->received=2;r->available=2;r->high=15;r->low=255;r->context=31;r->result=3;}}
   char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX));
   char wheel[1024];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef"));

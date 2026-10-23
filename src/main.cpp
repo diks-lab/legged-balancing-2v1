@@ -94,7 +94,7 @@ void firstHealthFault(const char* reason) {
 }
 void sensorHealthFault(unsigned side) {
   portENTER_CRITICAL(&health_diagnostics_lock);
-  health_diagnostics.report.stages[side?diagnostic::LeftSensor:diagnostic::RightSensor]=diagnostic::Failed;
+  // Keep initialization success; current read health is reported separately.
   health_diagnostics.first(side?"LEFT_SENSOR":"RIGHT_SENSOR",millis());
   portEXIT_CRITICAL(&health_diagnostics_lock);
 }
@@ -451,6 +451,7 @@ const char* last_stop_reason = "NONE";
 char diagnostic_stop_reason[64]="NONE";
 uint32_t diagnostic_stop_ms=0;
 uint32_t diagnostic_last_fall_ms=0;
+bool wheel_comm_suspended=false;
 void recordDiagnosticStop(const char* reason){
   if(!strcmp(reason,"NONE"))return;
   if(!strcmp(reason,"TILT_STOP"))diagnostic_last_fall_ms=millis();
@@ -710,12 +711,14 @@ void stopForActualFall(float& right_output, float& left_output);
 bool wheelSensorsOK();
 bool refreshWheelSensors();
 bool stopOnWheelFault();
+bool acquireRuntimeMeasurements();
+void reportWheelCommunication(bool healthy);
 bool initializeWheelFoc(BLDCMotor& motor);
 bool i2cDeviceIsPresent(TwoWire& bus, uint8_t address);
 void calibrateMpu6050();
 
 // LQR / balance control
-void updateLqrState();
+void updateLqrState(bool note_imu);
 void updateWheelVelocityDiagnostic();
 const char* lqrSpeedSourceName();
 void updateTestLqrOutput(float angle_term, float gyro_term,
@@ -1240,6 +1243,7 @@ void advanceStartup() {
 }  // namespace
 
 void loop() {
+  sensor1.releaseControlCycle();sensor2.releaseControlCycle();
   updatePs4Controller();
   servicePs4DiagnosticSerial();
   const uint8_t wheel_context=(test_system_ready?1:0)|(lqr_direction_test_armed?2:0)|
@@ -1264,31 +1268,19 @@ void loop() {
   const uint32_t loop_start_us = micros();
 
   uint32_t section_start_us = micros();
-  const bool stopped_measurement = emergency_stop_active;
-  uint32_t motor1_loopfoc_us=0,motor2_loopfoc_us=0;
-  if(stopped_measurement){
-    // EN remains LOW. Measure without depending on a disabled motor's FOC path.
-    updateStoppedMeasurements();
-    if(stopOnWheelFault()){serviceHttpRequests();return;}
-  } else {
-    motor1.loopFOC();
-    if (stopOnWheelFault()){serviceHttpRequests();return;}
-    motor1_loopfoc_us=micros()-section_start_us;
-    section_start_us=micros();
-    motor2.loopFOC();
-    if (stopOnWheelFault()){serviceHttpRequests();return;}
-    motor2_loopfoc_us=micros()-section_start_us;
+  // Validate both wheels and IMU before either FOC can apply a cached command.
+  if(!acquireRuntimeMeasurements()){
+    handleSerialCommand();serviceHttpRequests();return;
   }
-  // Preserve the values actually used by FOC before control/stop code can
-  // clear current_sp or voltage.q. Observation only, no additional I2C.
+  section_start_us=micros();
+  uint32_t motor1_loopfoc_us=0,motor2_loopfoc_us=0;
+  if(!emergency_stop_active){
+    motor1.loopFOC();motor1_loopfoc_us=micros()-section_start_us;
+    section_start_us=micros();motor2.loopFOC();motor2_loopfoc_us=micros()-section_start_us;
+  }
   captureFocOutputSnapshot();
+  const uint32_t mpu_update_us=diagnostic_imu_us;
 
-  section_start_us = micros();
-  if(!stopped_measurement)mpu6050.update();
-  const uint32_t mpu_update_us = stopped_measurement ? diagnostic_imu_us :
-      micros() - section_start_us;
-
-  if(!stopped_measurement)updateLqrState();
   serviceBootAutoStart();
   serviceFallAutoRecovery();
 
@@ -1705,28 +1697,28 @@ void printFocAlignmentObservation(unsigned slot) {
 
 bool stopOnWheelFault() {
   if (wheelSensorsOK()) return false;
-  // Gate before PWM cleanup or logging. A latched sensor fault needs a reboot;
-  // Clearing test_system_ready prevents every existing enable/start command,
-  // including u. Do not clear the sensor's fault latch.
   disableBothDrivers();
-  test_system_ready = false;
-  emergency_stop_active = true;
-  last_stop_reason = "WHEEL_FAULT";
-  recordDiagnosticStop(last_stop_reason);
-  lqr_diagnostic_armed = false;
-  lqr_direction_test_armed = false;
-  polarity_test_active = false;
-  polarity_pulse_active = false;
-  cancelBalanceWait();
+  static uint8_t first_reported=0;
   for(unsigned side=0;side<2;++side){
     const auto& d=side?sensor2.diagnostics:sensor1.diagnostics;
-    if(!d.latched)continue;
-    const auto&r=d.first;
-    Serial.printf("WHEEL READ first side=%s ms=%lu reg=0x%02x requested=%u received=%d available=%d tx=%d high=%d low=%d elapsed_us=%lu context=0x%02x fall_ms=%lu; latched, no restart\n",
+    if(!d.latched||(first_reported&(1u<<side)))continue;
+    first_reported|=1u<<side;const auto&r=d.first;
+    Serial.printf("WHEEL READ first side=%s ms=%lu reg=0x%02x requested=%u received=%d available=%d tx=%d read=%d,%d elapsed_us=%lu context=0x%02x fall_ms=%lu\n",
       side?"left":"right",(unsigned long)r.ms,unsigned(r.reg),unsigned(r.requested),
       int(r.received),int(r.available),int(r.tx),int(r.high),int(r.low),
       (unsigned long)r.elapsed_us,unsigned(r.context),(unsigned long)r.fall_ms);
   }
+  // Runtime communication pause preserves intent, calibration and init status.
+  // Failed initialization remains a hard barrier (ready is false).
+  if(sensor1.ready&&sensor2.ready){
+    if(!wheel_comm_suspended)reportWheelCommunication(false);
+    wheel_comm_suspended=true;
+    return true;
+  }
+  test_system_ready=false;emergency_stop_active=true;
+  last_stop_reason="WHEEL_FAULT";recordDiagnosticStop(last_stop_reason);
+  lqr_diagnostic_armed=lqr_direction_test_armed=false;
+  polarity_test_active=polarity_pulse_active=false;cancelBalanceWait();
   Serial.printf("WHEEL FAULT: right=%s left=%s; both disabled; reboot required.\n",
                 sensor1.error, sensor2.error);
   return true;
@@ -1792,7 +1784,7 @@ void calibrateMpu6050() {
 //==================================================
 // LQR / Balance Control
 //==================================================
-void updateLqrState() {
+void updateLqrState(bool note_imu) {
   const uint32_t now_us = micros();
   if (last_control_update_us != 0) {
     control_dt_ms = (now_us - last_control_update_us) / 1000.0f;
@@ -1808,12 +1800,63 @@ void updateLqrState() {
   motor2.shaft_velocity = motor2.shaftVelocity();
   LQR_angle = mpu6050.getAngleY();
   LQR_gyro = mpu6050.getGyroY();
-  noteImuMeasurement();
+  if(note_imu)noteImuMeasurement();
   LQR_distance = motor1.shaft_angle * m1_direction +
                  motor2.shaft_angle * m2_direction;
   LQR_speed = motor1.shaft_velocity * m1_direction +
               motor2.shaft_velocity * m2_direction;
   lqr_simplefoc_speed_read_ms = millis();
+}
+
+void reportWheelCommunication(bool healthy) {
+  static uint32_t last=0;
+  if(uint32_t(millis()-last)<1000)return;
+  last=millis();
+  Serial.println(healthy?"WHEEL COMM: latest wheels/IMU valid; previous intent retained":
+      "WHEEL COMM: outputs off; retry next control cycle");
+}
+
+bool acquireRuntimeMeasurements() {
+  const bool right=sensor1.prepareControlCycle();
+  const bool left=sensor2.prepareControlCycle();
+  const uint32_t start=micros();mpu6050.update();diagnostic_imu_us=micros()-start;
+  LQR_angle=mpu6050.getAngleY();LQR_gyro=mpu6050.getGyroY();noteImuMeasurement();
+  if(!(fallRecoveryChecks()&2u)){
+    disableBothDrivers();test_system_ready=false;emergency_stop_active=true;
+    lqr_direction_test_armed=lqr_diagnostic_armed=false;
+    last_stop_reason="IMU_FAULT";recordDiagnosticStop(last_stop_reason);
+    return false;
+  }
+  if(!test_system_ready||!(fallRecoveryChecks()&8u)){
+    disableBothDrivers();test_system_ready=false;emergency_stop_active=true;
+    lqr_direction_test_armed=lqr_diagnostic_armed=false;
+    last_stop_reason="FOC_HEALTH_FAULT";recordDiagnosticStop(last_stop_reason);return false;
+  }
+  if(!right||!left){stopOnWheelFault();return false;}
+  if(wheel_comm_suspended){
+    // Reset elapsed-difference state, never the requested mode/position origin.
+    sensor1.rebaseVelocity();sensor2.rebaseVelocity();
+    motor1.LPF_velocity=LowPassFilter(motor1.LPF_velocity.Tf,motor1.LPF_velocity.Ts);
+    motor2.LPF_velocity=LowPassFilter(motor2.LPF_velocity.Tf,motor2.LPF_velocity.Ts);
+    motor1.shaft_velocity=motor2.shaft_velocity=0;
+    pid_angle.reset();pid_gyro.reset();pid_distance.reset();pid_speed.reset();
+    lqr_control_speed_filter_initialized=false;
+    lqr_speed_for_control=lqr_speed_raw_for_control=0;
+    diag_right_velocity_10ms=diag_left_velocity_10ms=diag_LQR_speed_10ms=0;
+    lqr_speed_10ms_update_ms=millis();
+    lqr_ps4_speed_history_count=lqr_ps4_speed_history_next=0;
+    lqr_ps4_speed_for_control=lqr_ps4_window_speed=0;
+    lqr_ps4_window_elapsed_ms=0;
+    lqr_ps4_window_angle_delta_right=lqr_ps4_window_angle_delta_left=0;
+    previous_velocity_diagnostic_us=0;last_control_update_us=micros();
+    wheel_comm_suspended=false;
+    reportWheelCommunication(true);
+    if(!emergency_stop_active&&(lqr_direction_test_armed||polarity_test_active)){
+      if(!motor1.enabled)motor1.enable();else driver1.enable();
+      if(!motor2.enabled)motor2.enable();else driver2.enable();
+    }
+  }
+  updateLqrState(false);return true;
 }
 
 void serviceWheelFaultDiagnostics() {
@@ -1838,13 +1881,13 @@ void serviceWheelFaultDiagnostics() {
 
 void updateStoppedMeasurements() {
   gateWheelOutputsOff();
-  if(sensor1.ready&&!sensor1.fault)sensor1.update();
-  if(sensor2.ready&&!sensor2.fault)sensor2.update();
+  if(sensor1.ready){sensor1.prepareControlCycle();sensor1.releaseControlCycle();}
+  if(sensor2.ready){sensor2.prepareControlCycle();sensor2.releaseControlCycle();}
   // A wheel fault does not by itself invalidate an independently successful IMU read.
   if(diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()){
     const uint32_t start=micros();
     mpu6050.update();diagnostic_imu_us=micros()-start;
-    updateLqrState(); // Existing cached wheel values, no extra wheel I2C reads.
+    updateLqrState(true); // Existing cached wheel values, no extra wheel I2C reads.
   }
 }
 
@@ -3699,6 +3742,7 @@ uint8_t fallRecoveryChecks(){
 }
 void serviceFallAutoRecovery(){
   if(!fall_auto_recovery.pending)return;
+  if(test_system_ready&&(wheel_comm_suspended||!wheelSensorsOK()))return;
   if(strcmp(last_stop_reason,"TILT_STOP")){fall_auto_recovery.cancel();return;}
   // A disabled driver/motor is not a failed FOC calibration.
   if(startup_foc_ready.load()&&!calibration_active.load()){
@@ -3730,6 +3774,7 @@ void serviceFallAutoRecovery(){
 void serviceBootAutoStart(){
   if(boot_auto_start.phase==BootAutoStart::Phase::Finished||
      boot_auto_start.phase==BootAutoStart::Phase::Cancelled)return;
+  if(test_system_ready&&(wheel_comm_suspended||!wheelSensorsOK()))return;
   if(emergency_stop_active||!wheelSensorsOK()||polarity_test_active){boot_auto_start.cancel();return;}
   if((diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load())||
       (diagnostic_imu_io_seen&&(!diagnostic_imu_io_ok||!diagnostic_imu_finite))){
@@ -4047,6 +4092,10 @@ bool cycleLqrSpeedSource() {
 bool startBalanceTest(bool boot_immediate) {
   if (!test_system_ready) {
     Serial.println("IGNORED: system initialization is not complete.");
+    return false;
+  }
+  if(wheel_comm_suspended||!wheelSensorsOK()){
+    Serial.println("IGNORED: wheel communication retry pending; outputs remain off.");
     return false;
   }
   if (emergency_stop_active) {
@@ -4475,7 +4524,7 @@ void publishDiagnosticSnapshot(bool force){
   diagnostic::Snapshot s;s.sample_ms=now;s.source_seq=++seq;s.foc_capture_us=last_foc_output.capture_us;
   s.stop_ms=diagnostic_stop_ms;memcpy(s.stop_reason,diagnostic_stop_reason,sizeof(s.stop_reason));
   s.running=lqr_direction_test_armed||balance_wait_active||polarity_test_active;
-  s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=(fallRecoveryChecks()&8u)!=0;
+  s.disabled=emergency_stop_active||wheel_comm_suspended||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=(fallRecoveryChecks()&8u)!=0;
   s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
   s.gyro_window=gyro_vibration.latest;s.imu_config=imu_registers.config;
   s.imu_ms=diagnostic_imu_ms;s.imu_seq=diagnostic_imu_seq;
@@ -4503,6 +4552,7 @@ void publishDiagnosticSnapshot(bool force){
   }
   if(s.state==5&&!strcmp(fall_auto_recovery.reason,"EXPLICIT_STOP"))s.state=4;
   if(s.state==5&&!strcmp(fall_auto_recovery.reason,"HEALTH_FAULT"))s.state=6;
+  if(!test_system_ready&&!strcmp(last_stop_reason,"FOC_HEALTH_FAULT"))s.state=6;
   if(calibration_active.load())s.state=10;
   else if(!calibration_loaded&&!test_system_ready&&!foc_initialization_failed&&s.imu_reason!=9&&s.imu_reason!=10&&!sensor1.fault&&!sensor2.fault)s.state=9;
   else if(fall_auto_recovery.pending)s.state=11;
@@ -5792,7 +5842,7 @@ bool executeOperatorCommand(OperatorCommand command) {
       requestLqrSoftStop();
       return true;
     case OperatorCommand::EnableDrivers:
-      if (!test_system_ready || lqr_direction_test_armed || balance_wait_active ||
+      if (!test_system_ready || wheel_comm_suspended || !wheelSensorsOK() || lqr_direction_test_armed || balance_wait_active ||
           polarity_test_active) return false;
       setBothTargetsToZero();
       driver1.enable();

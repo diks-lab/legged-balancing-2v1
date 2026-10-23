@@ -25,6 +25,7 @@ prefix = prefix.replace('BLDCMotor motor', 'DriveTestMotor motor').replace('BLDC
 prelude = r'''
 #include "Arduino.h"
 #include "CheckedWheelSensor.h"
+#include "common/lowpass_filter.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
 #include "Ps4EventInbox.h"
@@ -177,11 +178,13 @@ struct DriveTestMotor {
   float shaft_angle=0,shaft_velocity=0,target=0,current_sp=0;
   int enabled=0;FOCMotorStatus motor_status=FOCMotorStatus::motor_ready;
   struct {float q=0,d=0;} voltage;
-  float shaftAngle(){return shaft_angle;}
-  float shaftVelocity(){return shaft_velocity;}
+  Sensor* cachedSensor=nullptr;int moveCalls=0;
+  float shaftAngle(){return cachedSensor?sensor_direction*cachedSensor->getAngle():shaft_angle;}
+  LowPassFilter LPF_velocity{0.01f};
+  float shaftVelocity(){return cachedSensor?sensor_direction*LPF_velocity(cachedSensor->getVelocity()):shaft_velocity;}
   int enablePin=-1;
   void enable(){enabled=1;if(enablePin>=0)digitalWrite(enablePin,HIGH);}
-  void move(float v){target=current_sp=v;}
+  void move(float v){++moveCalls;target=current_sp=v;}
 };
 struct DriveTestDriver {
   int en,pwmA,pwmB,pwmC; DriveTestDriver(int a,int b,int c,int e):en(e),pwmA(a),pwmB(b),pwmC(c){}
@@ -221,7 +224,7 @@ prefix += source[source.index('struct HttpResponseTransport {'):source.index('vo
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -278,12 +281,14 @@ void nearAt(float x,float y,int line){if(!(std::fabs(x-y)<1e-5f))fprintf(stderr,
 #define near(x,y) nearAt(x,y,__LINE__)
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
+  motor1.cachedSensor=motor2.cachedSensor=nullptr;
+  wheel_comm_suspended=false;sensor1.releaseControlCycle();sensor2.releaseControlCycle();
   boot_auto_start=BootAutoStart{false};
   fall_auto_recovery.cancel();calibration_loaded=true;calibration_active=false;calibration_abort=false;calibration_commit_phase=0;
   resetLqrTestState(); cancelBalanceWait();
   lqr_test_mode=mode;
   test_system_ready=true; startup_foc_ready.store(true); emergency_stop_active=false;
-  sensor1.fault=sensor2.fault=false;
+  sensor1.fault=sensor2.fault=false;sensor1.ready=sensor2.ready=true;
   diagnostic_calibration_done.store(true);diagnostic_calibration_ok.store(true);
   motor1.enablePin=motor1EnablePin;motor2.enablePin=motor2EnablePin;
   motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=FOCMotorStatus::motor_ready;
@@ -320,7 +325,7 @@ int main(){
   health_diagnostics=diagnostic::HealthDiagnostics{};
   gateRightSensorFault();
   diagnostic::Snapshot first_health;copyHealthReport(first_health);
-  assert(first_health.health.stages[diagnostic::RightSensor]==diagnostic::Failed);
+  assert(first_health.health.stages[diagnostic::RightSensor]==diagnostic::NotRun);
   assert(!strcmp(first_health.health.first,"RIGHT_SENSOR"));
   firstHealthFault("IMU_I2C_FAILED");copyHealthReport(first_health);
   assert(!strcmp(first_health.health.first,"RIGHT_SENSOR"));
@@ -332,7 +337,7 @@ int main(){
     setupCase();
     motor1.shaft_angle=-2*direction;motor2.shaft_angle=2*direction;
     motor1.shaft_velocity=-3*direction;motor2.shaft_velocity=3*direction;
-    updateLqrState();near(LQR_distance,2*direction);near(LQR_speed,3*direction);
+    updateLqrState(true);near(LQR_distance,2*direction);near(LQR_speed,3*direction);
     previous_velocity_diagnostic_us=micros();
     previous_right_angle=motor1.shaft_angle;previous_left_angle=motor2.shaft_angle;
     delay(10);motor1.shaft_angle-=.03f*direction;motor2.shaft_angle+=.03f*direction;
@@ -478,13 +483,13 @@ int main(){
   assert(std::string(last_stop_reason)=="NONE" && balance_wait_active);
   assert(stopBalanceTest());assert(std::string(last_stop_reason)=="MANUAL_STOP");
 
-  // A fault on either checked sensor still latches a full stop and blocks t.
+  // Runtime read fault gates outputs but preserves balance intent and init.
   sensor1.begin(19,18);sensor2.begin(23,5);
   setupCase();sensor2.fault=true;gateWheelOutputsOff();assert(stopOnWheelFault());
-  assert(!pins[27] && !pins[32] && !test_system_ready && !lqr_direction_test_armed);
+  assert(!pins[27] && !pins[32] && test_system_ready && lqr_direction_test_armed);
   assert(!startBalanceTest(false));
   captureHttpStatus();handleWifiStatusPage();
-  assert(wifi_log_server.body.find("System initialized: no")!=String::npos);
+  assert(wifi_log_server.body.find("System initialized: yes")!=String::npos);
   assert(wifi_log_server.body.find("fault=1")!=String::npos);
 
   // Missing/unmounted Web assets do not mutate motor or balance state.
@@ -883,7 +888,7 @@ int main(){
   serviceBootAutoStart();assert(!lqr_direction_test_armed);
   bootFixture();serviceBootAutoStart();float br=.1f,bl=.1f;stopForActualFall(br,bl);
   emergency_stop_active=false;serviceBootAutoStart();assert(!lqr_direction_test_armed);
-  for(int fault=0;fault<4;++fault){
+  for(int fault=0;fault<3;++fault){
     bootFixture();
     if(fault==0)diagnostic_imu_io_ok=false;
     if(fault==1)diagnostic_calibration_ok.store(false);
@@ -906,20 +911,77 @@ int main(){
     assert(!lqr_direction_test_armed&&!boot_auto_start.pending());
   }
 
-  // Fault probes are bounded, gated and cannot clear the fault/start latch.
-  setupCase();sensor1.setDiagnosticContext(3,42);I2Cone.count=0;sensor1.update();
-  assert(sensor1.fault);assert(stopOnWheelFault());
-  const auto fault_ms=sensor1.diagnostics.first.ms;
-  I2Cone.count=2;nowMs+=1000;serviceWheelFaultDiagnostics();
-  assert(sensor1.diagnostics.probes&&sensor1.diagnostics.probe.result==1);
-  assert(sensor1.fault&&!test_system_ready&&emergency_stop_active&&!pins[27]&&!pins[32]);
-  const auto probes=sensor1.diagnostics.probes;
-  serviceWheelFaultDiagnostics();assert(sensor1.diagnostics.probes==probes);
-  LQR_angle=0;noteImuMeasurement();serviceFallAutoRecovery();serviceBootAutoStart();
-  assert(!lqr_direction_test_armed&&sensor1.diagnostics.first.ms==fault_ms);
-  I2Cone.count=0;nowMs+=1000;serviceWheelFaultDiagnostics();
-  assert(sensor1.diagnostics.probe.result==3&&sensor1.fault);
-  I2Cone.count=2;
+  // Physical read failures: retry the next cycle, never move on failed input.
+  auto runtimeFixture=[&](){
+    I2Cone.nack=I2Ctwo.nack=0;I2Cone.count=I2Ctwo.count=2;
+    I2Cone.raw=I2Ctwo.raw=4090;bootFixture();serviceBootAutoStart();
+    motor1.cachedSensor=&sensor1;motor2.cachedSensor=&sensor2;
+    mpu6050.angle=mpu6050.gyro=0;mpu6050.onUpdate=[](){observeImuTransaction(0,14);};
+    lqr_speed_source=LqrSpeedSource::SimpleFoc;
+    health_diagnostics.report.stages[diagnostic::RightSensor]=diagnostic::Passed;
+    health_diagnostics.report.stages[diagnostic::LeftSensor]=diagnostic::Passed;
+  };
+  auto runtimeCycle=[&](){
+    sensor1.releaseControlCycle();sensor2.releaseControlCycle();
+    const int moves=motor1.moveCalls+motor2.moveCalls;
+    const bool valid=acquireRuntimeMeasurements();
+    if(!valid){
+      assert(!pins[27]&&!pins[32]&&motor1.current_sp==0&&motor2.current_sp==0);
+      assert(moves==motor1.moveCalls+motor2.moveCalls);return false;
+    }
+    const int reads=I2Cone.requests+I2Ctwo.requests;
+    sensor1.update();sensor2.update(); // The same calls made inside loopFOC.
+    assert(reads==I2Cone.requests+I2Ctwo.requests);
+    serviceBootAutoStart();serviceFallAutoRecovery();updateLqrDiagnostic();
+    if(lqr_direction_test_armed&&!emergency_stop_active){
+      const float r=lqrMotorVoltage(test_LQR_u,-1,1),l=lqrMotorVoltage(test_LQR_u,1,1);
+      assert(isfinite(r)&&isfinite(l)&&fabsf(r)<=1&&fabsf(l)<=1);
+      motor1.move(r);motor2.move(l);
+    }
+    return true;
+  };
+  for(int side=0;side<3;++side){
+    runtimeFixture();assert(runtimeCycle());
+    const float old=sensor1.getAngle(),origin=distance_zeropoint;
+    const uint32_t count=sensor1.diagnostics.failures;
+    if(side==0){lqr_speed_source=LqrSpeedSource::Diagnostic10ms;diag_LQR_speed_10ms=4;}
+    if(side!=1)I2Cone.count=0;
+    if(side!=0)I2Ctwo.count=0;
+    nowMs+=1;assert(!runtimeCycle());
+    assert(test_system_ready&&lqr_direction_test_armed&&wheel_comm_suspended);
+    assert(sensor1.getAngle()==old&&calibration_loaded&&startup_foc_ready.load());
+    const int requests=I2Cone.requests+I2Ctwo.requests;
+    for(int n=0;n<4;++n){nowMs+=1;assert(!runtimeCycle());}
+    assert(I2Cone.requests+I2Ctwo.requests==requests+8);
+    assert(health_diagnostics.report.stages[diagnostic::RightSensor]==diagnostic::Passed);
+    if(side!=1)assert(sensor1.diagnostics.failures==count+5);
+    I2Cone.count=I2Ctwo.count=2;I2Cone.raw=I2Ctwo.raw=5;nowMs+=1;
+    const auto recovered=millis();assert(runtimeCycle());assert(millis()==recovered);
+    assert(test_system_ready&&!wheel_comm_suspended&&lqr_direction_test_armed&&pins[27]&&pins[32]);
+    assert(fabsf(sensor1.getAngle()-old)<.1f); // wraps without false full-turn jump
+    near(LQR_speed,0);near(diagnostic_control_inputs.speed,0);near(distance_zeropoint,origin);
+    assert(motor1.LPF_velocity.Tf==.01f&&pid_speed.P==.25f&&pid_distance.P==.1f);
+  }
+  runtimeFixture();float retryR=0,retryL=0;stopForActualFall(retryR,retryL);
+  I2Cone.count=0;assert(!runtimeCycle());assert(fall_auto_recovery.pending);
+  I2Cone.count=2;mpu6050.angle=3;nowMs+=1;assert(runtimeCycle());
+  assert(fall_auto_recovery.pending&&!lqr_direction_test_armed&&!pins[27]);
+  mpu6050.angle=1.9f;nowMs+=1;assert(runtimeCycle());
+  assert(lqr_direction_test_armed&&pins[27]&&pins[32]);
+  runtimeFixture();I2Cone.count=0;assert(!runtimeCycle());stopBalanceTest();
+  assert(!executeOperatorCommand(OperatorCommand::EnableDrivers));
+  assert(!startBalanceTest(false));
+  I2Cone.count=2;nowMs+=1;assert(runtimeCycle());
+  assert(!lqr_direction_test_armed&&!pins[27]&&!pins[32]);
+  runtimeFixture();I2Cone.count=0;assert(!runtimeCycle());I2Cone.count=2;
+  mpu6050.onUpdate=[](){observeImuTransaction(2,0);};nowMs+=1;assert(!runtimeCycle());
+  assert(!test_system_ready&&!lqr_direction_test_armed&&!fall_auto_recovery.pending);
+  mpu6050.onUpdate=[](){observeImuTransaction(0,14);};nowMs+=1;assert(!runtimeCycle());
+  assert(!test_system_ready&&!pins[27]);
+  runtimeFixture();I2Cone.count=0;assert(!runtimeCycle());calibration_loaded=false;
+  nowMs+=1;assert(!runtimeCycle());assert(!test_system_ready&&!pins[27]);
+  I2Cone.count=2;calibration_loaded=true;assert(!runtimeCycle());assert(!test_system_ready&&!pins[27]);
+  mpu6050.onUpdate={};motor1.cachedSensor=motor2.cachedSensor=nullptr;
   // Automatic entry always resets FULL, origin, targets, PID and speed-filter state.
   bootFixture();lqr_test_mode=LqrTestMode::AttitudeDistance;
   LQR_angle=1;LQR_distance=4.5f;noteImuMeasurement();
@@ -988,7 +1050,7 @@ int main(){
     health_diagnostics=diagnostic::HealthDiagnostics{};
     mpu6050.angle=0;TwoWire&bus=side?I2Ctwo:I2Cone;bus.nack=2;
     updateStoppedMeasurements();assert(stopOnWheelFault());publishDiagnosticSnapshot(true);
-    assert(!test_system_ready&&!fall_auto_recovery.pending&&diagnostic_latest.imu_valid&&diagnostic_latest.foc_ready);
+    assert(test_system_ready&&fall_auto_recovery.pending&&diagnostic_latest.imu_valid&&diagnostic_latest.foc_ready);
     assert(!strcmp(health_diagnostics.report.first,side?"LEFT_SENSOR":"RIGHT_SENSOR"));
     assert(!strcmp(side?sensor2.error:sensor1.error,"I2C_ADDRESS/NACK"));
     assert(!digitalRead(motor1EnablePin)&&!digitalRead(motor2EnablePin));bus.nack=0;
@@ -1131,7 +1193,7 @@ int main(){
   sensor2.fault=true;nowMs+=50;publishDiagnosticSnapshot(false);
   assert(diagnostic_latest.state==6&&diagnostic_latest.imu_reason==8);
   updateStoppedMeasurements();publishDiagnosticSnapshot(true);
-  assert(diagnostic_latest.state==6&&diagnostic_latest.imu_valid&&diagnostic_latest.imu_reason==0);
+  assert(!diagnostic_latest.running&&!(diagnostic_latest.faults&2)&&diagnostic_latest.imu_valid&&diagnostic_latest.imu_reason==0);
   assert(diagnostic_latest.foc_ready&&(diagnostic_latest.recovery_checks&8));
   sensor2.fault=false;
   Serial.output.clear();printLqrStatus();
@@ -1151,8 +1213,13 @@ with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     sanitizer_flags = ['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('CSV_TEST_SANITIZERS') else []
     subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',
                     '-pthread','-Iinclude','-Itests/wheel_host','-I'+str(foc),str(cpp),
-                    str(foc/'common/pid.cpp'),str(foc/'common/base_classes/Sensor.cpp'),'-o',str(binary)]+sanitizer_flags,check=True)
+                    str(foc/'common/pid.cpp'),str(foc/'common/lowpass_filter.cpp'),str(foc/'common/base_classes/Sensor.cpp'),'-o',str(binary)]+sanitizer_flags,check=True)
     subprocess.run([str(binary)],check=True)
 
 for term in ['malloc(', 'free(', 'releaseHttpTraceSnapshot(', 'reapHttpTraceSnapshot(']:
     assert term not in function('serviceHttpRequests')
+
+# The production loop cannot reach loopFOC or move after preflight failure.
+loop = function('loop')
+assert loop.index('if(!acquireRuntimeMeasurements())') < loop.index('motor1.loopFOC()') < loop.index('motor1.move(right_output)')
+assert 'handleSerialCommand();serviceHttpRequests();return;' in loop

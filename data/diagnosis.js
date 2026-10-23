@@ -61,16 +61,18 @@ function healthLines(sample, live = true) {
   const lines = baseHealthLines(sample);
   for (const [side, name] of [[0, '右'], [1, '左']]) {
     const r = sample[`wheel${side}`];
-    if (!Array.isArray(r) || r.length !== 25 || !r.every(Number.isInteger)) continue;
+    if (!Array.isArray(r) || r.length !== 26 || !r.every(Number.isInteger)) continue;
     const flags = ['初期化完了', '倒立制御', '遮断状態', '極性試験', '校正中', '起立待ち', '転倒復帰待ち'];
     const before = flags.filter((_, i) => r[10] & (1 << i)).join('・') || '初期化中';
     lines.push(`${name}AS5600 最初の読取り異常（保持）：${r[0]} ms / RAW_ANGLE ` +
       `0x${r[8].toString(16)} 要求=${r[9]} 受信=${r[4]} available=${r[5]} ` +
       `tx=${r[3]} read=${r[6]},${r[7]} / ${r[1]} us / 直前:${before} / 転倒停止=${r[2]} ms（0は未記録）`);
     const age = (sample.sample_ms - r[12]) >>> 0;
-    const current = live && r[24] && age <= 2500 ? r[23] === 1 ? '通信回復を確認（異常保持・再始動禁止）' :
-      '現在も読取り失敗' : '未確認／確認更新停止';
-    lines.push(`${name}AS5600 遮断中の通信確認：${current} / 確認#${r[24]} @ ${r[12]} ms ` +
+    const known = live && (sample.age_ms || 0) <= 250 && (r[24] || r[25]) && age <= 2500;
+    const failed = Number.isInteger(sample.faults) ? Boolean(sample.faults & (1 << side)) : r[23] !== 1;
+    const current = !known ? '未確認／確認更新停止' : failed ?
+      '現在の読取り失敗／次周期再試行（初期化失敗時は駆動禁止）' : '現在の読取り正常（過去の異常は保持）';
+    lines.push(`${name}AS5600 現在の通信確認：${current} / 確認#${r[24]}・失敗回数${r[25]} @ ${r[12]} ms ` +
       `要求=${r[21]} 受信=${r[16]} available=${r[17]} tx=${r[15]} ` +
       `read=${r[18]},${r[19]} / ${r[13]} us。tx=0は受信成功を保証せず、受信側の内部I2Cエラーコードは公開APIで取得不可。`);
   }

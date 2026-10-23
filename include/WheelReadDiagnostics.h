@@ -9,6 +9,6 @@ struct WheelReadRecord {
 };
 struct WheelReadDiagnostics {
   WheelReadRecord first, probe;
-  uint32_t probes=0;
+  uint32_t probes=0, failures=0;
   bool latched=false;
 };

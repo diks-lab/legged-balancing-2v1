@@ -42,13 +42,13 @@ vm.runInContext(`
   }
   const wheelFirst = [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3];
   const wheelProbe = [55000, 100, 53000, 0, 2, 2, 2, 3, 12, 2, 4, 1];
-  const wheelSample = { diagnosis: [100, 'RIGHT_SENSOR', 2, 3, 2, 2, 2, 0, 0, 0, 1, 26, 3, 3, 0, 1, 3, 0], sample_ms: 55020, wheel0: [...wheelFirst, ...wheelProbe, 1] };
+  const wheelSample = { diagnosis: [100, 'RIGHT_SENSOR', 2, 3, 2, 2, 2, 0, 0, 0, 1, 26, 3, 3, 0, 1, 3, 0], sample_ms: 55020, wheel0: [...wheelFirst, ...wheelProbe, 1, 1] };
   const wheelLines = healthLines(wheelSample).join(' / ');
-  if (!wheelLines.includes('通信回復を確認') || !wheelLines.includes('53587 ms') ||
+  if (!wheelLines.includes('現在の読取り正常') || !wheelLines.includes('53587 ms') ||
       !wheelLines.includes('転倒停止=53000') || !wheelLines.includes('要求=2 受信=0')) throw Error('wheel detail');
-  if (healthLines(wheelSample, false).join(' / ').includes('通信回復を確認')) throw Error('offline wheel state');
-  wheelSample.wheel0[23] = 3;
-  if (!healthLines(wheelSample).join(' / ').includes('現在も読取り失敗')) throw Error('probe failure');
+  if (healthLines(wheelSample, false).join(' / ').includes('現在の読取り正常')) throw Error('offline wheel state');
+  wheelSample.wheel0[23] = 3;wheelSample.wheel0[24] = 0;
+  if (!healthLines(wheelSample).join(' / ').includes('現在の読取り失敗')) throw Error('probe failure');
   const output = value => ({ type: 'sample', age_ms: 0, disabled: false,
     command_valid: true, values: { left_command_v: value } });
   for (const v of [0, 0.35, -0.2, 1, -1, 1.5, -1.5]) {

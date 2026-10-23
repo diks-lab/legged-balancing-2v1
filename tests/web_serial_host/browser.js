@@ -104,11 +104,16 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
         type: 'wheel_diagnostics', boot_id: 'boot-test',
         wheel0: [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3,
-          100, 100, 53000, 0, 2, 2, 1, 2, 12, 2, 4, 1, 1]
+          100, 100, 53000, 0, 2, 2, 1, 2, 12, 2, 4, 1, 1, 1]
       }) }));
       await page.evaluate(() => window.sample({ sample_ms: 120, imu_ms: 120, command_ms: 120 }));
-      assert((await page.locator('#health-diagnosis').textContent()).includes('通信回復を確認'), await page.locator('#health-diagnosis').textContent());
+      assert((await page.locator('#health-diagnosis').textContent()).includes('現在の読取り正常'), await page.locator('#health-diagnosis').textContent());
       assert((await page.locator('#health-diagnosis').textContent()).includes('53587 ms'));
+      await page.evaluate(() => window.sample({ sample_ms: 140, imu_ms: 140, command_ms: 140, faults: 1 }));
+      assert((await page.locator('#health-diagnosis').textContent()).includes('現在の読取り失敗／次周期再試行'));
+      await page.evaluate(() => window.sample({ sample_ms: 160, imu_ms: 160, command_ms: 160, faults: 0 }));
+      assert((await page.locator('#health-diagnosis').textContent()).includes('現在の読取り正常'));
+      assert((await page.locator('#health-diagnosis').textContent()).includes('失敗回数1'));
       await page.evaluate(() => { for (let i = 0; i < 1200; i++) window.sample(); });
       await page.click('#pause'); await page.click('#pause');
       assert(await page.evaluate(() => window.axisLabels.some(x => x.id === 'pose' && x.text === '30.0')));
