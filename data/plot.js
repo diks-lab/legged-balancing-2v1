@@ -145,7 +145,11 @@ class OverlayPlot {
       c.fillText('0°', left - 8, (top + bottom) / 2 + 5);
     }
     c.save();
-    c.beginPath(); c.rect(left, top, right - left, bottom - top); c.clip();
+    // Leave the edge stroke/first-sample dot visible without changing the axis.
+    const edge = this.fixedAttitude ? 2.5 : 0;
+    c.beginPath();
+    c.rect(left - edge, top - edge, right - left + 2 * edge, bottom - top + 2 * edge);
+    c.clip();
     if (this.fixedAttitude) {
       c.strokeStyle = '#526379'; c.lineWidth = 1.5;
       c.setLineDash([5, 4]); c.beginPath();
@@ -158,15 +162,28 @@ class OverlayPlot {
       c.strokeStyle = COLORS[SIGNALS.indexOf(signal)];
       c.lineWidth = 1.8;
       c.beginPath();
-      for (const segment of signalSegments(rows, key)) {
+      const segments = signalSegments(rows, key);
+      for (const segment of segments) {
         segment.forEach(([time, value], i) => {
           const x = left + (time - start) / 60000 * (right - left);
-          const y = bottom - (value - lo) / (hi - lo) * (bottom - top);
+          // Clamp presentation coordinates only; history/CSV retain the real angle.
+          const displayed = this.fixedAttitude ? Math.max(lo, Math.min(hi, value)) : value;
+          const y = bottom - (displayed - lo) / (hi - lo) * (bottom - top);
           if (i) c.lineTo(x, y);
           else c.moveTo(x, y);
         });
       }
       c.stroke();
+      if (this.fixedAttitude) {
+        c.fillStyle = c.strokeStyle;
+        for (const segment of segments.filter(points => points.length === 1)) {
+          const [time, value] = segment[0];
+          const x = left + (time - start) / 60000 * (right - left);
+          const displayed = Math.max(lo, Math.min(hi, value));
+          const y = bottom - (displayed - lo) / (hi - lo) * (bottom - top);
+          c.beginPath(); c.arc(x, y, 2, 0, Math.PI * 2); c.fill();
+        }
+      }
     }
     c.restore();
   }

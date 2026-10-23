@@ -276,6 +276,46 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight));
       fs.mkdirSync('work/instruments-browser', { recursive: true });
       await page.screenshot({ path: `work/instruments-browser/${size.width}.png` });
+      // Real canvas pixels: an out-of-range posture is visible on the edge,
+      // including its first isolated sample and the full stroke below the frame.
+      const edgePixels = await page.evaluate(() => {
+        const canvas = document.createElement('canvas');
+        canvas.style.cssText = 'position:fixed;left:0;top:0;width:800px;height:300px';
+        document.body.appendChild(canvas);
+        const history = new DiagnosticHistory();
+        const plot = new OverlayPlot(canvas, document.createElement('div'), history);
+        plot.fixedAttitude = true;
+        plot.select(['angle_deg', 'reference_deg']);
+        const color = COLORS[0].slice(1).match(/../g).map(x => parseInt(x, 16));
+        const pixel = (x, y) => {
+          const rgba = canvas.getContext('2d').getImageData(x, y, 1, 1).data;
+          return color.every((v, i) => Math.abs(v - rgba[i]) < 3) && rgba[3] > 100;
+        };
+        let seq = 0;
+        const push = value => history.push({ boot_id: 'pixel-test', seq: ++seq,
+          sample_ms: seq * 50, subscription_id: 1, dropped: 0,
+          values: { angle_deg: value, reference_deg: 0 } });
+        plot.draw();
+        const empty = !pixel(788, 155) && !pixel(788, 270);
+        push(-48.9);plot.draw();
+        const first = pixel(788, 270) && pixel(788, 271) && !pixel(788, 155);
+        for (let i = 0; i < 20; ++i) push(-48.9);
+        plot.draw();
+        const lower = pixel(783, 270);
+        const raw = history.rows.at(-1).values.angle_deg === -48.9 && history.csv().includes('-48.9');
+        push(-30);push(-20);plot.draw();
+        const reentry = [786, 787, 788, 789].some(x =>
+          [232, 233, 234, 235, 236, 237, 238, 239, 240].some(y => pixel(x, y)));
+        history.clear();push(48.9);plot.draw();
+        const upper = pixel(788, 40) && pixel(788, 39);
+        history.clear();push(null);plot.draw();
+        const invalid = !pixel(788, 155) && !pixel(788, 270);
+        history.clear();history.breakNext = true;push(-48.9);plot.draw();
+        const cleared = pixel(788, 270);
+        canvas.remove();
+        return { empty, first, lower, raw, reentry, upper, invalid, cleared };
+      });
+      for (const [check, passed] of Object.entries(edgePixels)) assert(passed, check);
       assert.deepEqual(errors, []);
       await page.close();
     }
