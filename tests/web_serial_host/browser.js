@@ -69,11 +69,65 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert((await page.locator('#gyro-window').textContent()).includes('RMS 1.250'));
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
         type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
+        leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
         legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 40, 30, 3, 3, 1, 1, 1, 1, 4, 0, 27]
       }) }));
       assert((await page.locator('#leg-diagnostics').textContent()).includes('実位置ではありません'));
       assert((await page.locator('#leg-diagnostics').textContent()).includes('応答未確認'));
       assert((await page.locator('#leg-diagnostics').textContent()).includes('可動制限：あり'));
+      assert.equal(await page.locator('#leg-mode').textContent(), '支持試験（倒立OFF）');
+      const legResult = await page.evaluate(async () => {
+        const section = document.getElementById('leg-diagnostics');
+        const rows = [...section.querySelectorAll('.leg-field')];
+        const geometry = () => rows.map(e => ({ y: e.getBoundingClientRect().y, h: e.getBoundingClientRect().height }));
+        document.getElementById('details').open = true;
+        const original = geometry();
+        const node = document.getElementById('leg-blocker');
+        const sendLeg = (reason, height = 15, mode = 1) => {
+          window.sample();
+          window.peer.onmessage({ data: JSON.stringify({
+            type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
+            leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1,
+            legs: [height, 0, 0, -48.9, 16, 14, 2034, 2055, 40, 30, reason, 3,
+              1, reason === 8 ? 0 : 1, 0, 1, 4, 0, 27]
+          }) });
+        };
+        const states = [];
+        for (const [reason, height, mode] of [[1, 15, 1], [3, 16, 1], [2, 16, 1],
+          [8, 16, 1], [1, 16, 1], [17, 16, 0]]) {
+          sendLeg(reason, height, mode);
+          states.push({ reason, height, mode, geometry: geometry(),
+            blocker: node.textContent, operation: document.getElementById('leg-operation').textContent,
+            failure: document.getElementById('leg-failure').textContent });
+        }
+        // An unchanged status update must not rewrite text, attributes or elements.
+        let mutations = 0;
+        const observer = new MutationObserver(records => { mutations += records.length; });
+        observer.observe(section, { childList: true, subtree: true, characterData: true, attributes: true });
+        window.sample();
+        await Promise.resolve(); observer.disconnect();
+        window.peer.close();
+        const stale = document.getElementById('leg-freshness').textContent;
+        const sameNode = document.getElementById('leg-blocker') === node;
+        const closed = [...section.querySelectorAll('details')].every(e => !e.open);
+        const overflow = rows.some(e => e.querySelector('dd').getBoundingClientRect().height > e.clientHeight);
+        document.getElementById('details').open = false;
+        return { original, states, mutations, stale, sameNode, closed, overflow };
+      });
+      for (const state of legResult.states) assert.deepEqual(state.geometry, legResult.original);
+      assert(legResult.states[1].operation.includes('伸長'));
+      assert(legResult.states[2].operation.includes('位置確認中'));
+      assert(legResult.states[3].blocker.includes('応答なし'));
+      assert.equal(legResult.states[4].blocker, 'なし');
+      assert(legResult.states[4].failure.includes('過去の記録'));
+      assert(legResult.states[5].blocker.includes('Share'));
+      assert(legResult.stale.includes('最終受信時'));
+      assert(legResult.sameNode && legResult.closed && !legResult.overflow);
+      assert.equal(legResult.mutations, 0);
+      await page.click('#reconnect');
+      await page.waitForFunction(() => window.peer.readyState === 1);
+      await page.evaluate(() => window.sample());
+
 
       await page.evaluate(() => window.sample({ gyro_window: [0, 100, 200000, 101, 0, 1800, 2200, 2.5, 8.5] }));
       assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x00'));
@@ -273,14 +327,14 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.sample());
       assert(await page.locator('#connection-details').evaluate(n => n.closest('details').open === false));
       assert(await page.locator('#measurement').evaluate(n => !!n.closest('details')));
-      await page.locator('#details summary').click();
+      await page.locator('#details > summary').click();
       page.once('dialog', dialog => dialog.accept());
       await page.click('#calibrate');
       await page.waitForFunction(() => document.getElementById('calibration-action').textContent.includes('queued'));
       await page.click('#calibrate-abort');
       await page.waitForTimeout(50);
       assert.deepEqual(calibrationRequests, [['calibration/start', 'POST'], ['calibration/abort', 'POST']]);
-      await page.locator('#details summary').click();
+      await page.locator('#details > summary').click();
       assert(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight));
       fs.mkdirSync('work/instruments-browser', { recursive: true });
       await page.screenshot({ path: `work/instruments-browser/${size.width}.png` });
@@ -339,6 +393,6 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.waitForFunction(() => document.getElementById('connection').textContent.includes('取得・準備失敗'));
       assert.equal(calls.at(-1), failure); await page.close();
     }
-    console.log('PASS: real Chromium 100% 1366x768/1920x1080 instruments, fixed ±30/overflow, signed arcs/zero/limits/disable/stale, freshness/reasons, aux/legend/pause, permanent/optional/stopped selection, reconnect and sequential assets');
+    console.log('PASS: fixed leg rows/status transitions, unchanged DOM/no mutations, separated past failure, collapsed guide/details; real Chromium 100% 1366x768/1920x1080 instruments, fixed ±30/overflow, signed arcs/zero/limits/disable/stale, freshness/reasons, aux/legend/pause, permanent/optional/stopped selection, reconnect and sequential assets');
   } finally { await browser.close(); }
 })().catch(e => { console.error(e); process.exitCode = 1; });

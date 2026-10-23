@@ -41,14 +41,30 @@ vm.runInContext(`
     if (formatAttitude(v) !== text) throw Error('attitude presentation');
   }
   const legPacket = { leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1, legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 90, 50, 3, 3, 1, 1, 1, 1, 4, 0, 27] };
-  const legText = legLines(legPacket, true, 120).join(' / ');
-  if (!legText.includes('要求 2.0') || !legText.includes('適用 1.0') ||
-      !legText.includes('実位置ではありません') || !legText.includes('応答未確認') ||
-      !legText.includes('可動制限：あり')) throw Error('leg diagnosis');
-  if (!legText.includes('支持した停止試験') || !legText.includes('無効（方向未確認') || !legText.includes('AngleX：0.0')) throw Error('height only commissioning');
-  legPacket.leg_roll_confirmed = true;
-  if (!legLines(legPacket, true, 120).join(' / ').includes('確認済設定で有効')) throw Error('confirmed roll');
-  if (!legLines(legPacket, false, 120).join(' / ').includes('最終受信時')) throw Error('leg disconnect');
+  const legCache = {};
+  const legState = legPresentation(legPacket, true, 120, legCache);
+  if (legState.values.mode !== '支持試験（倒立OFF）' ||
+      legState.values.available !== '上下操作可能' ||
+      !legState.values.height.includes('実位置ではありません') ||
+      !legState.detail.torque.includes('応答未確認')) throw Error('leg status');
+  const progress = { ...legPacket, leg_ms: 150, legs: [...legPacket.legs] };
+  progress.legs[0] = 16;
+  if (!legPresentation(progress, true, 170, legCache).values.operation.includes('伸長')) throw Error('height progress');
+  if (!legPresentation(progress, true, 170, legCache).values.operation.includes('伸長')) throw Error('same packet stable');
+  for (const reason of [1, 3, 1, 3]) {
+    progress.leg_ms += 50; progress.legs[10] = reason;
+    if (legPresentation(progress, true, progress.leg_ms, legCache).values.operation !== '待機・高さ保持') throw Error('stable accepted/idle');
+  }
+  progress.leg_ms += 50; progress.legs[10] = 8; progress.legs[13] = 0;
+  const legFailure = legPresentation(progress, true, progress.leg_ms, legCache);
+  if (legFailure.values.sync !== '失敗' || !legFailure.values.blocker.includes('応答なし')) throw Error('sync failure immediate');
+  progress.leg_ms += 50; progress.legs[10] = 1;
+  const afterFailure = legPresentation(progress, true, progress.leg_ms, legCache);
+  if (afterFailure.values.blocker !== 'なし' || !afterFailure.values.failure.includes('過去の記録')) throw Error('past failure separate');
+  progress.leg_ms += 50; progress.legs[10] = 17; progress.leg_mode = 0;
+  if (!legPresentation(progress, true, progress.leg_ms, legCache).values.blocker.includes('Share')) throw Error('explicit stop immediate');
+  if (!legPresentation(progress, false, progress.leg_ms, legCache).note.includes('最終受信時')) throw Error('leg disconnect');
+  if (legPresentation(null, false, 0, {}).values.mode !== '未取得') throw Error('no packet');
   const wheelFirst = [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3];
   const wheelProbe = [55000, 100, 53000, 0, 2, 2, 2, 3, 12, 2, 4, 1];
   const wheelSample = { diagnosis: [100, 'RIGHT_SENSOR', 2, 3, 2, 2, 2, 0, 0, 0, 1, 26, 3, 3, 0, 1, 3, 0], sample_ms: 55020, wheel0: [...wheelFirst, ...wheelProbe, 1, 1] };

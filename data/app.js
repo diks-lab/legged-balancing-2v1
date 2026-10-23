@@ -141,7 +141,13 @@ window.startLogger = function () {
       if (s.type === 'wheel_diagnostics') {
         if (s.boot_id === boot) {
           dashboard.wheelReads = { wheel0: s.wheel0, wheel1: s.wheel1 };
-          dashboard.legPacket = { legs: s.legs, leg_ms: s.leg_ms };
+          dashboard.legPacket = {
+            legs: s.legs,
+            leg_ms: s.leg_ms,
+            leg_mode: s.leg_mode,
+            leg_roll_confirmed: s.leg_roll_confirmed,
+            leg_roll_sign: s.leg_roll_sign
+          };
           dashboard.status();
         }
         return;

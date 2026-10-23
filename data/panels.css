@@ -44,3 +44,29 @@ nav { flex: none; margin: 0; }
 .condition[data-ok='unknown'] { color: #556170; }
 
 .meter-note { grid-column: 1 / -1; margin: 0; text-align: center; font-size: 14px; }
+
+/* Leg rows reserve two text lines; state changes never move neighbouring rows. */
+#leg-diagnostics .leg-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 8px 0;
+  gap: 4px 16px;
+}
+.leg-field {
+  display: grid;
+  grid-template-columns: 9em minmax(0, 1fr);
+  align-items: center;
+  box-sizing: border-box;
+  height: 4.5em;
+  border-bottom: 1px solid #d4dce5;
+}
+.leg-field dt { font-weight: bold; }
+.leg-field dd { margin: 0; white-space: pre-line; line-height: 1.4; }
+.leg-blocker, .leg-failure { grid-column: 1 / -1; }
+#leg-freshness { height: 3em; margin: 4px 0; }
+#leg-blocker[data-blocked='true'] { color: #8c2634; font-weight: bold; }
+#leg-diagnostics details { margin: 6px 0; }
+#leg-diagnostics li { margin: 6px 0; }
+@media (max-width: 700px) {
+  #leg-diagnostics .leg-fields { grid-template-columns: 1fr; }
+}
