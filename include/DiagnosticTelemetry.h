@@ -8,6 +8,7 @@
 #include "GyroVibration.h"
 #include "HealthDiagnostics.h"
 #include "WheelReadDiagnostics.h"
+#include "LegControl.h"
 namespace diagnostic {
 constexpr unsigned FieldCount=32;
 constexpr uint32_t PermanentMask=(1u<<0)|(1u<<1)|(1u<<14)|(1u<<15);
@@ -28,6 +29,7 @@ struct Snapshot {
  uint8_t imu_reason=1,state=0,imu_tx=255,imu_rx=0,recovery_checks=0;
  char calibration[32]="NOT_LOADED",recovery[32]="NONE";
  char startup_reason[32]="WEB_WAIT",right_error[24]="",left_error[24]="";
+ leg::State legs;
  WheelReadDiagnostics wheel_reads[2];
  HealthReport health;
  GyroWindow gyro_window;
@@ -122,6 +124,14 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   }
   j.add(",%lu,%lu]",(unsigned long)d.probes,(unsigned long)d.failures);
  }
+ const auto&l=s.legs;
+ j.add(",\"leg_ms\":%lu,\"legs\":[",(unsigned long)s.sample_ms);
+ const float values[]={l.height,l.requested_roll,l.applied_roll,l.measured_roll,l.command_valid?leg::clamp(leg::percent(true,l.right_command),0,30):NAN,l.command_valid?leg::clamp(leg::percent(false,l.left_command),0,30):NAN};
+ bool first=true;for(float value:values){j.add("%s",first?"":",");if(isfinite(value))j.add("%.4g",double(value));else j.add("null");first=false;}
+ j.add(",%d,%d,%lu,%lu,%u,%u,%u,%u,%u,%u,%lu,%lu,%lu]",int(l.right_command),int(l.left_command),
+  (unsigned long)l.command_ms,(unsigned long)l.sync_ms,unsigned(l.reason),unsigned(l.torque),
+  unsigned(l.active),unsigned(l.synced),unsigned(l.limited),unsigned(l.command_valid),
+  (unsigned long)l.tx_frames,(unsigned long)l.tx_busy,(unsigned long)l.max_service_us);
  j.add("}");return j.ok;
 }
 inline bool ack(char*dest,size_t cap,const Subscription&s,uint32_t generation,const char*boot){Json j(dest,cap);j.add("{\"type\":\"subscribed\",\"boot_id\":\"%s\",\"request_id\":%lu,\"subscription_id\":%lu,\"period_ms\":50,\"streaming\":%s,\"fields\":[",boot,(unsigned long)s.request,(unsigned long)generation,s.stop?"false":"true");bool first=true;for(unsigned i=0;i<FieldCount;++i)if(s.mask&(1u<<i)){j.add("%s\"%s\"",first?"":",",fields[i]);first=false;}j.add("]}");return j.ok;}

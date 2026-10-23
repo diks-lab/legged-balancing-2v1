@@ -42,6 +42,7 @@
 #include "FocAlignmentObservation.h"
 
 #include "Servo_STS3032.h"
+#include "LegServoBus.h"
 #include "ssid.h"
 
 namespace {
@@ -155,13 +156,13 @@ void wheelAlignTimeout(void*) {
 }
 constexpr uint8_t kRightLegServoId = 1;
 constexpr uint8_t kLeftLegServoId = 2;
-constexpr int16_t kRightLegHomePosition = 2061;
-constexpr int16_t kRightLegFullyExtendedPosition = 1892;
+constexpr int16_t kRightLegHomePosition = leg::RightHome;
+constexpr int16_t kRightLegFullyExtendedPosition = leg::RightExtended;
 constexpr int16_t kRightLegTestExtend10PercentPosition = 2044;
 constexpr uint16_t kRightLegTestSpeed = 150;
 constexpr uint8_t kRightLegTestAcceleration = 15;
-constexpr int16_t kLeftLegHomePosition = 2026;
-constexpr int16_t kLeftLegFullyExtendedPosition = 2208;
+constexpr int16_t kLeftLegHomePosition = leg::LeftHome;
+constexpr int16_t kLeftLegFullyExtendedPosition = leg::LeftExtended;
 constexpr int16_t kLeftLegTestExtend10PercentPosition = 2044;
 constexpr uint16_t kLeftLegTestSpeed = 150;
 constexpr uint8_t kLeftLegTestAcceleration = 15;
@@ -307,9 +308,7 @@ constexpr float kPs4DriveTargetSlewPerUpdate = 0.02f;
 constexpr float kPs4DriveMaxSpeed = 0.05f;
 constexpr float kPs4DriveTestTravelLimit = 0.15f / kWheelRadiusM;
 constexpr int kPs4DriveStickDeadzone = 10;
-constexpr float kPs4LegExtensionStepPercent = 10.0f;
-constexpr float kPs4LegExtensionMinPercent = 0.0f;
-constexpr float kPs4LegExtensionMaxPercent = 30.0f;
+// D-pad leg motion is now time-based (leg::HeightRate / leg::RollRate).
 // Pair the controller to this host address before the first connection.
 // Keep this value stable so the controller can reconnect after a restart.
 constexpr char kPs4HostMac[] = "01:02:03:04:05:06";
@@ -337,7 +336,7 @@ uint32_t ps4_event_time_ms=0;
 uint32_t ps4_controls_after_sequence=0, ps4_serial_seen_revision=0;
 bool ps4_controls_barrier_valid=false;
 
-enum class OperatorCommand { Start, EndTest, FullStop, SoftStop, EnableDrivers, CycleMode, LegUp, LegDown };
+enum class OperatorCommand { Start, EndTest, FullStop, SoftStop, EnableDrivers, CycleMode };
 bool executeOperatorCommand(OperatorCommand command);
 // New steering command is bounded within the existing total wheel voltage limit.
 constexpr float kPs4YawVoltage = 0.10f;
@@ -362,7 +361,14 @@ float stop_speed_min = 0.0f;
 float stop_speed_max = 0.0f;
 float stop_speed_abs_max = 0.0f;
 Ps4InputState previous_ps4_input = {};
-float ps4_leg_extension_percent = kPs4LegExtensionMinPercent;
+leg::Control leg_control;
+struct LegUartIO {
+ int available(){return Serial2.available();}
+ int read(){return Serial2.read();}
+ int availableForWrite(){return Serial2.availableForWrite();}
+ size_t write(const uint8_t*p,size_t n){return Serial2.write(p,n);}
+} leg_uart;
+leg::ServoBus<LegUartIO> leg_bus;
 float ps4_drive_speed_request = 0.0f;
 int ps4_drive_stick_y = 0;
 enum class Ps4DriveState {
@@ -813,6 +819,8 @@ void printHelp();
 void printLqrStatus();
 void printDistanceDiagnostic();
 void printSpeedDiagnostic();
+void serviceLegControl();
+bool prepareLegacyLegAction();
 void pingLegServos();
 void ensureLegServoTorqueEnabled();
 void disableLegServoTorqueForTestEnd(const char* reason);
@@ -1259,6 +1267,7 @@ void loop() {
     if(diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()){
       mpu6050.update();LQR_angle=mpu6050.getAngleY();LQR_gyro=mpu6050.getGyroY();noteImuMeasurement();
     }
+    serviceLegControl();
     serviceHttpRequests();
     advanceStartup();
     delay(10);
@@ -1270,7 +1279,7 @@ void loop() {
   uint32_t section_start_us = micros();
   // Validate both wheels and IMU before either FOC can apply a cached command.
   if(!acquireRuntimeMeasurements()){
-    handleSerialCommand();serviceHttpRequests();return;
+    handleSerialCommand();serviceLegControl();serviceHttpRequests();return;
   }
   section_start_us=micros();
   uint32_t motor1_loopfoc_us=0,motor2_loopfoc_us=0;
@@ -1516,6 +1525,7 @@ const float left_angle_delta =
       micros() - section_start_us;
 
   handleSerialCommand();
+  serviceLegControl();
 
   const uint32_t whole_loop_us =
       micros() - loop_start_us;
@@ -4526,6 +4536,7 @@ void publishDiagnosticSnapshot(bool force){
   s.running=lqr_direction_test_armed||balance_wait_active||polarity_test_active;
   s.disabled=emergency_stop_active||wheel_comm_suspended||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=(fallRecoveryChecks()&8u)!=0;
   s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
+  s.legs=leg_control.state;
   s.gyro_window=gyro_vibration.latest;s.imu_config=imu_registers.config;
   s.imu_ms=diagnostic_imu_ms;s.imu_seq=diagnostic_imu_seq;
   s.imu_tx=diagnostic_imu_tx;s.imu_rx=diagnostic_imu_rx;
@@ -4988,6 +4999,7 @@ void startWifiHttpServer() {
     wifi_log_server.on("/subscribe.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/subscribe.js", "application/javascript"); });
     wifi_log_server.on("/panels.css", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/panels.css", "text/css"); });
     wifi_log_server.on("/diagnosis.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/diagnosis.js", "application/javascript"); });
+    wifi_log_server.on("/legs.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/legs.js", "application/javascript"); });
     wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
     wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
@@ -5327,7 +5339,7 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 void printHelp() {
   Serial.println();
   Serial.println("SimpleFOC two-wheel + MPU6050 integration test");
-  Serial.println("Default ATTITUDE ONLY; g selects FULL / ATTITUDE+SPEED / ATTITUDE+DISTANCE / ATTITUDE ONLY.");
+  Serial.println("Default FULL; g selects FULL / ATTITUDE+SPEED / ATTITUDE+DISTANCE / ATTITUDE ONLY.");
   Serial.println("t starts stationary balance; >/< explicitly request short drive; . soft-stops; e cancels drive; d disarms.");
   Serial.println("  1 : right +0.50 V, left 0 V");
   Serial.println("  2 : right -0.50 V, left 0 V");
@@ -5343,7 +5355,7 @@ void printHelp() {
   Serial.println("  p : print both motor sensors and MPU6050 values once");
   Serial.println("  q : print distance-control diagnostics without motor output");
   Serial.println("  v : print speed-control diagnostics without motor output");
-  Serial.println("  l : ping right (ID 1), then left (ID 2) leg servo");
+  Serial.println("  l : async read-only right/left servo positions (stopped only)");
   Serial.println("  m : move right leg (ID 1) to 2044");
   Serial.println("  n : return right leg (ID 1) to HOME 2061");
   Serial.println("  o : move left leg (ID 2) to 2044 (10% extend)");
@@ -5775,8 +5787,6 @@ const char* ps4CommandName(OperatorCommand command) {
     case OperatorCommand::SoftStop: return "SOFT_STOP";
     case OperatorCommand::EnableDrivers: return "ENABLE_DRIVERS";
     case OperatorCommand::CycleMode: return "CYCLE_MODE";
-    case OperatorCommand::LegUp: return "LEG_UP";
-    case OperatorCommand::LegDown: return "LEG_DOWN";
   }
   return "UNKNOWN";
 }
@@ -5850,25 +5860,7 @@ bool executeOperatorCommand(OperatorCommand command) {
       emergency_stop_active = false;
       Serial.println("DRIVERS ENABLED: both targets remain 0.00 V.");
       return true;
-    case OperatorCommand::LegUp:
-    case OperatorCommand::LegDown:
-      if (!test_system_ready || emergency_stop_active || balance_wait_active ||
-          polarity_test_active || lqr_auto_drive_active || lqr_drive_start_pending ||
-          lqr_soft_stop_active || drive_recovery_state != DriveRecoveryState::Inactive) {
-        Serial.println("PS4 LEG: ignored while preparing, moving, recovering or disabled.");
-        return false;
-      }
-      {
-        const float next = constrain(ps4_leg_extension_percent +
-            (command == OperatorCommand::LegUp ? kPs4LegExtensionStepPercent :
-                                                -kPs4LegExtensionStepPercent),
-            kPs4LegExtensionMinPercent, kPs4LegExtensionMaxPercent);
-        if (next != ps4_leg_extension_percent) {
-          ps4_leg_extension_percent = next;
-          moveBothLegsToPercent(next);
-        }
-      }
-      return true;
+
   }
   return false;
 }
@@ -5897,6 +5889,7 @@ bool ps4ButtonsReleased(const Ps4InputState& input) {
 void handlePs4Connection(bool connected) {
   if (connected == ps4_was_connected) return;
   ps4_was_connected = connected;
+  leg_control.disconnect();
   ps4_diagnostics.connection(connected);
   ps4_input_initialized = false;
   ps4_controls_released = false;
@@ -5933,12 +5926,12 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
       executePs4Command(OperatorCommand::CycleMode);
     } else if (input.options && !previous_ps4_input.options && sticks_centered) {
       executePs4Command(OperatorCommand::Start);
-    } else if (input.dpad_up && !previous_ps4_input.dpad_up) {
-      executePs4Command(OperatorCommand::LegUp);
-    } else if (input.dpad_down && !previous_ps4_input.dpad_down) {
-      executePs4Command(OperatorCommand::LegDown);
     }
   }
+
+  leg_control.input((input.dpad_up?1:0)|(input.dpad_down?2:0)|
+      (input.dpad_left?4:0)|(input.dpad_right?8:0),
+      ps4_was_connected&&ps4_controls_released&&!input.cross);
 
   const bool can_move = lqr_direction_test_armed && !emergency_stop_active &&
       drive_recovery_state == DriveRecoveryState::Inactive &&
@@ -6003,6 +5996,12 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
         ps4_diagnostics.decision("DRIVE_UPDATE", true, "TARGET_SLEW_APPLIED");
       }
     }
+  }
+  const uint16_t dpad_changed=(Ps4Diagnostics::buttons(input)^Ps4Diagnostics::buttons(previous_ps4_input))&0xf0u;
+  if(input_changed&&dpad_changed&&!ps4_packet_command_attempted){
+    ps4_packet_command_attempted=true;
+    const bool routed=ps4_was_connected&&ps4_controls_released&&!input.cross;
+    ps4_diagnostics.decision("LEG_INPUT",routed,routed?"QUEUED_SEE_LEG_STATUS":"WAIT_RELEASE_AFTER_CONNECT");
   }
   // Observe rejected/suppressed inputs without routing them to an actuator.
   if (input_changed && !ps4_packet_command_attempted) {
@@ -6076,7 +6075,7 @@ void updatePs4Controller() {
   }
   if (batch.overflowed) {
     raisePs4ControlBarrier(batch.sequence);
-    ps4_event_rearm_required=true;
+    ps4_event_rearm_required=true;leg_control.disconnect();
     // An actually received neutral transition is retained outside the FIFO too.
     if (!batch.cross_pending && !batch.disconnect_pending && batch.neutral_pending &&
         ps4_drive_state==Ps4DriveState::DriveRequested) {
@@ -6153,24 +6152,58 @@ void updatePs4Controller() {
   }
 }
 
+void serviceLegControl() {
+  const uint32_t start=micros(),now=millis();
+  const bool moving=lqr_auto_drive_active||lqr_drive_start_pending||lqr_soft_stop_active||
+      drive_recovery_state!=DriveRecoveryState::Inactive;
+  // Existing explicit STOP + u/Share permits supported bench tests without balance.
+  const bool bench=!lqr_direction_test_armed&&!balance_wait_active&&
+      boot_auto_start.phase==BootAutoStart::Phase::Cancelled;
+  const bool eligible=test_system_ready&&(lqr_direction_test_armed||bench)&&!emergency_stop_active&&
+      !polarity_test_active&&!calibration_active.load();
+  const bool imu=(fallRecoveryChecks()&2u)&&isfinite(mpu6050.getAngleX());
+  const float roll=imu?leg::ImuRollSign*mpu6050.getAngleX():NAN;
+  leg_control.state.measured_roll=roll;
+  const bool hard_stop=!test_system_ready||emergency_stop_active||calibration_active.load()||
+      polarity_test_active||!imu;
+  const bool observing=leg_bus.observing();
+  // A brief wheel retry freezes the leg target; do not release load-bearing legs.
+  if(observing){
+    // Explicit stopped read-only query: no target or torque change.
+  } else if(wheel_comm_suspended&&eligible){
+    leg_control.stop(leg::Reason::WheelRetry);
+    leg_bus.cancel();
+  } else {
+    if(hard_stop&&(leg_control.state.active||leg_control.state.synced||leg_bus.busy()||leg_control.state.torque==3)){
+      leg_bus.off(leg_control);
+    } else if((moving||!eligible)&&leg_bus.busy())leg_bus.cancel();
+    leg_control.tick(now,eligible,moving,imu,roll);
+  }
+  leg_bus.service(leg_uart,leg_control,now);
+  if(observing&&!leg_bus.observing()){
+    if(leg_control.state.reason==leg::Reason::Idle||leg_control.state.reason==leg::Reason::PositionRange){
+      Serial.printf("LEG READ: right=%d left=%d received_ms=%lu reason=%u; no motion command\n",
+        int(leg_bus.readPosition(true)),int(leg_bus.readPosition(false)),
+        (unsigned long)now,unsigned(leg_control.state.reason));
+    } else Serial.printf("LEG READ: positions unconfirmed reason=%u; no motion command\n",unsigned(leg_control.state.reason));
+  }
+  if(leg_control.state.torque) sms_sts.servo_off=leg_control.state.torque!=3;
+  const uint32_t duration=micros()-start;
+  if(duration>leg_control.state.max_service_us)leg_control.state.max_service_us=duration;
+}
+
+bool prepareLegacyLegAction(){
+  if(lqr_direction_test_armed||balance_wait_active||polarity_test_active||leg_bus.busy()){
+    Serial.println("LEG SERIAL: stop balance and pending leg communication first.");return false;
+  }
+  leg_control.stop(leg::Reason::Stopped);leg_control.state.command_valid=false;
+  leg_bus.cancel();return true;
+}
+
 void pingLegServos() {
-  Serial.println("LEG SERVO PING: starting (no motion command is sent)");
-
-  const int right_result = sms_sts.Ping(kRightLegServoId);
-  if (right_result == kRightLegServoId) {
-    Serial.println("  Right leg ID 1: OK");
-  } else {
-    Serial.printf("  Right leg ID 1: FAILED (result=%d)\n", right_result);
-  }
-
-  const int left_result = sms_sts.Ping(kLeftLegServoId);
-  if (left_result == kLeftLegServoId) {
-    Serial.println("  Left leg ID 2: OK");
-  } else {
-    Serial.printf("  Left leg ID 2: FAILED (result=%d)\n", left_result);
-  }
-
-  Serial.println("LEG SERVO PING: complete");
+  if(!prepareLegacyLegAction())return;
+  leg_bus.observe(leg_control);
+  Serial.println("LEG READ: queued asynchronous ID 1/2 position query; no torque/goal command.");
 }
 
 void ensureLegServoTorqueEnabled() {
@@ -6178,25 +6211,25 @@ void ensureLegServoTorqueEnabled() {
     return;
   }
 
-  sms_sts.on_all_servo();
+  sms_sts.on_all_servo();leg_control.state.torque=3;
   Serial.println("LEG SERVOS:");
   Serial.println("torque=ON");
   Serial.println("reason=LEG_COMMAND");
 }
 
 void disableLegServoTorqueForTestEnd(const char* reason) {
-  if (sms_sts.servo_off) {
-    return;
-  }
-
-  // Current test-phase behavior: release leg holding torque when a test ends.
-  sms_sts.off_all_servo();
-  Serial.println("LEG SERVOS:");
-  Serial.println("torque=OFF");
-  Serial.printf("reason=%s\n", reason);
+  const uint32_t start=micros();
+  // Priority nonblocking OFF; never HOME, never re-enable a stale goal.
+  leg_bus.off(leg_control);
+  leg_bus.service(leg_uart,leg_control,millis());
+  sms_sts.servo_off=true;
+  const uint32_t duration=micros()-start;
+  if(duration>leg_control.state.max_service_us)leg_control.state.max_service_us=duration;
+  Serial.printf("LEG SERVOS: torque OFF requested reason=%s (broadcast, unconfirmed)\n",reason);
 }
 
 void moveRightLegForTest(int16_t position) {
+  if(!prepareLegacyLegAction())return;
   uint8_t ids[] = {kRightLegServoId};
   int16_t positions[] = {position};
   uint16_t speeds[] = {kRightLegTestSpeed};
@@ -6209,6 +6242,7 @@ void moveRightLegForTest(int16_t position) {
 }
 
 void moveLeftLegForTest(int16_t position, const char* action) {
+  if(!prepareLegacyLegAction())return;
   uint8_t ids[1] = {kLeftLegServoId};
   int16_t positions[1] = {position};
   uint16_t speeds[1] = {kLeftLegTestSpeed};
@@ -6243,6 +6277,7 @@ int16_t leftLegPositionFromPercent(float percent) {
 }
 
 void moveBothLegsToPercent(float percent) {
+  if(!prepareLegacyLegAction())return;
   const float constrained_percent = constrain(percent, 0.0f, 100.0f);
   uint8_t ids[] = {kRightLegServoId, kLeftLegServoId};
   int16_t positions[] = {

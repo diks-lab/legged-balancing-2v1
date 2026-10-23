@@ -71,7 +71,7 @@ template<class IO> class WebSocket {
  bool active()const{return active_;}bool ready()const{return handshakeSent_;}
  uint32_t dropped()const{return dropped_;}uint32_t generation()const{return generation_;}
  uint32_t mask()const{return mask_;}
- void connected(IO&io){active_=true;upgraded_=handshakeSent_=false;rxSize_=txSize_=txOffset_=0;mask_=0;connectedAt_=rxProgress_=io.now();statusDue_=wheelDiagDue_=io.now();firstPrepared_=firstWritten_=txFirst_=false;lastError_=0;emit(io,WsEvent::Accepted);}
+ void connected(IO&io){active_=true;upgraded_=handshakeSent_=false;rxSize_=txSize_=txOffset_=0;mask_=0;connectedAt_=rxProgress_=io.now();statusDue_=io.now();wheelDiagDue_=io.now()+1000;firstPrepared_=firstWritten_=txFirst_=false;lastError_=0;emit(io,WsEvent::Accepted);}
  void disconnect(IO&io,WsReason reason=WsReason::LocalClose){end(io,reason);}
  void poll(IO&io){
   if(!active_)return;
@@ -117,7 +117,7 @@ template<class IO> class WebSocket {
   if(handshakeSent_&&rxSize_&&(uint32_t(now-frameAt_)>=1000||uint32_t(now-rxProgress_)>=200)){end(io,uint32_t(now-frameAt_)>=1000?WsReason::RxDeadline:WsReason::RxIdle);return;}
   if(handshakeSent_&&!txSize_&&!rxSize_&&int32_t(now-wheelDiagDue_)>=0){
    wheelDiagDue_=now+1000;Snapshot s;io.snapshot(s);
-   if(s.wheel_reads[0].latched||s.wheel_reads[1].latched){
+   { // Latest leg status shares the bounded low-rate device diagnostics frame.
     if(!wheelReadMessage(tx_,2048,s,boot_)){end(io,WsReason::JsonError);return;}
     frame(io,1,strlen(tx_));return;
    }

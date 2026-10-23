@@ -3,9 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'status.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 const context = vm.createContext({});
-for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'status.js', 'dashboard.js']) {
+for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -40,6 +40,12 @@ vm.runInContext(`
   for (const [v, text] of [[-0.01, '0.0'], [-0, '0.0'], [-48.94, '-48.9'], [42.25, '42.3']]) {
     if (formatAttitude(v) !== text) throw Error('attitude presentation');
   }
+  const legPacket = { leg_ms: 100, legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 90, 50, 3, 3, 1, 1, 1, 1, 4, 0, 27] };
+  const legText = legLines(legPacket, true, 120).join(' / ');
+  if (!legText.includes('要求 2.0') || !legText.includes('適用 1.0') ||
+      !legText.includes('実位置ではありません') || !legText.includes('応答未確認') ||
+      !legText.includes('可動制限：あり')) throw Error('leg diagnosis');
+  if (!legLines(legPacket, false, 120).join(' / ').includes('最終受信時')) throw Error('leg disconnect');
   const wheelFirst = [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3];
   const wheelProbe = [55000, 100, 53000, 0, 2, 2, 2, 3, 12, 2, 4, 1];
   const wheelSample = { diagnosis: [100, 'RIGHT_SENSOR', 2, 3, 2, 2, 2, 0, 0, 0, 1, 26, 3, 3, 0, 1, 3, 0], sample_ms: 55020, wheel0: [...wheelFirst, ...wheelProbe, 1, 1] };

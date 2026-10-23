@@ -82,9 +82,9 @@
         <p id="calibration-action" role="status"></p>
         <p>1クライアント・20 Hz、ブラウザー履歴60秒／最大1200点。
           配信開始／停止は診断通信だけの操作です。表示一時停止中も受信・履歴・異常・メーターは更新。
-          未接続・配信停止・欠落中の過去履歴は復元できません。</p>
+          未受信の履歴は復元できません。</p>
         <p>姿勢角は既存相補フィルター後のAngleY。実測時刻imu_ms／更新番号imu_seqを追跡し、
-          測定停止時は線を切ります。基準角は設定値で、走行目標傾斜と別です。
+          無効区間は線を切ります。基準角と走行目標傾斜は別です。
           ±30°は表示範囲で、倒立開始／転倒判定の閾値ではありません。</p>
         <p>メーターは安全判定後・move直前の指令。左のみ符号反転。補助グラフ・CSV・通信は元符号。
           真上0 V、正は青・時計回り、負は赤紫・反時計回り。±1 Vで半周。
@@ -122,7 +122,7 @@
           style.textContent = await asset(target);
           document.head.appendChild(style);
         }
-        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/diagnosis.js', '/status.js', '/dashboard.js', '/app.js']) {
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/diagnosis.js', '/legs.js', '/status.js', '/dashboard.js', '/app.js']) {
           const script = document.createElement('script');
           script.textContent = await asset(target);
           document.head.appendChild(script);

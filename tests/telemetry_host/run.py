@@ -86,8 +86,11 @@ int main(){
   for(auto&d:all.wheel_reads){d.latched=true;d.probes=d.failures=UINT32_MAX;
    for(auto*r:{&d.first,&d.probe}){r->ms=r->elapsed_us=r->fall_ms=UINT32_MAX;r->tx=5;r->received=2;r->available=2;r->high=15;r->low=255;r->context=31;r->result=3;}}
   char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX));
+  all.legs.height=all.legs.requested_roll=all.legs.applied_roll=all.legs.measured_roll=3.4028234e38f;
+  all.legs.tx_frames=all.legs.tx_busy=all.legs.max_service_us=UINT32_MAX;
   char wheel[1024];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef"));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
+  assert(strstr(wheel,"\"legs\":["));
   const char* start=strstr(buffer,"\"gyro_window\":");assert(start);const char* end=strchr(start,']');assert(end&&size_t(end-start+2)<=128);
   std::string request="{\"type\":\"subscribe\",\"request_id\":9,\"period_ms\":50,\"fields\":[";
   for(unsigned i=0;i<diagnostic::FieldCount;++i){if(i)request+=",";request+="\"";request+=diagnostic::fields[i];request+="\"";}request+="]}";

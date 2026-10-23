@@ -25,6 +25,7 @@ prefix = prefix.replace('BLDCMotor motor', 'DriveTestMotor motor').replace('BLDC
 prelude = r'''
 #include "Arduino.h"
 #include "CheckedWheelSensor.h"
+#include "LegServoBus.h"
 #include "common/lowpass_filter.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
@@ -171,6 +172,11 @@ struct {
   void attach(void (*cb)()){input_cb=cb;}
   bool begin(){++begins;return ok;} // No pairing-argument overload is allowed here.
 } PS4;
+struct {
+ int available(){return 0;}int read(){return -1;}
+ int availableForWrite(){return 128;}size_t writes=0;size_t write(const uint8_t*,size_t n){++writes;return n;}
+} Serial2;
+struct {bool servo_off=false;} sms_sts;
 enum class FOCMotorStatus { motor_ready=4, motor_calib_failed=5 };
 struct DriveTestMotor {
   explicit DriveTestMotor(int) {}
@@ -194,10 +200,10 @@ struct DriveTestDriver {
 };
 struct MPU6050 {
   explicit MPU6050(TwoWire&){}
-  int updates=0;float angle=0,gyro=0;
+  int updates=0;float angle=0,gyro=0,roll=0;
   std::function<void()> onUpdate;
   void update(){++updates;if(onUpdate)onUpdate();}
-  float getAngleY(){return angle;} float getGyroY(){return gyro;}
+  float getAngleY(){return angle;} float getAngleX(){return roll;} float getGyroY(){return gyro;}
 };
 unsigned long _micros(){return micros();}
 '''
@@ -224,7 +230,7 @@ prefix += source[source.index('struct HttpResponseTransport {'):source.index('vo
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -259,7 +265,7 @@ void printLqrDriveSignTrace(const char*){}
 void printLqrStopTrace(const char*){}
 void publishStartupPhase(const char* stage){diagnostic_startup_phase.store(stage);}
 void printAndResetLqrRunTime(){}
-void disableLegServoTorqueForTestEnd(const char*){}
+
 void printVelocityTrace(){}
 void printLoopTimingTrace(){}
 void printLqrControlTrace(){}
@@ -281,6 +287,7 @@ void nearAt(float x,float y,int line){if(!(std::fabs(x-y)<1e-5f))fprintf(stderr,
 #define near(x,y) nearAt(x,y,__LINE__)
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
+  leg_control=leg::Control{};leg_bus=leg::ServoBus<LegUartIO>{};sms_sts.servo_off=false;
   motor1.cachedSensor=motor2.cachedSensor=nullptr;
   wheel_comm_suspended=false;sensor1.releaseControlCycle();sensor2.releaseControlCycle();
   boot_auto_start=BootAutoStart{false};
@@ -615,18 +622,14 @@ int main(){
   near(right_target_voltage,0);near(left_target_voltage,0);
   packet={};processPs4Input(packet,nowMs+=50);
   packet.options=true;processPs4Input(packet,nowMs+=50);assert(balance_wait_active);
-  // Leg actions are edges, retain the original bounds, and are blocked in motion.
-  setupCase();handlePs4Connection(false);handlePs4Connection(true);
-  packet={};processPs4Input(packet,nowMs+=50);ps4_leg_extension_percent=0;legWrites=0;
-  packet.dpad_up=true;
-  for(int i=0;i<5;++i)processPs4Input(packet,nowMs+=50);
-  assert(legWrites==1 && legCommand==10);
-  for(int i=0;i<5;++i){packet={};processPs4Input(packet,nowMs+=50);packet.dpad_up=true;processPs4Input(packet,nowMs+=50);}
-  assert(legCommand==30 && legWrites==3);
-  packet={};processPs4Input(packet,nowMs+=50);packet.dpad_down=true;processPs4Input(packet,nowMs+=50);
-  assert(legCommand==20);
-  lqr_soft_stop_active=true;packet={};processPs4Input(packet,nowMs+=50);
-  packet.dpad_down=true;processPs4Input(packet,nowMs+=50);assert(legCommand==20);
+  // D-pad supplies held axes, gated by the same connection release handshake.
+  setupCase();leg_control=leg::Control{};handlePs4Connection(false);handlePs4Connection(true);
+  packet={};packet.dpad_up=true;processPs4Input(packet,nowMs+=50);
+  assert(leg_control.keys==0);
+  packet={};processPs4Input(packet,nowMs+=50);packet.dpad_up=true;packet.dpad_right=true;
+  processPs4Input(packet,nowMs+=50);assert(leg_control.keys==9);
+  processPs4Input(packet,nowMs+=50);assert(leg_control.keys==9); // identical held input remains active
+  handlePs4Connection(false);assert(leg_control.keys==0&&!leg_control.input_gate);
   // Stable CSV copies remain independent if the robot starts after capture.
   // PS4 library init result and actual connection are distinct diagnostic facts.
   setupCase();ps4_diagnostics=Ps4Diagnostics{};PS4.ok=false;
@@ -910,6 +913,33 @@ int main(){
     emergency_stop_active=false;LQR_angle=1;noteImuMeasurement();serviceBootAutoStart();
     assert(!lqr_direction_test_armed&&!boot_auto_start.pending());
   }
+
+  // Actual leg integration uses cached IMU only, never stops wheel balance.
+  bootFixture();serviceBootAutoStart();step();
+  assert(leg_control.seed(leg::position(true,15),leg::position(false,15),millis()));
+  leg_control.activate(millis());leg_control.state.torque=3;leg_control.input(1,true);
+  const int imuReads=mpu6050.updates,wheelReads=I2Cone.requests+I2Ctwo.requests;
+  const auto beforeLegTick=millis();serviceLegControl();
+  assert(millis()==beforeLegTick&&mpu6050.updates==imuReads&&I2Cone.requests+I2Ctwo.requests==wheelReads);
+  assert(lqr_direction_test_armed&&test_system_ready);
+  const float heightBeforeRetry=leg_control.state.height;
+  wheel_comm_suspended=true;serviceLegControl();
+  assert(leg_control.state.torque==3&&!leg_control.state.active);
+  assert(leg_control.state.reason==leg::Reason::WheelRetry);near(leg_control.state.height,heightBeforeRetry);
+  wheel_comm_suspended=false;serviceLegControl();assert(!leg_control.state.active);
+  float legR=0,legL=0;stopForActualFall(legR,legL);
+  assert(leg_control.state.torque==2&&!leg_control.state.active);
+  LQR_angle=0;noteImuMeasurement();serviceFallAutoRecovery();serviceLegControl();
+  assert(lqr_direction_test_armed&&leg_control.state.torque==2&&!leg_control.state.active);
+  stopBalanceTest();assert(prepareLegacyLegAction());
+  emergency_stop_active=false;leg_control=leg::Control{};
+  assert(leg_control.seed(leg::position(true,15),leg::position(false,15),millis()));
+  leg_control.activate(millis());leg_control.state.torque=3;serviceLegControl();
+  assert(leg_control.state.active&&!lqr_direction_test_armed); // explicit stopped bench mode only
+  balance_wait_active=true;serviceLegControl();
+  assert(!leg_control.state.active&&leg_control.state.torque==3); // keep support torque during preparation
+  balance_wait_active=false;
+
 
   // Physical read failures: retry the next cycle, never move on failed input.
   auto runtimeFixture=[&](){
@@ -1222,4 +1252,7 @@ for term in ['malloc(', 'free(', 'releaseHttpTraceSnapshot(', 'reapHttpTraceSnap
 # The production loop cannot reach loopFOC or move after preflight failure.
 loop = function('loop')
 assert loop.index('if(!acquireRuntimeMeasurements())') < loop.index('motor1.loopFOC()') < loop.index('motor1.move(right_output)')
-assert 'handleSerialCommand();serviceHttpRequests();return;' in loop
+assert 'handleSerialCommand();serviceLegControl();serviceHttpRequests();return;' in loop
+
+assert 'delay(' not in function('serviceLegControl')
+assert 'Ping(' not in function('serviceLegControl')

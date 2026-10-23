@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'diagnosis.js', 'status.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
@@ -67,6 +67,14 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.sample({ gyro_window: [3, 50, 200000, 101, 0, 1800, 2200, 1.25, 4.5] }));
       assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x03'));
       assert((await page.locator('#gyro-window').textContent()).includes('RMS 1.250'));
+      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
+        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
+        legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 40, 30, 3, 3, 1, 1, 1, 1, 4, 0, 27]
+      }) }));
+      assert((await page.locator('#leg-diagnostics').textContent()).includes('実位置ではありません'));
+      assert((await page.locator('#leg-diagnostics').textContent()).includes('応答未確認'));
+      assert((await page.locator('#leg-diagnostics').textContent()).includes('可動制限：あり'));
+
       await page.evaluate(() => window.sample({ gyro_window: [0, 100, 200000, 101, 0, 1800, 2200, 2.5, 8.5] }));
       assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x00'));
       await page.evaluate(() => window.sample({ gyro_window: [3, 150, 200000, 100, 1, 1800, 2200, null, null] }));

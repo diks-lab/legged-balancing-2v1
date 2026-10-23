@@ -51,3 +51,9 @@ lpf_rollは左右傾斜に対する脚制御用であり、
 制御やIMU処理を変更する際は、参照元との共通点・相違点を確認する。
 参照元と同じ処理であることだけを、正常動作の根拠にはしない。
 本機体での変更理由と検証結果を記録する。
+## 脚制御の比較
+
+同じ参照コミットのleg_loopはAngleX+rp.offset_roll→lpf_roll(Tf=0.3)→pid_roll_angle(P=8)を使用する。
+wrobot.rollはその関数では未使用だが、robot.cpp::parseBasicの受信rollはrp.offset_rollへ代入される。
+移植先は脚伸長率の共通高さと左右差で合成し、PS4目標角−符号補正済みAngleXを明示的に補正する。
+[設定・通信・実機確認](ps4-leg-control.md)を参照。参照元の高さ連動の車輪PID変更は導入しない。
