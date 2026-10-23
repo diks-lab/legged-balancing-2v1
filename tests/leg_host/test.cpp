@@ -78,6 +78,19 @@ int main(){
   for(uint32_t t=2000;t<2100;++t){x.tick(t,true,false,true,25);b.service(uart,x,t);}
   near(x.state.height,hold);near(x.state.right_percent-x.state.left_percent,d);
  }
+ // A released external gate refreshes its diagnosis; it never starts an actuator.
+ for(Reason prior:{Reason::ExplicitStop,Reason::Stopped,Reason::Initializing,
+     Reason::ImuInvalid,Reason::Driving,Reason::WheelRetry}){
+  Control x;x.stop(prior);x.input(0,true);
+  x.tick(1000,false,false,true,0);assert(!x.want_sync&&!x.state.active);
+  x.tick(1001,true,false,false,NAN);assert(x.state.reason==Reason::ImuInvalid);
+  x.tick(1002,true,false,true,0);assert(x.state.reason==Reason::Idle);
+  assert(!x.want_sync&&!x.state.active&&!x.state.synced);
+ }
+ for(Reason failure:{Reason::PositionRange,Reason::ReplyTimeout,Reason::ReplyInvalid,Reason::TxFailed}){
+  Control x;x.stop(failure);x.input(0,true);x.tick(1000,true,false,true,0);
+  assert(x.state.reason==failure&&!x.want_sync); // failures are not hidden by neutral packets
+ }
  // Short release/press events in one FIFO batch retain the release gate.
  {Control x(true);x.input(0,true);x.input(1,true);x.tick(1000,true,false,true,0);assert(x.want_sync);}
  // Fragmented replies consume one byte per cycle without blocking.

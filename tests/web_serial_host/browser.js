@@ -89,16 +89,19 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
             type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
             leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1,
             legs: [height, 0, 0, -48.9, 16, 14, 2034, 2055, 40, 30, reason, 3,
-              1, reason === 8 ? 0 : 1, 0, 1, 4, 0, 27]
+              reason === 1 || reason === 17 ? 0 : 1, [1, 8, 17].includes(reason) ? 0 : 1,
+              0, reason === 1 ? 0 : 1, 4, 0, 27]
           }) });
         };
         const states = [];
         for (const [reason, height, mode] of [[1, 15, 1], [3, 16, 1], [2, 16, 1],
-          [8, 16, 1], [1, 16, 1], [17, 16, 0]]) {
+          [8, 16, 1], [1, 16, 1], [17, 16, 0], [1, 16, 1]]) {
           sendLeg(reason, height, mode);
           states.push({ reason, height, mode, geometry: geometry(),
             blocker: node.textContent, operation: document.getElementById('leg-operation').textContent,
-            failure: document.getElementById('leg-failure').textContent });
+            failure: document.getElementById('leg-failure').textContent,
+            sync: document.getElementById('leg-sync').textContent,
+            available: document.getElementById('leg-available').textContent });
         }
         // An unchanged status update must not rewrite text, attributes or elements.
         let mutations = 0;
@@ -121,6 +124,9 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert.equal(legResult.states[4].blocker, 'なし');
       assert(legResult.states[4].failure.includes('過去の記録'));
       assert(legResult.states[5].blocker.includes('Share'));
+      assert.equal(legResult.states[6].blocker, 'なし');
+      assert.equal(legResult.states[6].available, '上下操作可能');
+      assert.equal(legResult.states[6].sync, '実位置確認前');
       assert(legResult.stale.includes('最終受信時'));
       assert(legResult.sameNode && legResult.closed && !legResult.overflow);
       assert.equal(legResult.mutations, 0);

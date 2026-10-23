@@ -82,7 +82,17 @@ class Control {
   if(!imu_valid){stop(Reason::ImuInvalid);return;}
   if(!keys&&input_gate)armed_=true;
   if(!state.active){
-   if(armed_&&state.reason==Reason::ReleaseRequired)state.reason=Reason::Idle;
+   // These reasons describe current external gates, not a latched operation failure.
+   // The guards above have now passed (e.g. Share cleared explicit STOP). Refresh
+   // the diagnosis without synchronizing, enabling torque or changing a target.
+   switch(state.reason){
+    case Reason::ReleaseRequired: case Reason::Stopped: case Reason::ExplicitStop:
+    case Reason::Initializing: case Reason::StartWaiting: case Reason::Calibrating:
+    case Reason::PolarityTest: case Reason::Driving: case Reason::ImuInvalid:
+    case Reason::WheelRetry:
+     state.reason=armed_?Reason::Idle:Reason::ReleaseRequired;break;
+    default:break; // preserve position/UART failures until another explicit operation
+   }
    if(!roll_confirmed_&&(keys&12)&&!(keys&3)){state.reason=Reason::RollUnconfirmed;return;}
    if(!state.synced&&!want_sync&&keys&&input_gate&&armed_){want_sync=true;state.reason=Reason::Syncing;armed_=false;}
    return;

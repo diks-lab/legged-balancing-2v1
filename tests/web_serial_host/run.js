@@ -4,7 +4,12 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
-const context = vm.createContext({});
+const readyFile = process.env.DRIVE_LEG_READY_OUTPUT;
+const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.stringify({
+  leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
+  legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
+});
+const context = vm.createContext({ legReadyJson });
 for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
@@ -41,6 +46,13 @@ vm.runInContext(`
     if (formatAttitude(v) !== text) throw Error('attitude presentation');
   }
   const legPacket = { leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1, legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 90, 50, 3, 3, 1, 1, 1, 1, 4, 0, 27] };
+  // Feed the JSON emitted after the actual C++ PS4 STOP/Share path into the UI.
+  const ready = JSON.parse(legReadyJson);
+  const readyView = legPresentation(ready, true, ready.leg_ms, {});
+  if (readyView.values.mode !== '支持試験（倒立OFF）' ||
+      readyView.values.available !== '上下操作可能' ||
+      readyView.values.sync !== '実位置確認前' || readyView.values.blocker !== 'なし' ||
+      readyView.values.height !== '指令未送信') throw Error('real Share snapshot consistency');
   const legCache = {};
   const legState = legPresentation(legPacket, true, 120, legCache);
   if (legState.values.mode !== '支持試験（倒立OFF）' ||

@@ -203,3 +203,39 @@ pio run -e esp32dev -t uploadfs
 Chromium＋模擬データで1366×768／1920×1080、待機・伸長・位置確認・同期失敗・明示停止・
 通信切断の固定配置、失敗の保持、同一表示時のDOM更新0件を検証済み。
 関連ホスト回帰・直列読込み・LF/CRLFの8192 B上限・LittleFS生成も成功。実機確認は別途必要。
+
+## Share後の古い停止理由の修正（b956b91基準）
+
+実際のPS4経路で「×→全解放→Share→Share解放」を再現すると、Shareは既存の
+emergency_stop_activeを解除し、脚のeligibleも成立していた。一方、Control::tickは
+ReleaseRequiredだけをIdleへ更新し、ExplicitStop等の外部条件の理由を残していた。
+そのため同じState内に「支持試験モード」と古い「明示停止理由」が混在し、Webが操作不可と表示した。
+この理由は脚駆動の禁止ラッチではない。位置同期は上下キー操作まで始まらない既存仕様。
+
+修正は、現在のeligible・走行・IMUのガードをすべて通過した後、非動作中の古い外部条件理由だけを
+解放確認に応じIdle／ReleaseRequiredへ更新するもの。位置・UARTの実失敗は通常待機で消さない。
+Share処理・車輪制御・同期手順・出力条件は変更せず、Shareから目標位置やトルクONを送る処理も追加しない。
+Webでは未同期を「実位置確認前」と表示する。試験モードと理由は制御タスクで完成した同じStateを
+既存Snapshotへコピーして配信する。通信は1 Hzの脚診断のまま。
+
+回帰は途中のControl初期化や手動seedを行わず、実processPs4Inputと全停止／Share処理を使用。
+修正前に「支持試験なのに理由ExplicitStop」が再現し、修正後はShareだけで脚UART送信なし・倒立開始なし、
+「支持試験／上下操作可能／実位置確認前」になった。初回↑で非同期READが発行されることを確認した。
+初回読取りは既存50 ms送信制限を維持する。位置確認→同位置プリロード→ONの既存脚ホスト試験も成功。
+×＋Shareの同時押し、無効IMU、初期化未完了では操作を許可しない。実処理から得たJSONを
+Web表示試験へ渡し、同一スナップショットの整合性を確認する。
+
+再実行例（ホストのみ、実機へ送信しない）：
+
+```sh
+DRIVE_LEG_READY_OUTPUT=/tmp/leg-share.json python3 tests/drive_host/run.py
+DRIVE_LEG_READY_OUTPUT=/tmp/leg-share.json node tests/web_serial_host/run.js
+python3 tests/leg_host/run.py
+```
+
+脚・走行sanitizer、Chromium＋模擬データ1366×768／1920×1080、ESP32ビルド・LittleFS生成も成功。
+静的RAMは81,996 Bで増減0 B、Flashは1,920,461→1,920,477 B（+16 B）。新規バッファ・履歴なし。
+今回の修正はファームに含まれるため、**ファームとLittleFSの両方を更新**する。
+ファーム557912d／b956b91のままWebだけ更新しても古い理由の問題は修正されない。
+既存のupload／uploadfs手順で利用者が更新し、ブラウザーを再読込みする。
+実機のShare後の遷移・脚動作は未検証。実機書込み・マージは行っていない。

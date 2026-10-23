@@ -174,7 +174,8 @@ struct {
 } PS4;
 struct {
  int available(){return 0;}int read(){return -1;}
- int availableForWrite(){return 128;}size_t writes=0;size_t write(const uint8_t*,size_t n){++writes;return n;}
+ int availableForWrite(){return 128;}size_t writes=0,last_size=0;uint8_t last[24]{};
+ size_t write(const uint8_t*p,size_t n){assert(n<=sizeof(last));memcpy(last,p,n);last_size=n;++writes;return n;}
 } Serial2;
 struct {bool servo_off=false;} sms_sts;
 enum class FOCMotorStatus { motor_ready=4, motor_calib_failed=5 };
@@ -913,6 +914,49 @@ int main(){
     emergency_stop_active=false;LQR_angle=1;noteImuMeasurement();serviceBootAutoStart();
     assert(!lqr_direction_test_armed&&!boot_auto_start.pending());
   }
+
+  // Reproduce the actual PS4 STOP -> release -> Share -> release path without
+  // resetting leg_control or seeding/activating it manually between commands.
+  bootFixture();serviceBootAutoStart();step();
+  handlePs4Connection(false);handlePs4Connection(true);
+  Ps4InputState legNeutral{},legStop{},legShare{},legUp{};
+  legStop.cross=true;legShare.share=true;legUp.dpad_up=true;
+  processPs4Input(legNeutral,nowMs);serviceLegControl();
+  processPs4Input(legStop,nowMs+=5);serviceLegControl();
+  assert(emergency_stop_active&&leg_control.state.mode==0);
+  assert(leg_control.state.reason==leg::Reason::ExplicitStop);
+  const size_t stoppedLegWrites=Serial2.writes;
+  // Holding x with Share pressed must not enable anything.
+  Ps4InputState legBoth=legStop;legBoth.share=true;
+  processPs4Input(legBoth,nowMs+=5);serviceLegControl();
+  assert(emergency_stop_active&&leg_control.state.mode==0&&!leg_control.want_sync);
+  processPs4Input(legNeutral,nowMs+=5);serviceLegControl();
+  processPs4Input(legShare,nowMs+=5);serviceLegControl();
+  processPs4Input(legNeutral,nowMs+=5);serviceLegControl();
+  assert(!emergency_stop_active&&!lqr_direction_test_armed&&!balance_wait_active);
+  assert(leg_control.state.mode==1&&leg_control.state.reason==leg::Reason::Idle);
+  assert(!leg_control.state.active&&!leg_control.state.synced&&!leg_control.want_sync);
+  assert(Serial2.writes==stoppedLegWrites); // Share alone never moves a leg
+  near(motor1.target,0);near(motor2.target,0);
+  publishDiagnosticSnapshot(true);
+  assert(diagnostic_latest.legs.mode==1&&diagnostic_latest.legs.reason==leg::Reason::Idle);
+  char legReadyJson[1024];
+  assert(diagnostic::wheelReadMessage(legReadyJson,sizeof(legReadyJson),diagnostic_latest,"bench-share"));
+  const char* legOutput=getenv("DRIVE_LEG_READY_OUTPUT");
+  if(legOutput){FILE*f=fopen(legOutput,"w");assert(f);fputs(legReadyJson,f);fclose(f);}
+  processPs4Input(legUp,nowMs+=5);serviceLegControl();
+  assert(leg_control.want_sync&&leg_control.state.reason==leg::Reason::Syncing);
+  assert(!leg_control.state.active&&!leg_control.state.synced);
+  // The unchanged 50 ms UART rate limit may defer the queued read.
+  nowMs+=50;noteImuMeasurement();serviceLegControl();
+  assert(Serial2.writes==stoppedLegWrites+1);
+  assert(Serial2.last_size==8&&Serial2.last[4]==2&&Serial2.last[5]==56); // READ, not ON
+  diagnostic_imu_io_ok=false;serviceLegControl();
+  assert(leg_control.state.mode==0&&!leg_control.state.active&&!leg_control.want_sync);
+  assert(leg_control.state.reason==leg::Reason::ImuInvalid);
+  test_system_ready=false;serviceLegControl();
+  assert(leg_control.state.mode==0&&leg_control.state.reason==leg::Reason::Initializing);
+  assert(!executeOperatorCommand(OperatorCommand::EnableDrivers));
 
   // Actual leg integration uses cached IMU only, never stops wheel balance.
   bootFixture();serviceBootAutoStart();step();

@@ -50,7 +50,7 @@ function legPresentation(packet, live, sampleMs, cache) {
     correction: confirmed ? '有効・確認済設定' : '無効・方向未確認',
     operation: fresh ? reason === 2 ? '位置確認中' : blocked ? '停止・条件待ち' : cache.operation || '待機' : '現在不明',
     blocker: fresh ? LEG_BLOCKERS[reason] || 'なし' : valid ? '通信停止。現在状態は不明' : '診断未受信',
-    sync: !valid ? '未確認' : reason === 2 ? '確認中' : [7, 8, 9, 10].includes(reason) ? '失敗' : l[13] ? '確認済' : '未確認',
+    sync: !valid ? '未確認' : reason === 2 ? '確認中' : [7, 8, 9, 10].includes(reason) ? '失敗' : l[13] ? '確認済' : '実位置確認前',
     height: valid && l[15] ? `左 ${n(l[5], '%')} ／ 右 ${n(l[4], '%')}\n最終送信指令・実位置ではありません` : '指令未送信',
     roll: valid ? `AngleX ${Number.isFinite(l[3]) ? n(raw, '°') : '不明'}\n目標 ${n(l[1], '°')} ／ 適用 ${n(l[2], '°')}` : '未取得',
     failure: cache.failure ? `過去の記録：${cache.failure}` : '記録なし（この画面で受信した範囲）'
