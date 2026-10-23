@@ -91,6 +91,7 @@ int main(){
   char wheel[1024];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef"));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   assert(strstr(wheel,"\"legs\":["));
+  assert(strstr(wheel,"\"leg_mode\":0")&&strstr(wheel,"\"leg_roll_confirmed\":false"));
   const char* start=strstr(buffer,"\"gyro_window\":");assert(start);const char* end=strchr(start,']');assert(end&&size_t(end-start+2)<=128);
   std::string request="{\"type\":\"subscribe\",\"request_id\":9,\"period_ms\":50,\"fields\":[";
   for(unsigned i=0;i<diagnostic::FieldCount;++i){if(i)request+=",";request+="\"";request+=diagnostic::fields[i];request+="\"";}request+="]}";

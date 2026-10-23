@@ -36,7 +36,7 @@ int main(){
  assert(position(true,0)==2061&&position(false,0)==2026);
  assert(position(true,30)==2010&&position(false,30)==2081);
  for(unsigned dt:{1u,5u,20u,50u}){
-  Control c;c.input(0,true);c.tick(1000,true,false,true,0);c.input(1,true);c.tick(1001,true,false,true,0);
+  Control c(true);c.input(0,true);c.tick(1000,true,false,true,0);c.input(1,true);c.tick(1001,true,false,true,0);
   assert(c.want_sync);assert(c.seed(position(true,15),position(false,15),1001));c.activate(1001);
   const float initial=c.state.height;
   for(uint32_t now=1001+dt;now<=2001;now+=dt){c.tick(now,true,false,true,0);check(c);}
@@ -54,31 +54,47 @@ int main(){
   c.input(0,true);c.tick(10201,true,false,true,2);assert(c.state.right_percent<c.state.left_percent); // error target-measured
  }
  for(float height:{0.f,1.f,29.f,30.f}){
-  Control c;assert(c.seed(position(true,height),position(false,height),1000));c.activate(1000);c.input(4,true);
+  Control c(true);assert(c.seed(position(true,height),position(false,height),1000));c.activate(1000);c.input(4,true);
   for(uint32_t t=1050;t<5000;t+=50){c.tick(t,true,false,true,-10);check(c);}
   assert(c.state.limited);assert(fabsf(c.state.applied_roll)<=fminf(c.state.height,30-c.state.height)/RollGain+.001f);
  }
  for(bool high:{false,true}){
-  Control x;x.seed(position(true,high?30:0),position(false,high?30:0),1000);x.activate(1000);
+  Control x(true);x.seed(position(true,high?30:0),position(false,high?30:0),1000);x.activate(1000);
   x.input(high?1:2,true);x.tick(1050,true,false,true,0);assert(x.state.limited);
  }
+ // Default height-only commissioning: no AngleX-driven differential, even tilted.
+ {Control x;ServoBus<IO> b;IO uart;
+  static_assert(!RollDirectionConfirmed,"default firmware must require measured roll direction");
+  x.input(0,true);x.tick(1000,true,false,true,48);x.input(4,true);
+  x.tick(1001,true,false,true,48);b.service(uart,x,1001);
+  assert(!uart.writes&&!x.want_sync&&x.state.reason==Reason::RollUnconfirmed);
+  x.input(1,true);
+  for(uint32_t t=1002;t<1350;++t){x.tick(t,true,false,true,48);b.service(uart,x,t);}
+  assert(x.state.active);const float h=x.state.height,d=x.state.right_percent-x.state.left_percent;
+  x.input(5,true);for(uint32_t t=1350;t<2000;++t){x.tick(t,true,false,true,-48);b.service(uart,x,t);}
+  assert(x.state.height>h);near(x.state.right_percent-x.state.left_percent,d);
+  near(x.state.requested_roll,0);near(x.state.applied_roll,0);assert(x.state.reason==Reason::RollUnconfirmed);
+  x.input(0,true);const float hold=x.state.height;
+  for(uint32_t t=2000;t<2100;++t){x.tick(t,true,false,true,25);b.service(uart,x,t);}
+  near(x.state.height,hold);near(x.state.right_percent-x.state.left_percent,d);
+ }
  // Short release/press events in one FIFO batch retain the release gate.
- {Control x;x.input(0,true);x.input(1,true);x.tick(1000,true,false,true,0);assert(x.want_sync);}
+ {Control x(true);x.input(0,true);x.input(1,true);x.tick(1000,true,false,true,0);assert(x.want_sync);}
  // Fragmented replies consume one byte per cycle without blocking.
- {Control x;ServoBus<IO> b;IO uart;x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
+ {Control x(true);ServoBus<IO> b;IO uart;x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
   for(uint32_t t=1001;t<1200;++t){uart.read_budget=1;x.tick(t,true,false,true,0);b.service(uart,x,t);}
   assert(x.state.active);}
  // A stale synchronized position cannot later enable an old goal.
- {Control x;ServoBus<IO> b;IO uart;x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
+ {Control x(true);ServoBus<IO> b;IO uart;x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
   for(uint32_t t=1001;t<1080;++t){x.tick(t,true,false,true,0);b.service(uart,x,t);}
   x.tick(2000,true,false,true,0);b.service(uart,x,2000);assert(!x.state.active);}
- {Control x;ServoBus<IO> b;IO uart;assert(b.observe(x));
+ {Control x(true);ServoBus<IO> b;IO uart;assert(b.observe(x));
   for(uint32_t t=1000;t<1200;++t)b.service(uart,x,t);
   assert(uart.writes==2&&!x.state.active&&!x.state.synced&&!b.observing());
   assert(b.readPosition(true)==uart.right&&b.readPosition(false)==uart.left);
   for(unsigned i=0;i<uart.writes;++i)assert(uart.length[i]==8);}
  // An initial held packet/reconnect cannot activate before release confirmation.
- Control c;ServoBus<IO> bus;IO io;
+ Control c(true);ServoBus<IO> bus;IO io;
  c.input(1,false);c.tick(1000,true,false,true,0);bus.service(io,c,1000);assert(!io.writes&&!c.want_sync);
  c.input(0,true);c.tick(1001,true,false,true,0);c.input(1,true);
  for(uint32_t t=1002;t<1250;++t){
@@ -104,17 +120,17 @@ int main(){
  c.tick(1700,true,true,true,0);bus.cancel();assert(!c.state.active&&c.state.reason==Reason::Driving);
  c.tick(1750,true,false,false,NAN);assert(!c.state.active);
  for(unsigned failure=0;failure<4;++failure){
-  Control x;ServoBus<IO> b;IO uart;
+  Control x(true);ServoBus<IO> b;IO uart;
   uart.auto_reply=failure!=0;uart.bad_sum=failure==1;if(failure==2)uart.right=1900;if(failure==3)uart.partial=true;
   x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
   for(uint32_t t=1001;t<1250;++t){x.tick(t,true,false,true,0);b.service(uart,x,t);}
   assert(!x.state.active&&!x.state.synced);
   for(unsigned i=0;i<uart.writes;++i)assert(!(uart.packets[i][5]==40&&uart.packets[i][8]==1));
  }
- {Control x;ServoBus<IO> b;IO uart;uart.capacity=0;x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
+ {Control x(true);ServoBus<IO> b;IO uart;uart.capacity=0;x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
   for(uint32_t t=1001;t<1200;++t){x.tick(t,true,false,true,0);b.service(uart,x,t);}assert(!uart.writes&&x.state.tx_busy<=4);
   b.off(x);uart.capacity=128;b.service(uart,x,1250);assert(x.state.torque==2&&!x.state.active);}
- {Control x;ServoBus<IO> b;IO uart;uart.capacity=0;
+ {Control x(true);ServoBus<IO> b;IO uart;uart.capacity=0;
   for(uint32_t t=1000;t<1200;++t){b.off(x);b.service(uart,x,t);}
   assert(x.state.tx_busy<=4&&!uart.writes);uart.capacity=128;b.service(uart,x,1200);assert(x.state.torque==2);}
  printf("PASS: time-based axes/release/opposites/limits, error sign, sync-before-ON, fall/rearm, async timeout/OOM-TX/partial/checksum; control=%zu bus=%zu state=%zu\n",sizeof(Control),sizeof(ServoBus<IO>),sizeof(State));

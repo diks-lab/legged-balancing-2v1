@@ -132,6 +132,8 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   (unsigned long)l.command_ms,(unsigned long)l.sync_ms,unsigned(l.reason),unsigned(l.torque),
   unsigned(l.active),unsigned(l.synced),unsigned(l.limited),unsigned(l.command_valid),
   (unsigned long)l.tx_frames,(unsigned long)l.tx_busy,(unsigned long)l.max_service_us);
+ j.add(",\"leg_mode\":%u,\"leg_roll_confirmed\":%s,\"leg_roll_sign\":%d",unsigned(l.mode),
+  leg::RollDirectionConfirmed?"true":"false",int(leg::ImuRollSign));
  j.add("}");return j.ok;
 }
 inline bool ack(char*dest,size_t cap,const Subscription&s,uint32_t generation,const char*boot){Json j(dest,cap);j.add("{\"type\":\"subscribed\",\"boot_id\":\"%s\",\"request_id\":%lu,\"subscription_id\":%lu,\"period_ms\":50,\"streaming\":%s,\"fields\":[",boot,(unsigned long)s.request,(unsigned long)generation,s.stop?"false":"true");bool first=true;for(unsigned i=0;i<FieldCount;++i)if(s.mask&(1u<<i)){j.add("%s\"%s\"",first?"":",",fields[i]);first=false;}j.add("]}");return j.ok;}

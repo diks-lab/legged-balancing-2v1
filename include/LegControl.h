@@ -11,7 +11,19 @@ constexpr float HeightRate=4;             // percentage points/s, deliberately s
 constexpr float RollRate=2,MaxRoll=3;     // deg/s, deg
 constexpr float RollGain=1;              // differential extension pp/deg
 constexpr float DifferentialRate=4;      // pp/s, limits feedback-induced movement
-constexpr float ImuRollSign=1;            // UNVERIFIED: AngleX positive = left lean
+// Enable only after measuring both the IMU sign and the leg extension directions.
+#ifndef LEG_ROLL_DIRECTION_CONFIRMED
+#define LEG_ROLL_DIRECTION_CONFIRMED 0
+#endif
+#ifndef LEG_IMU_ROLL_SIGN
+#define LEG_IMU_ROLL_SIGN 1
+#endif
+static_assert(LEG_ROLL_DIRECTION_CONFIRMED == 0 || LEG_ROLL_DIRECTION_CONFIRMED == 1,
+              "LEG_ROLL_DIRECTION_CONFIRMED must be 0 or 1");
+static_assert(LEG_IMU_ROLL_SIGN == 1 || LEG_IMU_ROLL_SIGN == -1,
+              "LEG_IMU_ROLL_SIGN must be +1 or -1");
+constexpr bool RollDirectionConfirmed=LEG_ROLL_DIRECTION_CONFIRMED;
+constexpr float ImuRollSign=LEG_IMU_ROLL_SIGN; // ignored for actuation until confirmed
 constexpr uint32_t SendIntervalMs=50,ReplyTimeoutMs=10,SyncMaxAgeMs=250;
 inline float clamp(float x,float lo,float hi){return fmaxf(lo,fminf(hi,x));}
 inline float toward(float x,float target,float step){return x+clamp(target-x,-step,step);}
@@ -28,7 +40,7 @@ inline bool inRange(bool right,int16_t pos){
  return pos>=fminf(home,end)&&pos<=fmaxf(home,end);
 }
 enum class Reason:uint8_t { ReleaseRequired,Idle,Syncing,Accepted,Driving,Stopped,
- ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry };
+ ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest };
 struct State {
  float height=0,requested_roll=0,applied_roll=0,measured_roll=NAN;
  float right_percent=0,left_percent=0;
@@ -37,9 +49,11 @@ struct State {
  Reason reason=Reason::ReleaseRequired;
  uint8_t torque=0; // unknown, OFF pending, OFF queued, ON queued; never physical feedback
  bool active=false,synced=false,limited=false,command_valid=false;
+ uint8_t mode=0; // unavailable, supported stopped test, stationary balance
 };
 class Control {
  public:
+ explicit Control(bool roll_confirmed=RollDirectionConfirmed):roll_confirmed_(roll_confirmed){}
  State state;
  uint8_t keys=0; // up/down/left/right
  bool input_gate=false,want_sync=false;
@@ -69,6 +83,7 @@ class Control {
   if(!keys&&input_gate)armed_=true;
   if(!state.active){
    if(armed_&&state.reason==Reason::ReleaseRequired)state.reason=Reason::Idle;
+   if(!roll_confirmed_&&(keys&12)&&!(keys&3)){state.reason=Reason::RollUnconfirmed;return;}
    if(!state.synced&&!want_sync&&keys&&input_gate&&armed_){want_sync=true;state.reason=Reason::Syncing;armed_=false;}
    return;
   }
@@ -78,19 +93,20 @@ class Control {
   const int roll_axis=((keys&4)!=0)-((keys&8)!=0);
   state.height=clamp(state.height+height_axis*HeightRate*dt,0,30);
   const bool height_limited=(height_axis<0&&state.height<=0)||(height_axis>0&&state.height>=30);
-  if(roll_axis)state.requested_roll=clamp(state.requested_roll+roll_axis*RollRate*dt,-MaxRoll,MaxRoll);
-  else if(!(keys&12))state.requested_roll=toward(state.requested_roll,0,RollRate*dt);
+  if(roll_confirmed_&&roll_axis)state.requested_roll=clamp(state.requested_roll+roll_axis*RollRate*dt,-MaxRoll,MaxRoll);
+  else if(roll_confirmed_&&!(keys&12))state.requested_roll=toward(state.requested_roll,0,RollRate*dt);
   const float room=fminf(state.height,30-state.height);
-  state.applied_roll=clamp(state.requested_roll,-room/RollGain,room/RollGain);
-  const float desired=RollGain*(state.applied_roll-roll);
+  state.applied_roll=roll_confirmed_?clamp(state.requested_roll,-room/RollGain,room/RollGain):0;
+  // Height-only commissioning holds the synchronized differential, never AngleX feedback.
+  const float desired=roll_confirmed_?RollGain*(state.applied_roll-roll):difference_;
   difference_=clamp(toward(difference_,clamp(desired,-room,room),DifferentialRate*dt),-room,room);
   state.right_percent=state.height+difference_;state.left_percent=state.height-difference_;
   state.limited=height_limited||fabsf(state.applied_roll-state.requested_roll)>.0001f||fabsf(desired)>room;
-  state.reason=Reason::Accepted;
+  state.reason=(!roll_confirmed_&&(keys&12))?Reason::RollUnconfirmed:Reason::Accepted;
  }
  private:
  uint32_t last_=0;
  float difference_=0;
- bool armed_=false;
+ bool armed_=false,roll_confirmed_=false;
 };
 }

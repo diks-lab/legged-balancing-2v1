@@ -40,11 +40,14 @@ vm.runInContext(`
   for (const [v, text] of [[-0.01, '0.0'], [-0, '0.0'], [-48.94, '-48.9'], [42.25, '42.3']]) {
     if (formatAttitude(v) !== text) throw Error('attitude presentation');
   }
-  const legPacket = { leg_ms: 100, legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 90, 50, 3, 3, 1, 1, 1, 1, 4, 0, 27] };
+  const legPacket = { leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1, legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 90, 50, 3, 3, 1, 1, 1, 1, 4, 0, 27] };
   const legText = legLines(legPacket, true, 120).join(' / ');
   if (!legText.includes('要求 2.0') || !legText.includes('適用 1.0') ||
       !legText.includes('実位置ではありません') || !legText.includes('応答未確認') ||
       !legText.includes('可動制限：あり')) throw Error('leg diagnosis');
+  if (!legText.includes('支持した停止試験') || !legText.includes('無効（方向未確認') || !legText.includes('AngleX：0.0')) throw Error('height only commissioning');
+  legPacket.leg_roll_confirmed = true;
+  if (!legLines(legPacket, true, 120).join(' / ').includes('確認済設定で有効')) throw Error('confirmed roll');
   if (!legLines(legPacket, false, 120).join(' / ').includes('最終受信時')) throw Error('leg disconnect');
   const wheelFirst = [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3];
   const wheelProbe = [55000, 100, 53000, 0, 2, 2, 2, 3, 12, 2, 4, 1];

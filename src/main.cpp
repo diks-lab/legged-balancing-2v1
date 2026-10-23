@@ -6164,6 +6164,7 @@ void serviceLegControl() {
   const bool imu=(fallRecoveryChecks()&2u)&&isfinite(mpu6050.getAngleX());
   const float roll=imu?leg::ImuRollSign*mpu6050.getAngleX():NAN;
   leg_control.state.measured_roll=roll;
+  leg_control.state.mode=eligible&&!moving&&imu&&!wheel_comm_suspended?(bench?1:2):0;
   const bool hard_stop=!test_system_ready||emergency_stop_active||calibration_active.load()||
       polarity_test_active||!imu;
   const bool observing=leg_bus.observing();
@@ -6178,6 +6179,13 @@ void serviceLegControl() {
       leg_bus.off(leg_control);
     } else if((moving||!eligible)&&leg_bus.busy())leg_bus.cancel();
     leg_control.tick(now,eligible,moving,imu,roll);
+    if(!eligible){
+      leg_control.state.reason=!test_system_ready?leg::Reason::Initializing:
+          calibration_active.load()?leg::Reason::Calibrating:
+          polarity_test_active?leg::Reason::PolarityTest:
+          emergency_stop_active?leg::Reason::ExplicitStop:leg::Reason::StartWaiting;
+    }
+    if(!imu&&test_system_ready&&!emergency_stop_active)leg_control.state.reason=leg::Reason::ImuInvalid;
   }
   leg_bus.service(leg_uart,leg_control,now);
   if(observing&&!leg_bus.observing()){

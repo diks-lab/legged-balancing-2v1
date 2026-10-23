@@ -932,10 +932,17 @@ int main(){
   LQR_angle=0;noteImuMeasurement();serviceFallAutoRecovery();serviceLegControl();
   assert(lqr_direction_test_armed&&leg_control.state.torque==2&&!leg_control.state.active);
   stopBalanceTest();assert(prepareLegacyLegAction());
-  emergency_stop_active=false;leg_control=leg::Control{};
+  assert(executeOperatorCommand(OperatorCommand::FullStop));
+  serviceLegControl();assert(leg_control.state.mode==0&&leg_control.state.reason==leg::Reason::ExplicitStop);
+  assert(executeOperatorCommand(OperatorCommand::EnableDrivers));
+  assert(!lqr_direction_test_armed&&!balance_wait_active&&!boot_auto_start.pending());
+  leg_control=leg::Control{};
   assert(leg_control.seed(leg::position(true,15),leg::position(false,15),millis()));
   leg_control.activate(millis());leg_control.state.torque=3;serviceLegControl();
   assert(leg_control.state.active&&!lqr_direction_test_armed); // explicit stopped bench mode only
+  assert(leg_control.state.mode==1);
+  for(int legTick=0;legTick<10;++legTick){nowMs+=5;noteImuMeasurement();serviceLegControl();}
+  assert(!lqr_direction_test_armed&&!balance_wait_active); // leg servicing never starts wheels
   balance_wait_active=true;serviceLegControl();
   assert(!leg_control.state.active&&leg_control.state.torque==3); // keep support torque during preparation
   balance_wait_active=false;
