@@ -134,6 +134,19 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   (unsigned long)l.tx_frames,(unsigned long)l.tx_busy,(unsigned long)l.max_service_us);
  j.add(",\"leg_mode\":%u,\"leg_roll_confirmed\":%s,\"leg_roll_sign\":%d",unsigned(l.mode),
   leg::RollDirectionConfirmed?"true":"false",int(leg::ImuRollSign));
+ const auto&r=l.rx_failure;
+ j.add(",\"leg_rx\":");
+ if(!r.issues)j.add("null");
+ else {
+  j.add("[%lu,%lu,%u,56,2,%u,%u,%u,%u,%u,%u,%u,\"",
+   (unsigned long)r.ms,(unsigned long)r.elapsed_ms,unsigned(r.target),unsigned(r.received),
+   unsigned(r.issues),unsigned(r.frame_size),unsigned(r.expected_checksum),
+   unsigned(r.echoes),unsigned(r.skipped),unsigned(r.truncated));
+  for(unsigned i=0;i<r.raw_size&&i<sizeof(r.raw);++i)j.add("%02X",unsigned(r.raw[i]));
+  j.add("\",\"");
+  for(unsigned i=0;i<r.frame_size&&i<sizeof(r.frame);++i)j.add("%02X",unsigned(r.frame[i]));
+  j.add("\",%u,%u]",unsigned(r.received_checksum),unsigned(r.checksum_ready));
+ }
  j.add("}");return j.ok;
 }
 inline bool ack(char*dest,size_t cap,const Subscription&s,uint32_t generation,const char*boot){Json j(dest,cap);j.add("{\"type\":\"subscribed\",\"boot_id\":\"%s\",\"request_id\":%lu,\"subscription_id\":%lu,\"period_ms\":50,\"streaming\":%s,\"fields\":[",boot,(unsigned long)s.request,(unsigned long)generation,s.stop?"false":"true");bool first=true;for(unsigned i=0;i<FieldCount;++i)if(s.mask&(1u<<i)){j.add("%s\"%s\"",first?"":",",fields[i]);first=false;}j.add("]}");return j.ok;}

@@ -41,6 +41,11 @@ function legPresentation(packet, live, sampleMs, cache) {
     cache.reason = reason;
     cache.ms = packet.leg_ms;
   }
+  const rx = legReplyPresentation(packet?.leg_rx);
+  if (rx && cache.rxMs !== rx.ms) {
+    cache.failure = `${rx.summary}（発生 ${rx.ms} ms）`;
+    cache.rxMs = rx.ms;
+  }
   const confirmed = packet?.leg_roll_confirmed === true;
   const blocked = !fresh || packet.leg_mode === 0 || ![1, 2, 3, 14].includes(reason);
   const raw = valid && Math.abs(packet.leg_roll_sign) === 1 ? l[3] / packet.leg_roll_sign : null;
@@ -49,7 +54,7 @@ function legPresentation(packet, live, sampleMs, cache) {
     available: fresh ? blocked ? '操作不可／条件待ち' : confirmed ? '上下・左右操作可能' : '上下操作可能' : '現在不明',
     correction: confirmed ? '有効・確認済設定' : '無効・方向未確認',
     operation: fresh ? reason === 2 ? '位置確認中' : blocked ? '停止・条件待ち' : cache.operation || '待機' : '現在不明',
-    blocker: fresh ? LEG_BLOCKERS[reason] || 'なし' : valid ? '通信停止。現在状態は不明' : '診断未受信',
+    blocker: fresh ? reason === 9 && rx ? rx.summary : LEG_BLOCKERS[reason] || 'なし' : valid ? '通信停止。現在状態は不明' : '診断未受信',
     sync: !valid ? '未確認' : reason === 2 ? '確認中' : [7, 8, 9, 10].includes(reason) ? '失敗' : l[13] ? '確認済' : '実位置確認前',
     height: valid && l[15] ? `左 ${n(l[5], '%')} ／ 右 ${n(l[4], '%')}\n最終送信指令・実位置ではありません` : '指令未送信',
     roll: valid ? `AngleX ${Number.isFinite(l[3]) ? n(raw, '°') : '不明'}\n目標 ${n(l[1], '°')} ／ 適用 ${n(l[2], '°')}` : '未取得',
@@ -103,7 +108,8 @@ function createLegPanel(view) {
     '方向確認：初期設定は上下のみ。AngleXの符号と伸縮方向を実測してから左右補正を有効化。',
     '再接続・転倒後：解放・再操作から位置を再確認。未確認の古い目標へ戻しません。'
   ]) make('li', text, list);
-  return { nodes, detail, note, cache: {} };
+  const reply = createLegReplyPanel(section);
+  return { nodes, detail, note, reply, cache: {} };
 }
 function renderLegDiagnostics(view, current) {
   const ui = view.legUI || (view.legUI = createLegPanel(view));
@@ -114,6 +120,7 @@ function renderLegDiagnostics(view, current) {
   const state = legPresentation(view.legPacket, current, view.sample.sample_ms, ui.cache);
   const update = (node, text) => { if (node.textContent !== text) node.textContent = text; };
   update(ui.note, state.note);
+  renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh);
   for (const [key, text] of Object.entries(state.values)) update(ui.nodes[key], text);
   for (const [key, text] of Object.entries(state.detail)) update(ui.detail[key], text);
   const blocked = String(state.fresh && state.values.blocker !== 'なし');

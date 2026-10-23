@@ -143,6 +143,7 @@ window.startLogger = function () {
           dashboard.wheelReads = { wheel0: s.wheel0, wheel1: s.wheel1 };
           dashboard.legPacket = {
             legs: s.legs,
+            leg_rx: s.leg_rx,
             leg_ms: s.leg_ms,
             leg_mode: s.leg_mode,
             leg_roll_confirmed: s.leg_roll_confirmed,

@@ -3,14 +3,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 const readyFile = process.env.DRIVE_LEG_READY_OUTPUT;
 const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.stringify({
   leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
   legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
 });
-const context = vm.createContext({ legReadyJson });
-for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js']) {
+const legRxJson = process.env.LEG_RX_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_RX_JSON_OUTPUT, 'utf8') : null;
+const context = vm.createContext({ legReadyJson, legRxJson });
+for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -77,6 +78,27 @@ vm.runInContext(`
   if (!legPresentation(progress, true, progress.leg_ms, legCache).values.blocker.includes('Share')) throw Error('explicit stop immediate');
   if (!legPresentation(progress, false, progress.leg_ms, legCache).note.includes('最終受信時')) throw Error('leg disconnect');
   if (legPresentation(null, false, 0, {}).values.mode !== '未取得') throw Error('no packet');
+  if (legRxJson) {
+    const fromBus = legReplyPresentation(JSON.parse(legRxJson).leg_rx);
+    if (fromBus.summary !== '左：ID' || !fromBus.fields.id.includes('期待 0x02 ／ 取得 0x01')) {
+      throw Error('production receiver -> snapshot -> JSON -> Web mismatch');
+    }
+  }
+  const rxFailure = [53587, 8, 2, 56, 2, 8, 26, 8, 171, 0, 0, 0,
+    'FFFF010420F407DD', 'FFFF010420F407DD', 221, 1];
+  const rxView = legReplyPresentation(rxFailure);
+  if (!rxView.summary.includes('左：ID・状態・チェックサム') ||
+      !rxView.fields.id.includes('期待 0x02 ／ 取得 0x01') ||
+      !rxView.fields.status.includes('期待 0x00 ／ 取得 0x20') ||
+      !rxView.fields.checksum.includes('0xAB ／ 取得 0xDD')) throw Error('rx exact mismatches');
+  const partialRx = [...rxFailure]; partialRx[6] = 32; partialRx[7] = 3;
+  partialRx[13] = 'FFFF01'; partialRx[11] = 1; partialRx[15] = 0;
+  const partialView = legReplyPresentation(partialRx);
+  if (!partialView.fields.status.includes('未受信') ||
+      !partialView.fields.checksum.includes('未算出') || !partialView.fields.raw.includes('記録打切り')) throw Error('rx missing/truncation');
+  const oldRxPacket = { ...legPacket, leg_rx: rxFailure };
+  const oldRxState = legPresentation(oldRxPacket, true, 120, {});
+  if (!oldRxState.values.failure.includes('左：ID') || oldRxState.values.blocker !== 'なし') throw Error('rx retained as past');
   const wheelFirst = [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3];
   const wheelProbe = [55000, 100, 53000, 0, 2, 2, 2, 3, 12, 2, 4, 1];
   const wheelSample = { diagnosis: [100, 'RIGHT_SENSOR', 2, 3, 2, 2, 2, 0, 0, 0, 1, 26, 3, 3, 0, 1, 3, 0], sample_ms: 55020, wheel0: [...wheelFirst, ...wheelProbe, 1, 1] };

@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'diagnosis.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
@@ -83,11 +83,11 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         document.getElementById('details').open = true;
         const original = geometry();
         const node = document.getElementById('leg-blocker');
-        const sendLeg = (reason, height = 15, mode = 1) => {
+        const sendLeg = (reason, height = 15, mode = 1, rx = null) => {
           window.sample();
           window.peer.onmessage({ data: JSON.stringify({
             type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
-            leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1,
+            leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1, leg_rx: rx,
             legs: [height, 0, 0, -48.9, 16, 14, 2034, 2055, 40, 30, reason, 3,
               reason === 1 || reason === 17 ? 0 : 1, [1, 8, 17].includes(reason) ? 0 : 1,
               0, reason === 1 ? 0 : 1, 4, 0, 27]
@@ -103,6 +103,12 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
             sync: document.getElementById('leg-sync').textContent,
             available: document.getElementById('leg-available').textContent });
         }
+        sendLeg(9, 16, 1, [53587, 8, 2, 56, 2, 8, 26, 8, 171, 0, 0, 0,
+          'FFFF010420F407DD', 'FFFF010420F407DD', 221, 1]);
+        const rxGeometry = geometry();
+        const rx = ['target', 'id', 'length', 'status', 'checksum', 'raw'].map(key =>
+          document.getElementById(`leg-rx-${key}`).textContent);
+        const rxBlocker = node.textContent;
         // An unchanged status update must not rewrite text, attributes or elements.
         let mutations = 0;
         const observer = new MutationObserver(records => { mutations += records.length; });
@@ -115,7 +121,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         const closed = [...section.querySelectorAll('details')].every(e => !e.open);
         const overflow = rows.some(e => e.querySelector('dd').getBoundingClientRect().height > e.clientHeight);
         document.getElementById('details').open = false;
-        return { original, states, mutations, stale, sameNode, closed, overflow };
+        return { original, states, mutations, stale, sameNode, closed, overflow, rx, rxBlocker, rxGeometry };
       });
       for (const state of legResult.states) assert.deepEqual(state.geometry, legResult.original);
       assert(legResult.states[1].operation.includes('伸長'));
@@ -130,16 +136,22 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert(legResult.stale.includes('最終受信時'));
       assert(legResult.sameNode && legResult.closed && !legResult.overflow);
       assert.equal(legResult.mutations, 0);
+      assert.deepEqual(legResult.rxGeometry, legResult.original);
+      assert(legResult.rxBlocker.includes('左：ID・状態・チェックサム'));
+      assert(legResult.rx[1].includes('期待 0x02 ／ 取得 0x01'));
+      assert(legResult.rx[3].includes('期待 0x00 ／ 取得 0x20'));
+      assert(legResult.rx[4].includes('0xAB ／ 取得 0xDD'));
+      assert(legResult.rx[5].includes('FF FF 01'));
       await page.click('#reconnect');
       await page.waitForFunction(() => window.peer.readyState === 1);
       await page.evaluate(() => window.sample());
 
 
-      await page.evaluate(() => window.sample({ gyro_window: [0, 100, 200000, 101, 0, 1800, 2200, 2.5, 8.5] }));
+      await page.evaluate(() => window.sample({ gyro_window: [0, (window.sequence + 1) * 50, 200000, 101, 0, 1800, 2200, 2.5, 8.5] }));
       assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x00'));
-      await page.evaluate(() => window.sample({ gyro_window: [3, 150, 200000, 100, 1, 1800, 2200, null, null] }));
+      await page.evaluate(() => window.sample({ gyro_window: [3, (window.sequence + 1) * 50, 200000, 100, 1, 1800, 2200, null, null] }));
       assert((await page.locator('#gyro-window').textContent()).includes('無効'));
-      await page.evaluate(() => window.sample({ gyro_window: [3, 200, 200000, 101, 0, 1800, 2200, 1, 2], imu_valid: false }));
+      await page.evaluate(() => window.sample({ gyro_window: [3, (window.sequence + 1) * 50, 200000, 101, 0, 1800, 2200, 1, 2], imu_valid: false }));
       assert((await page.locator('#gyro-window').textContent()).includes('更新停止'));
       await page.evaluate(() => window.sample({ state: 'STARTUP_FAILED', imu_valid: false,
         imu_reason: 'NOT_INITIALIZED', startup_reason: 'IMU_CONFIG_FAILED', disabled: true,

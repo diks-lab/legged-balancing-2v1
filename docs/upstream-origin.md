@@ -57,3 +57,8 @@ lpf_rollは左右傾斜に対する脚制御用であり、
 wrobot.rollはその関数では未使用だが、robot.cpp::parseBasicの受信rollはrp.offset_rollへ代入される。
 移植先は脚伸長率の共通高さと左右差で合成し、PS4目標角−符号補正済みAngleXを明示的に補正する。
 [設定・通信・実機確認](ps4-leg-control.md)を参照。参照元の高さ連動の車輪PID変更は導入しない。
+
+脚の非同期受信は、既存STSドライバーとFTServo_Arduinoの
+64922cda46e56b21b8c1d9e830d936a1941645ae（SCS::Read／SMS_STSレジスター表）を比較している。
+[位置応答の仕様・失敗記録](ps4-leg-control.md#非同期位置応答の判別と失敗記録bf07bf2以降)を参照。
+受信エコーの実機有無は未確定であり、完全一致の送信列だけを分離し、正常応答の判定は維持する。

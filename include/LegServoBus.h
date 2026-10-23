@@ -13,42 +13,40 @@ template<class IO> class ServoBus {
   c.stop(Reason::Syncing);c.want_sync=true;observe_only_=true;return true;
  }
  void off(Control& c){
-  c.stop(Reason::Stopped);phase_=Idle;used_=0;observe_only_=false;
+  c.stop(Reason::Stopped);phase_=Idle;reply_.clearFrame();observe_only_=false;
   if(off_pending_||c.state.torque==2)return;
   off_pending_=true;c.state.torque=1;next_send_=0;
  }
- void cancel(){phase_=Idle;used_=0;observe_only_=false;}
+ void cancel(){phase_=Idle;reply_.clearFrame();observe_only_=false;}
  void service(IO& io,Control& c,uint32_t now){
+  // The original whole-request deadline is not extended by bytes or echoes.
+  if(waiting()&&reply_.expired(now,ReplyTimeoutMs)){
+   reply_.timeout();failReceive(c,now);
+  }
   for(unsigned i=0;i<16&&io.available()>0;++i){
    const int byte=io.read();if(byte<0)break;
-   if(phase_!=WaitRight&&phase_!=WaitLeft)continue;
-   if(!used_&&byte!=255)continue;
-   if(used_==1&&byte!=255){used_=0;continue;}
-   rx_[used_++]=uint8_t(byte);
-   if(used_==8){
-    const uint8_t expected=phase_==WaitRight?RightId:LeftId;
-    uint8_t sum=0;for(unsigned j=2;j<8;++j)sum+=rx_[j];
-    if(uint32_t(now-request_ms_)>ReplyTimeoutMs||rx_[2]!=expected||rx_[3]!=4||rx_[4]||sum!=255){fail(c,Reason::ReplyInvalid);break;}
-    const int16_t pos=uint16_t(rx_[5])|(uint16_t(rx_[6])<<8);
-    used_=0;
-    if(phase_==WaitRight){positions_[0]=pos;first_ms_=now;phase_=ReadLeft;}
-    else {
-     positions_[1]=pos;
-     if(uint32_t(now-first_ms_)>SyncMaxAgeMs){fail(c,Reason::ReplyTimeout);break;}
-     if(!c.seed(positions_[0],positions_[1],now)){phase_=Idle;observe_only_=false;break;}
-     if(observe_only_){observe_only_=false;c.stop(Reason::Idle);phase_=Idle;}
-     else phase_=Seed;
-    }
+   if(!waiting())continue;
+   const auto result=reply_.feed(uint8_t(byte));
+   if(result==ServoReply::Bad){failReceive(c,now);break;}
+   if(result!=ServoReply::Good)continue;
+   const int16_t pos=reply_.position();
+   reply_.clearFrame();
+   if(phase_==WaitRight){positions_[0]=pos;first_ms_=now;phase_=ReadLeft;}
+   else {
+    positions_[1]=pos;
+    if(uint32_t(now-first_ms_)>SyncMaxAgeMs){fail(c,Reason::ReplyTimeout);break;}
+    if(!c.seed(positions_[0],positions_[1],now)){phase_=Idle;observe_only_=false;break;}
+    if(observe_only_){observe_only_=false;c.stop(Reason::Idle);phase_=Idle;}
+    else phase_=Seed;
    }
   }
-  if((phase_==WaitRight||phase_==WaitLeft)&&uint32_t(now-request_ms_)>ReplyTimeoutMs)fail(c,Reason::ReplyTimeout);
   if(int32_t(now-next_send_)<0)return;
   if(off_pending_){if(torque(io,c,false,now))off_pending_=false;return;}
-  if(c.want_sync&&phase_==Idle){phase_=ReadRight;used_=0;}
+  if(c.want_sync&&phase_==Idle){phase_=ReadRight;reply_.clearFrame();}
   if(phase_==ReadRight||phase_==ReadLeft){
    uint8_t p[]={255,255,uint8_t(phase_==ReadRight?RightId:LeftId),4,2,56,2,0};
    checksum(p,8);
-   if(send(io,c,p,8,now)){request_ms_=now;used_=0;phase_=phase_==ReadRight?WaitRight:WaitLeft;}
+   if(send(io,c,p,8,now)){reply_.begin(p[2],now);phase_=phase_==ReadRight?WaitRight:WaitLeft;}
    return;
   }
   if((phase_==Seed||phase_==Enable)&&uint32_t(now-first_ms_)>SyncMaxAgeMs){fail(c,Reason::ReplyTimeout);return;}
@@ -67,17 +65,22 @@ template<class IO> class ServoBus {
  }
  private:
  enum Phase:uint8_t { Idle,ReadRight,WaitRight,ReadLeft,WaitLeft,Seed,Enable } phase_=Idle;
- uint8_t rx_[8]{};uint8_t used_=0;
+ ServoReply reply_;
  int16_t positions_[2]{};
- uint32_t request_ms_=0,first_ms_=0,next_send_=0;
+ uint32_t first_ms_=0,next_send_=0;
  bool off_pending_=false,observe_only_=false;
+ bool waiting()const{return phase_==WaitRight||phase_==WaitLeft;}
+ void failReceive(Control&c,uint32_t now){
+  c.state.rx_failure=reply_.failure(now);
+  fail(c,(c.state.rx_failure.issues&RxTimeout)?Reason::ReplyTimeout:Reason::ReplyInvalid);
+ }
  static void checksum(uint8_t*p,unsigned n){uint8_t sum=0;for(unsigned i=2;i+1<n;++i)sum+=p[i];p[n-1]=~sum;}
- void fail(Control&c,Reason reason){phase_=Idle;used_=0;observe_only_=false;c.stop(reason);}
+ void fail(Control&c,Reason reason){phase_=Idle;reply_.clearFrame();observe_only_=false;c.stop(reason);}
  bool send(IO&io,Control&c,uint8_t*p,unsigned n,uint32_t now){
   next_send_=now+SendIntervalMs;
   if(io.availableForWrite()<int(n)){++c.state.tx_busy;c.state.reason=Reason::TxBusy;return false;}
   if(io.write(p,n)!=n){fail(c,Reason::TxFailed);off_pending_=true;c.state.torque=1;return false;}
-  ++c.state.tx_frames;return true;
+  reply_.noteTransmit(p,n);++c.state.tx_frames;return true;
  }
  bool torque(IO&io,Control&c,bool on,uint32_t now){
   uint8_t p[]={255,255,254,8,131,40,1,RightId,uint8_t(on),LeftId,uint8_t(on),0};

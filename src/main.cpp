@@ -4999,6 +4999,7 @@ void startWifiHttpServer() {
     wifi_log_server.on("/subscribe.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/subscribe.js", "application/javascript"); });
     wifi_log_server.on("/panels.css", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/panels.css", "text/css"); });
     wifi_log_server.on("/diagnosis.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/diagnosis.js", "application/javascript"); });
+    wifi_log_server.on("/leg-reply.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-reply.js", "application/javascript"); });
     wifi_log_server.on("/legs.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/legs.js", "application/javascript"); });
     wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
     wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });

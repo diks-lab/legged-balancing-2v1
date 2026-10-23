@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include <math.h>
+#include "LegServoReply.h"
 namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
 constexpr int RightHome=2061,RightExtended=1892,LeftHome=2026,LeftExtended=2208;
@@ -50,6 +51,7 @@ struct State {
  uint8_t torque=0; // unknown, OFF pending, OFF queued, ON queued; never physical feedback
  bool active=false,synced=false,limited=false,command_valid=false;
  uint8_t mode=0; // unavailable, supported stopped test, stationary balance
+ RxFailure rx_failure;
 };
 class Control {
  public:

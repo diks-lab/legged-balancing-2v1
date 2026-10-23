@@ -88,9 +88,14 @@ int main(){
   char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX));
   all.legs.height=all.legs.requested_roll=all.legs.applied_roll=all.legs.measured_roll=3.4028234e38f;
   all.legs.tx_frames=all.legs.tx_busy=all.legs.max_service_us=UINT32_MAX;
+  auto&rx=all.legs.rx_failure;rx.ms=rx.elapsed_ms=UINT32_MAX;rx.received=UINT16_MAX;
+  rx.target=2;rx.issues=63;rx.frame_size=24;rx.raw_size=32;rx.echoes=rx.skipped=255;rx.truncated=true;
+  rx.expected_checksum=rx.received_checksum=255;rx.checksum_ready=true;memset(rx.raw,255,sizeof(rx.raw));memset(rx.frame,255,sizeof(rx.frame));
   char wheel[1024];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef"));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   assert(strstr(wheel,"\"legs\":["));
+  assert(strstr(wheel,"\"leg_rx\":[4294967295"));
+  printf("MAX_DIAGNOSTIC_JSON=%zu bytes (existing TX capacity 2048)\n",strlen(wheel));
   assert(strstr(wheel,"\"leg_mode\":0")&&strstr(wheel,"\"leg_roll_confirmed\":false"));
   const char* start=strstr(buffer,"\"gyro_window\":");assert(start);const char* end=strchr(start,']');assert(end&&size_t(end-start+2)<=128);
   std::string request="{\"type\":\"subscribe\",\"request_id\":9,\"period_ms\":50,\"fields\":[";

@@ -7,6 +7,10 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',str(source),'-o',str(binary),*flags],check=True)
     subprocess.run([str(binary)],check=True)
 
+    subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',
+        'tests/leg_host/reply.cpp','-o',str(binary),*flags],check=True)
+    subprocess.run([str(binary)],check=True)
+
     # The opt-in flag and measured sign are build settings, not inferred at runtime.
     probe=Path(tmp)/'confirmed.cpp'
     probe.write_text('#include "LegControl.h"\n#include <cassert>\nint main(){\n static_assert(leg::RollDirectionConfirmed,"confirmed build");\n static_assert(leg::ImuRollSign==EXPECTED_SIGN,"measured sign");\n leg::Control c;assert(c.seed(leg::position(true,15),leg::position(false,15),1000));\n c.activate(1000);c.input(4,true);c.tick(1050,true,false,true,-2);\n assert(c.state.requested_roll>0&&c.state.right_percent>c.state.left_percent);\n}\n')
