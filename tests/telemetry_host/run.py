@@ -29,6 +29,7 @@ void operator delete(void*p)noexcept{free(p);}void operator delete(void*p,size_t
 struct IO{
  diagnostic::WsObservation events[64]{};unsigned eventCount=0;unsigned snapshotCost=0,clockStep=0;
  void observe(const diagnostic::WsObservation&r){assert(eventCount<64);events[eventCount++]=r;}
+ bool wheelFault=false;
  uint32_t tick=0;bool open=true;unsigned closes=0,reads=0,writes=0;
  char input[16384]{},output[200000]{};size_t in=0,pos=0,out=0;int limit=256,readLimit=128,error=0,readError=0;
  uint32_t now(){auto n=tick;tick+=clockStep;return n;}bool connected(){return open;}
@@ -36,7 +37,7 @@ struct IO{
  int read(char*p,size_t n){++reads;if(readError)return readError;if(pos==in)return -EAGAIN;size_t amount=std::min({n,in-pos,size_t(readLimit)});memcpy(p,input+pos,amount);pos+=amount;return amount;}
  int write(const char*p,size_t n){++writes;if(error)return error;size_t amount=std::min(n,size_t(limit));assert(out+amount<sizeof(output));memcpy(output+out,p,amount);out+=amount;return amount;}
  bool acceptKey(const char*key,char*out){if(strcmp(key,"dGhlIHNhbXBsZSBub25jZQ=="))return false;strcpy(out,"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");return true;}
- void snapshot(diagnostic::Snapshot&s){tick+=snapshotCost;s.sample_ms=tick;s.source_seq=tick/50;s.values[2]=-2.42;s.values[6]=.15;s.values[7]=.14;s.values[24]=12345;}
+ void snapshot(diagnostic::Snapshot&s){tick+=snapshotCost;s.wheel_reads[0].latched=wheelFault;s.wheel_reads[0].probes=3;s.sample_ms=tick;s.source_seq=tick/50;s.values[2]=-2.42;s.values[6]=.15;s.values[7]=.14;s.values[24]=12345;}
  void raw(const char*p,size_t n){assert(in+n<sizeof(input));memcpy(input+in,p,n);in+=n;}
  void message(const std::string&msg,unsigned op=1,bool mask=true){size_t n=msg.size();unsigned char h[8]={uint8_t(0x80|op),uint8_t((mask?128:0)|(n<126?n:126)),0,0,1,2,3,4};size_t at=2;if(n>=126){h[2]=n>>8;h[3]=n;at=4;}if(mask){h[at]=1;h[at+1]=2;h[at+2]=3;h[at+3]=4;}raw((char*)h,at+(mask?4:0));for(size_t i=0;i<n;++i){char c=msg[i]^(mask?char(i%4+1):0);raw(&c,1);}}
 };
@@ -56,6 +57,11 @@ int main(){
   i.message("{\"type\":\"subscribe\",\"request_id\":2,\"period_ms\":50,\"fields\":[\"gyro_deg_s\"]}");poll(w,i,30);assert(w.generation()==2&&w.mask()==(diagnostic::PermanentMask|(1u<<3)));
   i.message("{\"type\":\"stop\",\"request_id\":3}");poll(w,i,30);assert(w.generation()==3&&w.mask()==0);w.disconnect(i);assert(i.closes==1);i.open=true;i.in=i.pos=i.out=0;handshake(w,i);assert(w.mask()==0&&w.generation()==3);i.message(sub);poll(w,i,25);assert(w.generation()==4&&w.mask()==(diagnostic::PermanentMask|(1u<<2)|(1u<<6)));w.disconnect(i);assert(i.closes==2);
  }
+ // Fault diagnostics use the same bounded slot, independent of sample sequence.
+ {IO i;WS w;handshake(w,i);i.wheelFault=true;i.message(sub);poll(w,i,650);
+  assert(w.active());size_t at=0;unsigned wheel=0,samples=0;
+  while(at+4<i.out){auto msg=payload(i,at);wheel+=msg.find("wheel_diagnostics")!=msg.npos;samples+=msg.find("\"sample\"")!=msg.npos;}
+  assert(wheel>=1&&samples>=10);}
  // Reproduce real time advancing during snapshot/JSON and timer reads.
  for(unsigned cost:{1u,5u})for(unsigned step:{0u,1u}){
   IO i;WS w;handshake(w,i);i.snapshotCost=cost;i.clockStep=step;i.message(sub);poll(w,i,100);
@@ -77,7 +83,11 @@ int main(){
   all.health.barrier=18;all.health.foc_reason[0]=all.health.foc_reason[1]=9;
   all.health.imu_failure=6;all.health.mpu.failure=imu_config::Failure::Mismatch;
   all.health.mpu.reg=0x1b;all.health.mpu.expected=8;all.health.mpu.actual=all.health.mpu.read=255;all.health.mpu.tx=5;all.health.mpu.rx=0;
+  for(auto&d:all.wheel_reads){d.latched=true;d.probes=UINT32_MAX;
+   for(auto*r:{&d.first,&d.probe}){r->ms=r->elapsed_us=r->fall_ms=UINT32_MAX;r->tx=5;r->received=2;r->available=2;r->high=15;r->low=255;r->context=31;r->result=3;}}
   char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX));
+  char wheel[1024];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef"));
+  assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   const char* start=strstr(buffer,"\"gyro_window\":");assert(start);const char* end=strchr(start,']');assert(end&&size_t(end-start+2)<=128);
   std::string request="{\"type\":\"subscribe\",\"request_id\":9,\"period_ms\":50,\"fields\":[";
   for(unsigned i=0;i<diagnostic::FieldCount;++i){if(i)request+=",";request+="\"";request+=diagnostic::fields[i];request+="\"";}request+="]}";

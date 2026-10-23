@@ -58,7 +58,7 @@ function renderDashboardStatus(view) {
       EXPLICIT_STOP: '明示停止・復帰解除', HEALTH_FAULT: '異常のため復帰解除', RESTART_REJECTED: '復帰開始を拒否'
     };
     view.el('health').textContent = current ? MACHINE_NAMES[s.state] || '状態不明' : '通信停止・最終受信時の情報';
-    renderHealthDiagnostics(view, s, current);
+    renderHealthDiagnostics(view, { ...s, ...view.wheelReads }, current);
     view.el('recovery-details').textContent = `${recovery[s.recovery] || s.recovery || '記録なし'}` +
       (names.length ? ` / ${names.join('・')}` : '');
     renderRecoveryChecks(view, s, current, valid);

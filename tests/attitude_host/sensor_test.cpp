@@ -38,19 +38,33 @@ int main() {
   assert(wrap.getFullRotations() == 0 && wrap.getVelocity() < 0);
   // Either wheel's communication failure immediately gates BOTH outputs.
   enableBoth();
+  right.setDiagnosticContext(5, 1234);
+  rightBus.latency=5;
   rightBus.nack = 2;
   right.update();
   expectBothOff();
   assert(right.fault && !left.fault);
+  assert(right.diagnostics.latched);
+  const auto first=right.diagnostics.first;
+  assert(first.reg==0x0c&&first.requested==2&&first.tx==2&&first.received==-1);
+  assert(first.elapsed_us==5000&&first.context==5&&first.fall_ms==1234);
   const int reads = rightBus.requests;
   rightBus.nack = 0;
   right.update();
   assert(right.fault && rightBus.requests == reads); // reboot-only latch
+  right.probeWhileGated();expectBothOff();
+  assert(right.diagnostics.probes==1&&right.diagnostics.probe.result==1);
+  assert(right.fault&&right.diagnostics.first.ms==first.ms&&right.diagnostics.first.tx==2);
+  rightBus.count=0;right.probeWhileGated();expectBothOff();
+  assert(right.diagnostics.probes==2&&right.diagnostics.probe.result==3);
+  assert(right.diagnostics.probe.received==0&&right.fault);
+  right.update();assert(right.fault);
   enableBoth();
   leftBus.count = 1;
   left.update();
   expectBothOff();
   assert(left.fault);
+  assert(left.diagnostics.first.received==1&&left.diagnostics.first.available==1);
   TwoWire invalidBus(0);
   CheckedWheelSensor invalid(invalidBus, gateBoth);
   invalidBus.raw = 0xFFFF;

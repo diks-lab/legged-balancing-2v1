@@ -221,7 +221,7 @@ prefix += source[source.index('struct HttpResponseTransport {'):source.index('vo
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -906,6 +906,20 @@ int main(){
     assert(!lqr_direction_test_armed&&!boot_auto_start.pending());
   }
 
+  // Fault probes are bounded, gated and cannot clear the fault/start latch.
+  setupCase();sensor1.setDiagnosticContext(3,42);I2Cone.count=0;sensor1.update();
+  assert(sensor1.fault);assert(stopOnWheelFault());
+  const auto fault_ms=sensor1.diagnostics.first.ms;
+  I2Cone.count=2;nowMs+=1000;serviceWheelFaultDiagnostics();
+  assert(sensor1.diagnostics.probes&&sensor1.diagnostics.probe.result==1);
+  assert(sensor1.fault&&!test_system_ready&&emergency_stop_active&&!pins[27]&&!pins[32]);
+  const auto probes=sensor1.diagnostics.probes;
+  serviceWheelFaultDiagnostics();assert(sensor1.diagnostics.probes==probes);
+  LQR_angle=0;noteImuMeasurement();serviceFallAutoRecovery();serviceBootAutoStart();
+  assert(!lqr_direction_test_armed&&sensor1.diagnostics.first.ms==fault_ms);
+  I2Cone.count=0;nowMs+=1000;serviceWheelFaultDiagnostics();
+  assert(sensor1.diagnostics.probe.result==3&&sensor1.fault);
+  I2Cone.count=2;
   // Automatic entry always resets FULL, origin, targets, PID and speed-filter state.
   bootFixture();lqr_test_mode=LqrTestMode::AttitudeDistance;
   LQR_angle=1;LQR_distance=4.5f;noteImuMeasurement();

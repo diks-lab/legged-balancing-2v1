@@ -101,6 +101,14 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert.equal(await page.locator('#condition-wheels').getAttribute('data-ok'), 'false');
       for (const key of ['imu', 'foc']) assert.equal(await page.locator(`#condition-${key}`).getAttribute('data-ok'), 'true');
       assert((await page.locator('#health-diagnosis').textContent()).includes('右車輪センサー 実行して失敗：I2C_ADDRESS/NACK'));
+      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
+        type: 'wheel_diagnostics', boot_id: 'boot-test',
+        wheel0: [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3,
+          100, 100, 53000, 0, 2, 2, 1, 2, 12, 2, 4, 1, 1]
+      }) }));
+      await page.evaluate(() => window.sample({ sample_ms: 120, imu_ms: 120, command_ms: 120 }));
+      assert((await page.locator('#health-diagnosis').textContent()).includes('通信回復を確認'), await page.locator('#health-diagnosis').textContent());
+      assert((await page.locator('#health-diagnosis').textContent()).includes('53587 ms'));
       await page.evaluate(() => { for (let i = 0; i < 1200; i++) window.sample(); });
       await page.click('#pause'); await page.click('#pause');
       assert(await page.evaluate(() => window.axisLabels.some(x => x.id === 'pose' && x.text === '30.0')));

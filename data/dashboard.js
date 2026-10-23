@@ -53,6 +53,7 @@ class Dashboard {
 
   stop() { this.live = false; this.status(); }
   update(sample) {
+    if (this.sample && this.sample.boot_id !== sample.boot_id) this.wheelReads = null;
     this.sample = sample;
     this.last = Date.now();
     this.status();

@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include "GyroVibration.h"
 #include "HealthDiagnostics.h"
+#include "WheelReadDiagnostics.h"
 namespace diagnostic {
 constexpr unsigned FieldCount=32;
 constexpr uint32_t PermanentMask=(1u<<0)|(1u<<1)|(1u<<14)|(1u<<15);
@@ -27,6 +28,7 @@ struct Snapshot {
  uint8_t imu_reason=1,state=0,imu_tx=255,imu_rx=0,recovery_checks=0;
  char calibration[32]="NOT_LOADED",recovery[32]="NONE";
  char startup_reason[32]="WEB_WAIT",right_error[24]="",left_error[24]="";
+ WheelReadDiagnostics wheel_reads[2];
  HealthReport health;
  GyroWindow gyro_window;
  uint8_t imu_config=255;
@@ -102,6 +104,25 @@ inline bool sample(char*dest,size_t capacity,const Snapshot&s,const char*boot,ui
  j.add(",\"faults\":%lu,\"running\":%s,\"disabled\":%s,\"ps4\":%s,\"foc_ready\":%s,\"values\":{",(unsigned long)s.faults,s.running?"true":"false",s.disabled?"true":"false",s.ps4?"true":"false",s.foc_ready?"true":"false");
  bool first=true;for(unsigned i=0;i<FieldCount;++i)if(mask&(1u<<i)){j.add("%s\"%s\":",first?"":",",fields[i]);if(isfinite(s.values[i]))j.add("%.7g",double(s.values[i]));else j.add("null");first=false;}
  j.add("}}");return j.ok;
+}
+// Separate bounded diagnostic frame: never enlarge the 2048-byte sample budget.
+inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const char*boot){
+ Json j(dest,capacity);j.add("{\"type\":\"wheel_diagnostics\",\"boot_id\":\"%s\"",boot);
+ for(unsigned side=0;side<2;++side){
+  const auto&d=s.wheel_reads[side];if(!d.latched)continue;
+  j.add(",\"wheel%u\":[",side);
+  const WheelReadRecord* records[]={&d.first,&d.probe};
+  bool first=true;
+  for(const auto*r:records){
+   j.add("%s%lu,%lu,%lu,%d,%d,%d,%d,%d,%u,%u,%u,%u",first?"":",",
+    (unsigned long)r->ms,(unsigned long)r->elapsed_us,(unsigned long)r->fall_ms,
+    int(r->tx),int(r->received),int(r->available),int(r->high),int(r->low),
+    unsigned(r->reg),unsigned(r->requested),unsigned(r->context),unsigned(r->result));
+   first=false;
+  }
+  j.add(",%lu]",(unsigned long)d.probes);
+ }
+ j.add("}");return j.ok;
 }
 inline bool ack(char*dest,size_t cap,const Subscription&s,uint32_t generation,const char*boot){Json j(dest,cap);j.add("{\"type\":\"subscribed\",\"boot_id\":\"%s\",\"request_id\":%lu,\"subscription_id\":%lu,\"period_ms\":50,\"streaming\":%s,\"fields\":[",boot,(unsigned long)s.request,(unsigned long)generation,s.stop?"false":"true");bool first=true;for(unsigned i=0;i<FieldCount;++i)if(s.mask&(1u<<i)){j.add("%s\"%s\"",first?"":",",fields[i]);first=false;}j.add("]}");return j.ok;}
 }

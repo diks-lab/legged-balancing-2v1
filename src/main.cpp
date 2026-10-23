@@ -450,8 +450,10 @@ std::atomic<uint8_t> calibration_commit_phase{0}; // 0 scan, 1 aborted, 2 commit
 const char* last_stop_reason = "NONE";
 char diagnostic_stop_reason[64]="NONE";
 uint32_t diagnostic_stop_ms=0;
+uint32_t diagnostic_last_fall_ms=0;
 void recordDiagnosticStop(const char* reason){
   if(!strcmp(reason,"NONE"))return;
+  if(!strcmp(reason,"TILT_STOP"))diagnostic_last_fall_ms=millis();
   boot_auto_start.cancel();
   fall_auto_recovery.cancel();
   size_t i=0;for(;reason[i]&&i+1<sizeof(diagnostic_stop_reason);++i)diagnostic_stop_reason[i]=reason[i];
@@ -772,6 +774,7 @@ bool bootAutoMeasurementsReady();
 void serviceBootAutoStart();
 void serviceFallAutoRecovery();
 void updateStoppedMeasurements();
+void serviceWheelFaultDiagnostics();
 uint8_t fallRecoveryChecks();
 void publishDiagnosticSnapshot(bool force);
 void requestWheelCalibration();
@@ -1239,9 +1242,15 @@ void advanceStartup() {
 void loop() {
   updatePs4Controller();
   servicePs4DiagnosticSerial();
+  const uint8_t wheel_context=(test_system_ready?1:0)|(lqr_direction_test_armed?2:0)|
+    (emergency_stop_active?4:0)|(polarity_test_active?8:0)|(calibration_active.load()?16:0)|
+    (boot_auto_start.pending()?32:0)|(fall_auto_recovery.pending?64:0);
+  sensor1.setDiagnosticContext(wheel_context,diagnostic_last_fall_ms);
+  sensor2.setDiagnosticContext(wheel_context,diagnostic_last_fall_ms);
 
   if (!test_system_ready) {
     gateWheelOutputsOff();
+    serviceWheelFaultDiagnostics();
     handleSerialCommand();
     if(diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()){
       mpu6050.update();LQR_angle=mpu6050.getAngleY();LQR_gyro=mpu6050.getGyroY();noteImuMeasurement();
@@ -1709,6 +1718,15 @@ bool stopOnWheelFault() {
   polarity_test_active = false;
   polarity_pulse_active = false;
   cancelBalanceWait();
+  for(unsigned side=0;side<2;++side){
+    const auto& d=side?sensor2.diagnostics:sensor1.diagnostics;
+    if(!d.latched)continue;
+    const auto&r=d.first;
+    Serial.printf("WHEEL READ first side=%s ms=%lu reg=0x%02x requested=%u received=%d available=%d tx=%d high=%d low=%d elapsed_us=%lu context=0x%02x fall_ms=%lu; latched, no restart\n",
+      side?"left":"right",(unsigned long)r.ms,unsigned(r.reg),unsigned(r.requested),
+      int(r.received),int(r.available),int(r.tx),int(r.high),int(r.low),
+      (unsigned long)r.elapsed_us,unsigned(r.context),(unsigned long)r.fall_ms);
+  }
   Serial.printf("WHEEL FAULT: right=%s left=%s; both disabled; reboot required.\n",
                 sensor1.error, sensor2.error);
   return true;
@@ -1796,6 +1814,26 @@ void updateLqrState() {
   LQR_speed = motor1.shaft_velocity * m1_direction +
               motor2.shaft_velocity * m2_direction;
   lqr_simplefoc_speed_read_ms = millis();
+}
+
+void serviceWheelFaultDiagnostics() {
+  // Control task only. No Sensor update/cache, calibration or latch reset.
+  static uint32_t last_probe=0;
+  static uint8_t previous[2]={0,0};
+  if(test_system_ready||calibration_active.load()||
+      !(sensor1.fault||sensor2.fault)||uint32_t(millis()-last_probe)<1000)return;
+  gateWheelOutputsOff();last_probe=millis();
+  CheckedWheelSensor* sensors[]={&sensor1,&sensor2};
+  for(unsigned side=0;side<2;++side){
+    auto& sensor=*sensors[side];if(!sensor.diagnostics.latched)continue;
+    sensor.probeWhileGated();
+    const auto&r=sensor.diagnostics.probe;
+    if(previous[side]!=r.result){
+      previous[side]=r.result;
+      Serial.printf("WHEEL PROBE side=%s ms=%lu result=%u received=%d tx=%d; fault retained, outputs off\n",
+        side?"left":"right",(unsigned long)r.ms,unsigned(r.result),int(r.received),int(r.tx));
+    }
+  }
 }
 
 void updateStoppedMeasurements() {
@@ -4469,6 +4507,7 @@ void publishDiagnosticSnapshot(bool force){
   else if(!calibration_loaded&&!test_system_ready&&!foc_initialization_failed&&s.imu_reason!=9&&s.imu_reason!=10&&!sensor1.fault&&!sensor2.fault)s.state=9;
   else if(fall_auto_recovery.pending)s.state=11;
   snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
+  s.wheel_reads[0]=sensor1.diagnostics;s.wheel_reads[1]=sensor2.diagnostics;
   snprintf(s.right_error,sizeof(s.right_error),"%s",sensor1.error);
   snprintf(s.left_error,sizeof(s.left_error),"%s",sensor2.error);
   const float values[]={LQR_angle,angle_zeropoint,LQR_angle-angle_zeropoint,LQR_gyro,

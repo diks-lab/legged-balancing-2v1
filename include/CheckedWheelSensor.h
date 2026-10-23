@@ -2,6 +2,7 @@
 
 #include <SimpleFOC.h>
 #include <Wire.h>
+#include "WheelReadDiagnostics.h"
 
 // Same RAW_ANGLE checks and stopped-velocity correction as wheel_diagnostic.
 // The callback only gates EN low; normal control code performs PWM cleanup.
@@ -9,6 +10,19 @@ class CheckedWheelSensor : public Sensor {
  public:
   CheckedWheelSensor(TwoWire& bus, void (*gateOff)())
       : bus_(bus), gateOff_(gateOff) {}
+
+  WheelReadDiagnostics diagnostics;
+  void setDiagnosticContext(uint8_t flags, uint32_t fall_ms) {
+    context_ = flags; fall_ms_ = fall_ms;
+  }
+  // Caller guarantees outputs remain gated and owns this bus (control task only).
+  // A probe never touches Sensor caches, fault, ready or the first-fault latch.
+  void probeWhileGated() {
+    WheelReadRecord r;
+    readRaw(r);
+    diagnostics.probe = r;
+    if (diagnostics.probes != UINT32_MAX) ++diagnostics.probes;
+  }
 
   bool ready = false;
   bool fault = false;
@@ -39,22 +53,45 @@ class CheckedWheelSensor : public Sensor {
  protected:
   float getSensorAngle() override {
     if (fault) return -1.0f;
-    bus_.beginTransmission(0x36);
-    bus_.write(0x0C);
-    if (bus_.endTransmission(false) != 0) return fail("I2C_ADDRESS/NACK");
-    if (bus_.requestFrom(uint8_t(0x36), uint8_t(2)) != 2 || bus_.available() != 2)
-      return fail("I2C_SHORT_READ/TIMEOUT");
-    const int high = bus_.read(), low = bus_.read();
-    if (high < 0 || high > 0x0F || low < 0 || low > 0xFF)
-      return fail("INVALID_DATA");
-    const float angle = ((high << 8) | low) * (6.283185307179586f / 4096.0f);
-    if (!isfinite(angle) || angle < 0 || angle >= 6.283185307179586f)
-      return fail("INVALID_ANGLE");
+    WheelReadRecord r;
+    const float angle = readRaw(r);
+    if (r.result != 1) {
+      // Gate before saving the fixed-size record or producing any diagnostics.
+      fail(r.result == 2 ? "I2C_ADDRESS/NACK" : r.result == 3 ?
+           "I2C_SHORT_READ/TIMEOUT" : r.result == 4 ? "INVALID_DATA" : "INVALID_ANGLE");
+      if (!diagnostics.latched) { diagnostics.first = r; diagnostics.latched = true; }
+      return -1.0f;
+    }
     error = "OK";
     return angle;
   }
 
  private:
+  uint8_t context_=0;
+  uint32_t fall_ms_=0;
+  float readRaw(WheelReadRecord& r) {
+    r.ms=millis(); r.context=context_; r.fall_ms=fall_ms_;
+    const uint32_t start=micros();
+    bus_.beginTransmission(0x36); bus_.write(r.reg);
+    r.tx=bus_.endTransmission(false);
+    float angle=-1.0f;
+    if(r.tx!=0) r.result=2;
+    else {
+      r.received=bus_.requestFrom(uint8_t(0x36),uint8_t(r.requested));
+      r.available=bus_.available();
+      if(r.received!=2||r.available!=2) r.result=3;
+      else {
+        r.high=bus_.read(); r.low=bus_.read();
+        if(r.high<0||r.high>0x0f||r.low<0||r.low>0xff) r.result=4;
+        else {
+          angle=((r.high<<8)|r.low)*(6.283185307179586f/4096.0f);
+          r.result=isfinite(angle)&&angle>=0&&angle<6.283185307179586f ? 1 : 5;
+        }
+      }
+    }
+    r.elapsed_us=micros()-start;
+    return angle;
+  }
   TwoWire& bus_;
   void (*gateOff_)();
   float fail(const char* reason) {
