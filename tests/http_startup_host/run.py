@@ -16,6 +16,8 @@ def function(name):
 
 code = r'''
 #include <cassert>
+#include "HealthDiagnostics.h"
+diagnostic::HealthDiagnostics health_diagnostics;
 #include <atomic>
 std::atomic<bool> diagnostic_startup_failed{false};
 std::atomic<const char*> diagnostic_startup_phase{"WEB_WAIT"};
@@ -366,7 +368,7 @@ with tempfile.TemporaryDirectory(prefix='http-startup-') as directory:
     cpp.write_text(code)
     for detailed in [0,1]:
         subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                        '-DSERIAL_DIAGNOSTICS='+str(detailed),'-DHTTP_MEMORY_STAGE_DIAGNOSTICS='+str(detailed),str(cpp), '-o', str(binary)], check=True)
+                        '-DSERIAL_DIAGNOSTICS='+str(detailed),'-DHTTP_MEMORY_STAGE_DIAGNOSTICS='+str(detailed),'-Iinclude',str(cpp), '-o', str(binary)], check=True)
         subprocess.run([str(binary)], check=True)
 
 setup = function('setup')

@@ -85,6 +85,23 @@ namespace {
 //==================================================
 // Hardware / Control Objects
 //==================================================
+diagnostic::HealthDiagnostics health_diagnostics;
+portMUX_TYPE health_diagnostics_lock=portMUX_INITIALIZER_UNLOCKED;
+void firstHealthFault(const char* reason) {
+  portENTER_CRITICAL(&health_diagnostics_lock);
+  health_diagnostics.first(reason,millis());
+  portEXIT_CRITICAL(&health_diagnostics_lock);
+}
+void sensorHealthFault(unsigned side) {
+  portENTER_CRITICAL(&health_diagnostics_lock);
+  health_diagnostics.report.stages[side?diagnostic::LeftSensor:diagnostic::RightSensor]=diagnostic::Failed;
+  health_diagnostics.first(side?"LEFT_SENSOR":"RIGHT_SENSOR",millis());
+  portEXIT_CRITICAL(&health_diagnostics_lock);
+}
+void copyHealthReport(diagnostic::Snapshot&s) {
+  portENTER_CRITICAL(&health_diagnostics_lock);s.health=health_diagnostics.report;
+  portEXIT_CRITICAL(&health_diagnostics_lock);
+}
 constexpr uint8_t motor1EnablePin = 27;
 constexpr uint8_t kWheelRightSda=19,kWheelRightScl=18,kWheelLeftSda=23,kWheelLeftScl=5;
 
@@ -125,13 +142,16 @@ void gateWheelOutputsOffFrom(FocGateSource source) {
   foc_alignment_observer.gate(source,micros());
 }
 void gateWheelOutputsOff(){gateWheelOutputsOffFrom(FocGateSource::Other);}
-void gateRightSensorFault(){gateWheelOutputsOffFrom(FocGateSource::RightSensor);}
-void gateLeftSensorFault(){gateWheelOutputsOffFrom(FocGateSource::LeftSensor);}
+void gateRightSensorFault(){gateWheelOutputsOffFrom(FocGateSource::RightSensor);sensorHealthFault(0);}
+void gateLeftSensorFault(){gateWheelOutputsOffFrom(FocGateSource::LeftSensor);sensorHealthFault(1);}
 esp_timer_handle_t wheelAlignTimer = nullptr;
 std::atomic<bool> wheelAlignExpired{false};
 void wheelAlignTimeout(void*) {
   gateWheelOutputsOffFrom(FocGateSource::Timer);
   wheelAlignExpired.store(true);
+  portENTER_CRITICAL(&health_diagnostics_lock);
+  health_diagnostics.first("FOC_ALIGNMENT_TIMEOUT",millis());
+  portEXIT_CRITICAL(&health_diagnostics_lock);
 }
 constexpr uint8_t kRightLegServoId = 1;
 constexpr uint8_t kLeftLegServoId = 2;
@@ -808,6 +828,13 @@ std::atomic<bool> diagnostic_calibration_done{false},diagnostic_calibration_ok{f
 bool diagnostic_calibration_failed=false;uint16_t diagnostic_calibration_samples=0;
 void noteImuMeasurement(){
   diagnostic_imu_finite=diagnostic_imu_io_ok&&isfinite(LQR_angle)&&isfinite(LQR_gyro);
+  if(diagnostic_imu_io_ok&&!diagnostic_imu_finite){
+    firstHealthFault("IMU_NONFINITE");
+    portENTER_CRITICAL(&health_diagnostics_lock);
+    health_diagnostics.report.stages[diagnostic::Imu]=diagnostic::Failed;
+    if(!health_diagnostics.report.imu_failure)health_diagnostics.report.imu_failure=5;
+    portEXIT_CRITICAL(&health_diagnostics_lock);
+  }
   gyro_vibration.add(micros(),millis(),LQR_gyro,diagnostic_imu_finite);
   if(!diagnostic_imu_io_ok)return;
   diagnostic_imu_ms=millis();++diagnostic_imu_seq;
@@ -881,6 +908,8 @@ void prepareI2cResources() {
 }
 
 void initializeRobotHardware() {
+  portENTER_CRITICAL(&health_diagnostics_lock);health_diagnostics.beginAttempt();
+  portEXIT_CRITICAL(&health_diagnostics_lock);
   const char* startup_stage = "WHEEL_ALIGN_TIMER";
   if (!startupHardwareStepAllowed()) return;
   publishStartupPhase(startup_stage);
@@ -903,6 +932,10 @@ void initializeRobotHardware() {
   publishStartupPhase(startup_stage);
   sensor1.beginPreparedBus();
   sensor2.beginPreparedBus();
+  portENTER_CRITICAL(&health_diagnostics_lock);
+  health_diagnostics.report.stages[diagnostic::RightSensor]=sensor1.fault?diagnostic::Failed:diagnostic::Passed;
+  health_diagnostics.report.stages[diagnostic::LeftSensor]=sensor2.fault?diagnostic::Failed:diagnostic::Passed;
+  portEXIT_CRITICAL(&health_diagnostics_lock);
   if (!wheelSensorsOK()) {
     disableBothDrivers();
     Serial.println("ERROR: wheel sensor initialization failed; reboot required.");
@@ -935,9 +968,16 @@ void initializeRobotHardware() {
   printHttpStartupMemory("before_mpu6050");
   mpu6050.begin();
   const bool imu_config_ok=imu_config::apply(I2Cone,imu_registers);
-  Serial.printf("IMU CONFIG requested=0x%02x read=0x%02x DIV=0x%02x GYRO=0x%02x ACCEL=0x%02x result=%s\n",
-      imu_config::DlpfConfig,imu_registers.config,imu_registers.divider,
-      imu_registers.gyro,imu_registers.accel,imu_config_ok?"OK":"FAILED");
+  portENTER_CRITICAL(&health_diagnostics_lock);health_diagnostics.mpuResult(imu_registers);
+  if(!imu_config_ok)health_diagnostics.failed("IMU_CONFIG_FAILED",millis());
+  portEXIT_CRITICAL(&health_diagnostics_lock);
+  char imu_config_log[256];
+  snprintf(imu_config_log,sizeof(imu_config_log),
+      "IMU CONFIG requested=0x%02x read=0x%02x DIV=0x%02x GYRO=0x%02x ACCEL=0x%02x result=%s status=%s reg=%s(0x%02x) expected=0x%02x actual=%d tx=%d rx=%d read_result=%d (-1=unobtained)\n",
+      imu_config::DlpfConfig,imu_registers.config,imu_registers.divider,imu_registers.gyro,imu_registers.accel,
+      imu_config_ok?"OK":"FAILED",imu_config::failureName(imu_registers.failure),imu_config::registerName(imu_registers.reg),
+      imu_registers.reg,imu_registers.expected,imu_registers.actual,imu_registers.tx,imu_registers.rx,imu_registers.read);
+  Serial.print(imu_config_log);
   if (!imu_config_ok) {
     disableBothDrivers();publishStartupPhase("IMU_CONFIG_FAILED");
     reportStartupFailure("IMU_CONFIG_FAILED");return;
@@ -945,6 +985,9 @@ void initializeRobotHardware() {
   diagnostic_imu_initialized.store(true);
   calibrateMpu6050();
   printHttpStartupMemory("after_mpu6050");
+  portENTER_CRITICAL(&health_diagnostics_lock);
+  health_diagnostics.report.stages[diagnostic::Imu]=diagnostic_calibration_ok.load()?diagnostic::Passed:diagnostic::Failed;
+  portEXIT_CRITICAL(&health_diagnostics_lock);
 
   if(diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load()){
     disableBothDrivers();publishStartupPhase("IMU_CALIBRATION_FAILED");reportStartupFailure(startup_phase);return;
@@ -1587,6 +1630,12 @@ bool initializeWheelFoc(BLDCMotor& motor) {
   const bool expired=wheelAlignExpired.load();
   const bool sensors_ok=wheelSensorsOK();
   const bool accepted=raw_called && static_cast<bool>(raw) && !expired && motor.pp_check_result && sensors_ok && !calibration_abort.load();
+  const uint8_t health_reason=accepted?0:!raw_called?(!sensors_ok?1:!calibration_loaded&&!calibration_active.load()?2:!wheelAlignTimer?3:4):expired?5:!sensors_ok?6:calibration_abort.load()?7:!raw?8:9;
+  portENTER_CRITICAL(&health_diagnostics_lock);
+  health_diagnostics.report.stages[slot?diagnostic::LeftFoc:diagnostic::RightFoc]=accepted?diagnostic::Passed:raw_called?diagnostic::Failed:diagnostic::Blocked;
+  health_diagnostics.report.foc_reason[slot]=health_reason;
+  if(!accepted)health_diagnostics.first(raw_called?(slot?"LEFT_FOC":"RIGHT_FOC"):(slot?"LEFT_FOC_NOT_RUN":"RIGHT_FOC_NOT_RUN"),millis());
+  portEXIT_CRITICAL(&health_diagnostics_lock);
   foc_alignment_observer.end(raw,start,stop,expired,motor.pp_check_result,
       sensors_ok,accepted,micros());
   // Essential result is always printed, only after EN is LOW. No extra reads.
@@ -4413,6 +4462,7 @@ void publishDiagnosticSnapshot(bool force){
   // Alignment phase voltages are not normal move() command voltages.
   if(calibration_active.load()){s.command_valid=false;s.disabled=false;}
   diagnostic::freshness(s,now);
+  copyHealthReport(s);
   portENTER_CRITICAL(&diagnostic_snapshot_lock);diagnostic_latest=s;portEXIT_CRITICAL(&diagnostic_snapshot_lock);
 }
 struct HttpStatus { char text[2048]; uint32_t ps4_revision=0; };
@@ -4494,6 +4544,8 @@ void handleStartBalanceTest() { enqueueHttpCommand('t'); }
 void handleStopBalanceTest() { enqueueHttpCommand('d'); }
 
 void publishStartupPhase(const char* stage) {
+  portENTER_CRITICAL(&health_diagnostics_lock);health_diagnostics.phase(stage);
+  portEXIT_CRITICAL(&health_diagnostics_lock);
   startup_phase = stage;
   diagnostic_startup_phase.store(stage);
   if(!strcmp(stage,"READY"))diagnostic_startup_failed.store(false);
@@ -4809,6 +4861,7 @@ void startWifiHttpServer() {
     wifi_log_server.on("/signals.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/signals.js", "application/javascript"); });
     wifi_log_server.on("/subscribe.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/subscribe.js", "application/javascript"); });
     wifi_log_server.on("/panels.css", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/panels.css", "text/css"); });
+    wifi_log_server.on("/diagnosis.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/diagnosis.js", "application/javascript"); });
     wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
     wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
@@ -4900,9 +4953,23 @@ void printStartupMemoryResult(const char* result) {
 }
 
 void reportStartupFailure(const char* stage) {
+  portENTER_CRITICAL(&health_diagnostics_lock);health_diagnostics.failed(stage,millis());
+  portEXIT_CRITICAL(&health_diagnostics_lock);
   diagnostic_startup_failed.store(true);
   diagnostic_startup_phase.store(stage);
   if(foc_alignment_observer.active()){foc_deferred_http_failure.store(stage);return;}
+  diagnostic::HealthReport diagnosis;
+  portENTER_CRITICAL(&health_diagnostics_lock);diagnosis=health_diagnostics.report;
+  portEXIT_CRITICAL(&health_diagnostics_lock);
+  static const char*const stage_names[]={"NOT_RUN","RUNNING","OK","FAILED","BLOCKED"};
+  static const char*const component_names[]={"IMU","RIGHT_SENSOR","LEFT_SENSOR","RIGHT_FOC","LEFT_FOC"};
+  char diagnostic_line[160];
+  snprintf(diagnostic_line,sizeof(diagnostic_line),"DIAG FIRST reason=%s ms=%lu (retained until reboot)\n",diagnosis.first,(unsigned long)diagnosis.first_ms);
+  Serial.print(diagnostic_line);
+  for(unsigned i=0;i<5;++i){
+    snprintf(diagnostic_line,sizeof(diagnostic_line),"DIAG %s status=%s barrier=%u phase=%s\n",component_names[i],stage_names[diagnosis.stages[i]],unsigned(diagnosis.barrier),stage);
+    Serial.print(diagnostic_line);
+  }
   char text[384];
   snprintf(text, sizeof(text),
       "STARTUP: stage=%s state=FAILED foc=%s littlefs=%s wifi_ip=%s http=%s menu=%s i2c0=%s i2c1=%s\n",
@@ -6489,12 +6556,28 @@ void handleSerialCommand() {
 
 extern "C" void observeImuCalibration(unsigned char tx,unsigned char rx){
   if(diagnostic_calibration_samples<3000)++diagnostic_calibration_samples;
-  if(tx!=0||rx!=6)diagnostic_calibration_failed=true;
+  if(tx!=0||rx!=6){
+    const bool first_failure=!diagnostic_calibration_failed;
+    diagnostic_calibration_failed=true;
+    if(first_failure){
+      firstHealthFault("IMU_CALIBRATION_FAILED");
+      portENTER_CRITICAL(&health_diagnostics_lock);
+      health_diagnostics.report.stages[diagnostic::Imu]=diagnostic::Failed;
+      if(!health_diagnostics.report.imu_failure)health_diagnostics.report.imu_failure=3;
+      portEXIT_CRITICAL(&health_diagnostics_lock);
+    }
+  }
 }
 
 extern "C" void observeImuTransaction(unsigned char tx,unsigned char rx){
   diagnostic_imu_tx=tx;diagnostic_imu_rx=rx;
   diagnostic_imu_io_ok=tx==0&&rx==14;diagnostic_imu_io_seen=true;
+  if(!diagnostic_imu_io_ok){
+    firstHealthFault("IMU_I2C_FAILED");
+    portENTER_CRITICAL(&health_diagnostics_lock);health_diagnostics.report.stages[diagnostic::Imu]=diagnostic::Failed;
+    if(!health_diagnostics.report.imu_failure)health_diagnostics.report.imu_failure=4;
+    portEXIT_CRITICAL(&health_diagnostics_lock);
+  }
 }
 
 void observeFocAlignPoint(const void* motor,FocAlignPoint point,float value,uint32_t now) {
@@ -6540,6 +6623,7 @@ struct DiagnosticSocketIO {
     if(s.imu_reason==10)s.state=6;
     if(diagnostic_startup_failed.load()&&!s.foc_ready)s.state=7;
     snprintf(s.startup_reason,sizeof(s.startup_reason),"%s",diagnostic_startup_phase.load());
+    copyHealthReport(s);
     diagnostic::freshness(s,millis());
     constexpr uint32_t caps=MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT;
     s.values[24]=heap_caps_get_free_size(caps);s.values[25]=heap_caps_get_largest_free_block(caps);

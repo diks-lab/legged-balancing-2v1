@@ -31,6 +31,7 @@ app=Path('src/main.cpp').read_text(encoding='utf-8')
 prelude=r'''
 #include "FocAlignmentObservation.h"
 #include "WheelCalibration.h"
+#include "HealthDiagnostics.h"
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -40,11 +41,14 @@ prelude=r'''
 #include <mutex>
 #include <thread>
 using portMUX_TYPE=std::mutex;
+portMUX_TYPE health_diagnostics_lock;
+diagnostic::HealthDiagnostics health_diagnostics;
 #define portMUX_INITIALIZER_UNLOCKED {}
 void portENTER_CRITICAL(portMUX_TYPE* m){m->lock();}
 void portEXIT_CRITICAL(portMUX_TYPE* m){m->unlock();}
 uint32_t now_us=100;
 uint32_t micros(){return now_us;}
+uint32_t millis(){return now_us/1000;}
 uint32_t _micros(){return now_us;}
 bool en[2]={true,true},bus_ok=true;
 std::atomic<bool> calibration_active{true},calibration_abort{false};
@@ -134,6 +138,7 @@ void observeFocLibraryDisable(uint32_t now){foc_alignment_observer.gate(FocGateS
 '''
 checks=r'''
 void reset(){
+ health_diagnostics=diagnostic::HealthDiagnostics{};
  now_us=100;en[0]=en[1]=bus_ok=true;calibration_active=true;calibration_abort=false;calibration_loaded=false;fault_mode=0;wheelAlignExpired=false;
  timer_start_result=timer_stop_result=0;wheelAlignTimer=reinterpret_cast<void*>(1);
  sensor1=FakeSensor{};sensor2=FakeSensor{};motor1=BLDCMotor{};motor2=BLDCMotor{};
@@ -204,7 +209,7 @@ int main(){
  reset();timer_start_result=99;assert(!initializeWheelFoc(motor2));
  r=foc_alignment_observer.records[1];assert(r.raw_result==-1 && r.timer_start==99 && r.valid==0 && !en[0] && !en[1]);
  reset();bus_ok=false;assert(!initializeWheelFoc(motor2));assert(!en[0] && !en[1]);
- reset();wheelAlignTimer=nullptr;assert(!initializeWheelFoc(motor2));assert(!en[0] && !en[1]);
+ reset();wheelAlignTimer=nullptr;assert(!initializeWheelFoc(motor2));assert(health_diagnostics.report.stages[diagnostic::LeftFoc]==diagnostic::Blocked&&health_diagnostics.report.foc_reason[1]==3);assert(!en[0] && !en[1]);
  reset();foc_quiet_print.clear();for(int i=0;i<700;++i)foc_quiet_print.write('x');
  assert(foc_quiet_print.used==512 && foc_quiet_print.dropped==188);
  // Multiple producers retain exact counts; first_us=0 is a valid first event.

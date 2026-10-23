@@ -3,9 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'status.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'status.js', 'dashboard.js', 'app.js'];
 const context = vm.createContext({});
-for (const name of ['signals.js', 'history.js', 'plot.js', 'status.js', 'dashboard.js']) {
+for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -59,6 +59,19 @@ vm.runInContext(`
     const invalid = axisRange([{ values: { x: null } }], ['x'], unit);
     if (JSON.stringify(invalid) !== JSON.stringify(range)) throw Error('invalid scale');
   }
+  const failure = { diagnosis: [100, 'IMU_CONFIG_FAILED', 3, 2, 2, 4, 4, 5, 0, 0, 2, 26, 3, -1, 2, -1, -1, 2],
+    imu_reason: 'NOT_INITIALIZED', right_error: 'OK', left_error: 'OK' };
+  let lines = healthLines(failure).join(' / ');
+  if (!lines.includes('右FOC 未実行：IMU設定確認失敗のため') ||
+      lines.includes('右FOC 実行して失敗') || !lines.includes('期待=0x03 取得=未取得')) throw Error('blocked/config');
+  for (const [code, name] of MPU_FAILURES.entries()) {
+    const d = [...failure.diagnosis]; d[10] = code;
+    if (!healthLines({ ...failure, diagnosis: d }).join(' / ').includes(name)) throw Error('MPU category');
+  }
+  const unrun = [...failure.diagnosis]; unrun[2] = 0;
+  if (!healthLines({ ...failure, diagnosis: unrun }).includes('IMU 未実行')) throw Error('not run');
+  const failedFoc = [...failure.diagnosis]; failedFoc[5] = 3; failedFoc[8] = 5;
+  if (!healthLines({ ...failure, diagnosis: failedFoc }).join(' / ').includes('右FOC 実行して失敗（タイムアウト）')) throw Error('real FOC failure');
   if (DEFAULTS.length !== 1 || PRESETS.position.length !== 8 || PRESETS.drive.length !== 10) throw Error('presets');
 `, context);
 for (const file of assets) {

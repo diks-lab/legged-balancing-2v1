@@ -46,13 +46,14 @@ function renderDashboardStatus(view) {
       ((s.sample_ms - s.imu_ms) >>> 0) + s.age_ms + Date.now() - view.last <= 250;
     const names = [s.faults & 1 ? `右:${s.right_error || '車輪センサー異常'}` : '',
       s.faults & 2 ? `左:${s.left_error || '車輪センサー異常'}` : '',
-      s.faults & 4 ? 'FOC初期化失敗' : ''].filter(Boolean);
+      s.faults & 4 ? 'FOC準備未完了（詳細参照）' : ''].filter(Boolean);
     const recovery = {
       UPRIGHT_REQUIRED: '直立範囲への進入待ち', ANGLE_OUTSIDE_2_DEG: '姿勢が±2°の範囲外',
       RECOVERED: '転倒から復帰完了',
       EXPLICIT_STOP: '明示停止・復帰解除', HEALTH_FAULT: '異常のため復帰解除', RESTART_REJECTED: '復帰開始を拒否'
     };
-    view.el('health').textContent = current ? MACHINE_NAMES[s.state] || '状態不明' : '更新停止／不明';
+    view.el('health').textContent = current ? MACHINE_NAMES[s.state] || '状態不明' : '通信停止・最終受信時の情報';
+    renderHealthDiagnostics(view, s, current);
     view.el('recovery-details').textContent = `${recovery[s.recovery] || s.recovery || '記録なし'}` +
       (names.length ? ` / ${names.join('・')}` : '');
     renderRecoveryChecks(view, s, current, valid);
@@ -67,7 +68,7 @@ function renderDashboardStatus(view) {
     };
     view.el('calibration').textContent = `校正: ${current ? calibration[s.calibration] || s.calibration || '未取得' : '更新停止／不明'}`;
     view.el('stop-history').textContent = `最新停止履歴: ${s.stop_reason} @ ${s.stop_ms} ms / 起動:${s.startup_reason}`;
-    view.el('measurement').textContent = `${valid ? '姿勢測定更新中' : '測定更新停止'}: ` +
+    view.el('measurement').textContent = `${!current ? '測定状態不明（通信停止・最終受信時の情報）' : valid ? '姿勢測定更新中' : '測定更新停止'}: ` +
       `${!current ? '診断配信停止／通信更新停止' : IMU_REASONS[s.imu_reason] || s.imu_reason}` +
       `${s.imu_reason === 'IMU_I2C_FAILED' ? `（tx=${s.imu_tx} rx=${s.imu_rx}/14）` : ''}` +
       ` / 実測 ${s.imu_ms} ms・#${s.imu_seq} / 基準角:${s.reference_valid ? '有効な設定値' : '未確定の設定値'}`;

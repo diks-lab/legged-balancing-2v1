@@ -309,6 +309,14 @@ void start(float sign){
   assert(speed_direct_control==0); // preserve the old tilt-only drive profile
 }
 int main(){
+  health_diagnostics=diagnostic::HealthDiagnostics{};
+  gateRightSensorFault();
+  diagnostic::Snapshot first_health;copyHealthReport(first_health);
+  assert(first_health.health.stages[diagnostic::RightSensor]==diagnostic::Failed);
+  assert(!strcmp(first_health.health.first,"RIGHT_SENSOR"));
+  firstHealthFault("IMU_I2C_FAILED");copyHealthReport(first_health);
+  assert(!strcmp(first_health.health.first,"RIGHT_SENSOR"));
+  health_diagnostics=diagnostic::HealthDiagnostics{};
   // Measured forward rotation: right shaft decreases, left increases.
   static_assert(kRightForwardSign==-1 && kLeftForwardSign==1);
   static_assert(m1_direction==-0.5f && m2_direction==0.5f);

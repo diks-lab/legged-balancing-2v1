@@ -1,3 +1,5 @@
+> 異常理由の詳細表示・最新のRAM内訳は [health-diagnostics.md](health-diagnostics.md) を参照。以下はDLPF比較追加時の記録。
+
 # MPU6050内部DLPFの比較
 
 強い振動は未解決。ビルド・ホスト試験・模擬WebSocketの成功は、実機の

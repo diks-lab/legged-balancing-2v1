@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include "GyroVibration.h"
+#include "HealthDiagnostics.h"
 namespace diagnostic {
 constexpr unsigned FieldCount=32;
 constexpr uint32_t PermanentMask=(1u<<0)|(1u<<1)|(1u<<14)|(1u<<15);
@@ -26,6 +27,7 @@ struct Snapshot {
  uint8_t imu_reason=1,state=0,imu_tx=255,imu_rx=0,recovery_checks=0;
  char calibration[32]="NOT_LOADED",recovery[32]="NONE";
  char startup_reason[32]="WEB_WAIT",right_error[24]="",left_error[24]="";
+ HealthReport health;
  GyroWindow gyro_window;
  uint8_t imu_config=255;
  float values[FieldCount]{};
@@ -88,6 +90,10 @@ inline bool sample(char*dest,size_t capacity,const Snapshot&s,const char*boot,ui
  Json j(dest,capacity);j.add("{\"type\":\"%s\",\"boot_id\":\"%s\",\"subscription_id\":%lu,\"seq\":%lu,\"source_seq\":%lu,\"sample_ms\":%lu,\"foc_capture_us\":%lu,\"age_ms\":%lu,\"dropped\":%lu,\"stop_ms\":%lu,\"stop_reason\":",mask?"sample":"status",boot,(unsigned long)generation,(unsigned long)seq,(unsigned long)s.source_seq,(unsigned long)s.sample_ms,(unsigned long)s.foc_capture_us,(unsigned long)(now-s.sample_ms),(unsigned long)dropped,(unsigned long)s.stop_ms);j.string(s.stop_reason);
  j.add(",\"imu_ms\":%lu,\"imu_seq\":%lu,\"imu_valid\":%s,\"imu_reason\":\"%s\",\"reference_valid\":%s,\"state\":\"%s\",\"startup_reason\":",(unsigned long)s.imu_ms,(unsigned long)s.imu_seq,s.imu_valid?"true":"false",imuReason(s.imu_reason),s.reference_valid?"true":"false",stateName(s.state));
  j.string(s.startup_reason);j.add(",\"calibration\":");j.string(s.calibration);j.add(",\"recovery\":");j.string(s.recovery);j.add(",\"recovery_checks\":%u",unsigned(s.recovery_checks));j.add(",\"imu_tx\":%u,\"imu_rx\":%u",unsigned(s.imu_tx),unsigned(s.imu_rx));j.add(",\"command_ms\":%lu,\"command_valid\":%s",(unsigned long)s.command_ms,s.command_valid?"true":"false");j.add(",\"right_error\":");j.string(s.right_error);j.add(",\"left_error\":");j.string(s.left_error);
+ const auto&h=s.health;const auto&m=h.mpu;
+ j.add(",\"diagnosis\":[%lu,",(unsigned long)h.first_ms);j.string(h.first);
+ for(auto stage:h.stages)j.add(",%u",unsigned(stage));
+ j.add(",%u,%u,%u,%u,%u,%u,%d,%d,%d,%d,%u]",unsigned(h.barrier),unsigned(h.foc_reason[0]),unsigned(h.foc_reason[1]),unsigned(m.failure),unsigned(m.reg),unsigned(m.expected),int(m.actual),int(m.tx),int(m.rx),int(m.read),unsigned(h.imu_failure));
  if(mask&(1u<<3)) {
   const auto&w=s.gyro_window;
   j.add(",\"gyro_window\":[%u,%lu,%lu,%lu,%lu,%lu,%lu,",unsigned(s.imu_config),(unsigned long)w.end_ms,(unsigned long)w.duration_us,(unsigned long)w.count,(unsigned long)w.invalid,(unsigned long)w.min_dt_us,(unsigned long)w.max_dt_us);

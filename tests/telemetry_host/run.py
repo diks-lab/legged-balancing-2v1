@@ -72,6 +72,11 @@ int main(){
  // All fields fit the single frame even with worst finite float text and escaped stop reason.
  {diagnostic::Snapshot all;for(auto&v:all.values)v=3.4028234e38f;memset(all.stop_reason,'\\',63);all.stop_reason[63]=0;memset(all.startup_reason,'R',31);all.startup_reason[31]=0;memset(all.right_error,'R',23);all.right_error[23]=0;memset(all.left_error,'L',23);all.left_error[23]=0;all.imu_ms=all.imu_seq=all.command_ms=UINT32_MAX;all.imu_reason=10;all.state=7;
   all.imu_valid=true;all.gyro_window={UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,3.4028234e38f,3.4028234e38f};all.imu_config=255;
+  all.health.first_ms=UINT32_MAX;strcpy(all.health.first,"IMU_CALIBRATION_FAILED");
+  for(auto&state:all.health.stages)state=diagnostic::Blocked;
+  all.health.barrier=18;all.health.foc_reason[0]=all.health.foc_reason[1]=9;
+  all.health.imu_failure=6;all.health.mpu.failure=imu_config::Failure::Mismatch;
+  all.health.mpu.reg=0x1b;all.health.mpu.expected=8;all.health.mpu.actual=all.health.mpu.read=255;all.health.mpu.tx=5;all.health.mpu.rx=0;
   char buffer[2048];assert(diagnostic::sample(buffer,sizeof(buffer),all,"0123456789abcdef",UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX,UINT32_MAX));
   const char* start=strstr(buffer,"\"gyro_window\":");assert(start);const char* end=strchr(start,']');assert(end&&size_t(end-start+2)<=128);
   std::string request="{\"type\":\"subscribe\",\"request_id\":9,\"period_ms\":50,\"fields\":[";

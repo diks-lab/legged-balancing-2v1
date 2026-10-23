@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'status.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'diagnosis.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
@@ -73,6 +73,15 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert((await page.locator('#gyro-window').textContent()).includes('無効'));
       await page.evaluate(() => window.sample({ gyro_window: [3, 200, 200000, 101, 0, 1800, 2200, 1, 2], imu_valid: false }));
       assert((await page.locator('#gyro-window').textContent()).includes('更新停止'));
+      await page.evaluate(() => window.sample({ state: 'STARTUP_FAILED', imu_valid: false,
+        imu_reason: 'NOT_INITIALIZED', startup_reason: 'IMU_CONFIG_FAILED', disabled: true,
+        diagnosis: [100, 'IMU_CONFIG_FAILED', 3, 2, 2, 4, 4, 5, 0, 0, 4, 26, 3, -1, 0, 0, -1, 2] }));
+      assert((await page.locator('#health-diagnosis').textContent()).includes('右FOC 未実行：IMU設定確認失敗のため'));
+      assert((await page.locator('#health-diagnosis').textContent()).includes('受信長不足'));
+      await page.evaluate(() => window.sample({ state: 'STARTUP_FAILED', imu_valid: false,
+        imu_reason: 'LOOP_STALE', startup_reason: 'IMU_CONFIG_FAILED', disabled: true,
+        diagnosis: [100, 'IMU_CONFIG_FAILED', 3, 2, 2, 4, 4, 5, 0, 0, 4, 26, 3, -1, 0, 0, -1, 2] }));
+      assert((await page.locator('#health-diagnosis p').nth(1).textContent()).includes('IMU設定確認失敗 @ 100 ms'));
       await page.evaluate(() => { for (let i = 0; i < 1200; i++) window.sample(); });
       await page.click('#pause'); await page.click('#pause');
       assert(await page.evaluate(() => window.axisLabels.some(x => x.id === 'pose' && x.text === '30.0')));
@@ -160,6 +169,8 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert.equal(await page.evaluate(() => window.sent.length), stopped);
       await page.click('#start'); await page.evaluate(() => window.sample());
       await page.evaluate(() => window.peer.close());
+      assert((await page.locator('#health').textContent()).includes('通信停止・最終受信時の情報'));
+      assert((await page.locator('#health-diagnosis').textContent()).includes('現在状態は不明'));
       assert.equal(await page.locator('#right-reading').textContent(), '更新停止／不明');
       await page.click('#reconnect'); await page.waitForFunction(() => window.peer.readyState === 1);
       await page.evaluate(() => window.sample());
