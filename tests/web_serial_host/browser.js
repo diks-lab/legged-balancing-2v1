@@ -107,16 +107,27 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert(await page.evaluate(() => window.axisLabels.some(x => x.id === 'pose' && x.text === '-30.0')));
       await page.evaluate(() => window.sample({ values: { angle_deg: 42.25, reference_deg: -0.8,
         right_command_v: 0.35, left_command_v: -0.2 } }));
-      assert((await page.locator('#pose-value').textContent()).includes('▲ 上限超過 42.25'));
-      assert.equal(await page.locator('#left-reading').textContent(), '−0.20 V');
+      assert((await page.locator('#pose-value').textContent()).includes('▲ 上限超過 42.3'));
+      assert.equal(await page.locator('#left-reading').textContent(), '+0.20 V');
       assert.equal(await page.locator('#right-reading').textContent(), '+0.35 V');
       const arcs = await page.evaluate(() => window.arcCalls);
-      assert(arcs.some(x => x.id === 'left-meter' && x.args[5] === true));
+      assert(arcs.some(x => x.id === 'left-meter' && x.args[5] === false));
       assert(arcs.some(x => x.id === 'right-meter' && x.args[5] === false));
+      for (const angle of [-0.01, -48.94]) {
+        await page.evaluate(angle => window.sample({ values: { angle_deg: angle,
+          reference_deg: 0, left_command_v: -0.2, right_command_v: 0.2 } }), angle);
+        assert((await page.locator('#pose-value').textContent()).includes(angle < -30 ? '▼ 下限超過 -48.9°' : '姿勢角 0.0°'));
+        assert(!(await page.locator('#condition-upright').textContent()).includes('-0.0'));
+        assert((await page.locator('#measurement').textContent()).includes(String(angle)));
+      }
       for (const v of [0, 1, -1, 1.5, -1.5]) {
         await page.evaluate(v => window.sample({ values: { angle_deg: -42, reference_deg: -0.8,
           left_command_v: v, right_command_v: v } }), v);
         assert((await page.locator('#pose-value').textContent()).includes('▼ 下限超過'));
+        assert.equal(await page.locator('#left-reading').getAttribute('data-state'),
+          v === 0 ? 'zero' : v > 0 ? 'negative' : 'positive');
+        assert.equal(await page.locator('#right-reading').getAttribute('data-state'),
+          v === 0 ? 'zero' : v > 0 ? 'positive' : 'negative');
         if (Math.abs(v) > 1) assert((await page.locator('#left-limit').textContent()).includes('超過'));
       }
       await page.evaluate(() => window.sample({ disabled: true }));
@@ -134,7 +145,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.sample({ state: 'AUTO_WAIT', disabled: true, recovery_checks: 14,
         reference_valid: true, values: { angle_deg: 15, reference_deg: 0, left_command_v: 0, right_command_v: 0 } }));
       assert((await page.locator('#health').textContent()).includes('起立待ち'));
-      assert((await page.locator('#pose-value').textContent()).includes('15.00'));
+      assert((await page.locator('#pose-value').textContent()).includes('15.0°'));
       assert.equal(await page.locator('#right-reading').textContent(), '遮断');
       assert.equal(await page.locator('#condition-upright').getAttribute('data-ok'), 'false');
       // Fixed attitude scale survives auxiliary autoscale.
@@ -169,7 +180,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         values: { angle_deg: 12, reference_deg: -0.8, left_command_v: 0.3, right_command_v: -0.4 } }));
       assert.equal(await page.locator('#pose').evaluate(c => c.toDataURL()), frozen);
       assert((await page.locator('#health').textContent()).includes('転倒停止'));
-      assert.equal(await page.locator('#left-reading').textContent(), '+0.30 V');
+      assert.equal(await page.locator('#left-reading').textContent(), '−0.30 V');
       await page.click('#pause');
       // All optional fields off leaves permanent attitude/output streaming.
       const beforeClear = await page.evaluate(() => {
@@ -221,7 +232,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.sample({ state: 'FALL_RECOVERY_WAIT', recovery_checks: 14,
         values: { angle_deg: 2.01, reference_deg: 0 } }));
       assert.equal(await page.locator('#condition-upright').getAttribute('data-ok'), 'false');
-      assert((await page.locator('#condition-upright').textContent()).includes('× 2.01° / ±2°'));
+      assert((await page.locator('#condition-upright').textContent()).includes('× 2.0° / ±2°'));
       for (const key of ['imu', 'wheels', 'foc']) {
         assert.equal(await page.locator(`#condition-${key}`).getAttribute('data-ok'), 'true');
         assert((await page.locator(`#condition-${key}`).textContent()).includes('○'));

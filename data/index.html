@@ -25,10 +25,10 @@
           <div class="pose-canvas"><canvas id="pose" aria-label="姿勢角と基準角、±30度固定、中央0度"></canvas></div>
           <div id="pose-legend"></div>
         </div>
-        <div class="meters" aria-label="左右の実際の指令電圧">
+        <div class="meters" aria-label="左右出力の方向統一表示">
           <section class="meter">
             <h2>左出力</h2>
-            <div class="meter-body"><canvas id="left-meter" aria-label="左指令電圧、真上0V"></canvas><strong id="left-reading">更新停止／不明</strong></div>
+            <div class="meter-body"><canvas id="left-meter" aria-label="左指令電圧の符号反転表示、真上0V"></canvas><strong id="left-reading">更新停止／不明</strong></div>
             <p id="left-limit">指令電圧・±1 V＝半周</p>
           </section>
           <section class="meter">
@@ -36,6 +36,7 @@
             <div class="meter-body"><canvas id="right-meter" aria-label="右指令電圧、真上0V"></canvas><strong id="right-reading">更新停止／不明</strong></div>
             <p id="right-limit">指令電圧・±1 V＝半周</p>
           </section>
+          <p class="meter-note">左右表示は向きを統一。左は実指令の符号を反転</p>
         </div>
       </section>
       <section id="auxiliary">
@@ -74,21 +75,21 @@
         <p id="measurement">測定更新：未取得</p>
         <p id="recovery-details">復帰詳細：未取得</p>
         <p id="stop-history">最新停止履歴：未取得</p>
-        <p>再校正は磁石・モーター・センサー・相配線変更時のみ。脚・外装だけの変更では不要です。
+        <p>再校正は磁石・モーター・センサー・相配線変更時のみ。
           PS4等で停止後、機体を保持してください。校正中は車輪が動きます。完了後は自動倒立しません。</p>
         <button id="calibrate">明示校正（車輪が動きます）</button>
         <button id="calibrate-abort">校正中断</button>
         <p id="calibration-action" role="status"></p>
         <p>1クライアント・20 Hz、ブラウザー履歴60秒／最大1200点。
-          配信開始／停止は診断通信だけの操作です。表示一時停止中も受信・履歴・異常表示とメーターは更新。
+          配信開始／停止は診断通信だけの操作です。表示一時停止中も受信・履歴・異常・メーターは更新。
           未接続・配信停止・欠落中の過去履歴は復元できません。</p>
         <p>姿勢角は既存相補フィルター後のAngleY。実測時刻imu_ms／更新番号imu_seqを追跡し、
           測定停止時は線を切ります。基準角は設定値で、走行目標傾斜と別です。
           ±30°は表示範囲で、倒立開始／転倒判定の閾値ではありません。</p>
-        <p>メーターは制限・旋回・安全判定後のmove直前の左右指令電圧です。
+        <p>メーターは安全判定後・move直前の指令。左のみ符号反転。補助グラフ・CSV・通信は元符号。
           真上0 V、正は青・時計回り、負は赤紫・反時計回り。±1 Vで半周。
           超過時も実数値と警告を表示。トルク・電流・FOC実出力とは別です。
-          通信／配信停止、250 msを超える古いスナップショット、無効値を現在出力として表示しません。</p>
+          通信／配信停止・250 ms超・無効値は現在出力として表示しません。</p>
         <p>補助グラフは単位別の独立軸。異なる単位の線の交差は同じ数値を意味しません。
           通常の最低範囲はdeg±20、deg/s±100、V±1、rad/s±6。姿勢専用軸は自動スケール対象外。
           無効／未使用制御値はnull。表示用フィルターなし。</p>
@@ -97,8 +98,8 @@
           平均速度は制御が実際に選んだ通常LPF後／PS4速度窓で、再度2で割りません。
           FOC q電圧はloopFOC後・同周期move前のキャッシュ（foc_capture_us）。指令と取得時点が異なります。</p>
         <p>sample_msは制御状態コピー時刻で、IMU実測時刻と別です。
-          メモリーは通信タスクの送信準備時。凡例は表示だけを切り替え、配信選択と別。
-          表示一時停止の履歴も60秒で消え、古い点は復元しません。</p>
+          メモリーは通信タスクの送信準備時。凡例は表示だけを切替。
+          一時停止中も履歴上限は60秒。</p>
         <button id="save">直近60秒をCSV保存</button>
       </div>
     </details>

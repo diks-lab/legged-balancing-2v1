@@ -1,4 +1,9 @@
 'use strict';
+// Presentation only: preserve the original sample and judgement precision.
+function formatAttitude(value) {
+  const text = value.toFixed(1);
+  return text === '-0.0' ? '0.0' : text;
+}
 const MACHINE_NAMES = {
   INITIALIZING: '初期化中', READY_WAIT: '開始待機', BALANCE_WAIT: '開始姿勢の安定待ち',
   AUTO_WAIT: '起立待ち', BALANCING: '倒立中', EXPLICIT_STOP: '明示停止',
@@ -33,7 +38,7 @@ function renderRecoveryChecks(view, sample, current, imuValid) {
     let text = known ? ok ? ' ○' : ' ×' : ' ？';
     if (key === 'upright') {
       const angle = sample.values.angle_deg;
-      text += ` ${imuValid && Number.isFinite(angle) ? angle.toFixed(2) + '°' : '不明'} / ±2°`;
+      text += ` ${imuValid && Number.isFinite(angle) ? formatAttitude(angle) + '°' : '不明'} / ±2°`;
     }
     node.lastChild.textContent = text;
   }
@@ -71,11 +76,12 @@ function renderDashboardStatus(view) {
     view.el('measurement').textContent = `${!current ? '測定状態不明（通信停止・最終受信時の情報）' : valid ? '姿勢測定更新中' : '測定更新停止'}: ` +
       `${!current ? '診断配信停止／通信更新停止' : IMU_REASONS[s.imu_reason] || s.imu_reason}` +
       `${s.imu_reason === 'IMU_I2C_FAILED' ? `（tx=${s.imu_tx} rx=${s.imu_rx}/14）` : ''}` +
+      ` / 姿勢角（元データ）:${Number.isFinite(s.values.angle_deg) ? s.values.angle_deg + '°' : '不明'}` +
       ` / 実測 ${s.imu_ms} ms・#${s.imu_seq} / 基準角:${s.reference_valid ? '有効な設定値' : '未確定の設定値'}`;
     renderGyroWindow(view, s, valid);
     const angle = s.values.angle_deg;
     view.el('pose-value').textContent = valid && Number.isFinite(angle)
-      ? `${angle > 30 ? '▲ 上限超過 ' : angle < -30 ? '▼ 下限超過 ' : '姿勢角 '}${Math.abs(angle) > 30 ? String(angle) : angle.toFixed(2)}°`
+      ? `${angle > 30 ? '▲ 上限超過 ' : angle < -30 ? '▼ 下限超過 ' : '姿勢角 '}${formatAttitude(angle)}°`
       : '姿勢角：測定更新停止／不明';
 }
 

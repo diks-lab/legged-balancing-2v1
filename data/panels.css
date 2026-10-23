@@ -42,3 +42,5 @@ nav { flex: none; margin: 0; }
 .condition[data-ok='true'] { color: #075923; background: #d7f4df; border-color: #24834a; }
 .condition[data-ok='false'] { color: #6d2830; background: #f3e8e9; }
 .condition[data-ok='unknown'] { color: #556170; }
+
+.meter-note { grid-column: 1 / -1; margin: 0; text-align: center; font-size: 14px; }

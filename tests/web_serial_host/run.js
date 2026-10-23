@@ -37,11 +37,18 @@ vm.runInContext(`
   const parts = signalSegments(h.rows, 'x');
   if (JSON.stringify(parts.map(p => p.length)) !== '[2,1,1,1,1,1]') throw Error('gaps');
   if (SIGNALS.length !== 32 || new Set(COLORS).size !== 32) throw Error('fields/colors');
+  for (const [v, text] of [[-0.01, '0.0'], [-0, '0.0'], [-48.94, '-48.9'], [42.25, '42.3']]) {
+    if (formatAttitude(v) !== text) throw Error('attitude presentation');
+  }
   const output = value => ({ type: 'sample', age_ms: 0, disabled: false,
     command_valid: true, values: { left_command_v: value } });
   for (const v of [0, 0.35, -0.2, 1, -1, 1.5, -1.5]) {
-    const r = outputReading(output(v), 'left_command_v', true);
-    if (r.arc !== Math.min(Math.abs(v), 1) * Math.PI || r.ccw !== (v < 0) ||
+    const raw = output(v);
+    raw.values.right_command_v = v;
+    const r = outputReading(raw, 'left_command_v', true);
+    if (r.value !== -v || raw.values.left_command_v !== v ||
+      outputReading(raw, 'right_command_v', true).value !== v) throw Error('presentation only');
+    if (r.arc !== Math.min(Math.abs(v), 1) * Math.PI || r.ccw !== (-v < 0) ||
       r.over !== (Math.abs(v) > 1)) throw Error('arc');
   }
   if (outputReading({ ...output(0.2), disabled: true }, 'left_command_v', true).text !== '遮断') throw Error('disabled');

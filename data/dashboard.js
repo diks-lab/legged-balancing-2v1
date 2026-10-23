@@ -4,7 +4,8 @@ function outputReading(sample, key, live, elapsed = 0) {
   if (sample.disabled) return { state: 'disabled', text: '遮断' };
   if (!sample.command_valid || ((sample.sample_ms - sample.command_ms) >>> 0) +
     sample.age_ms + elapsed > 250 || !Number.isFinite(sample.values[key])) return { state: 'unknown', text: '更新停止／不明' };
-  const value = sample.values[key];
+  // Only the left donut presentation is reversed; never modify the sample.
+  const value = sample.values[key] * (key === 'left_command_v' ? -1 : 1);
   const number = Math.abs(value) > 0 && Math.abs(value) < 0.005
     ? Math.abs(value).toPrecision(2) : Math.abs(value) > 1
       ? String(Math.abs(value)) : Math.abs(value).toFixed(2);
