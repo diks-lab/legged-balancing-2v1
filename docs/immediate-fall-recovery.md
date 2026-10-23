@@ -1,3 +1,5 @@
+> 転倒停止中の測定継続・IMU/車輪/FOCの独立判定は [fall-stop-measurements.md](fall-stop-measurements.md) を参照。
+
 # 転倒停止から直立範囲への進入周期で復帰
 
 > 通常起動は [起立待ち](upright-start-wait.md) に更新。初期化後すぐの範囲外駆動は行わず、

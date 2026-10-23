@@ -82,6 +82,25 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         imu_reason: 'LOOP_STALE', startup_reason: 'IMU_CONFIG_FAILED', disabled: true,
         diagnosis: [100, 'IMU_CONFIG_FAILED', 3, 2, 2, 4, 4, 5, 0, 0, 4, 26, 3, -1, 0, 0, -1, 2] }));
       assert((await page.locator('#health-diagnosis p').nth(1).textContent()).includes('IMU設定確認失敗 @ 100 ms'));
+      const initialized = [0, '', 2, 2, 2, 2, 2, 0, 0, 0, 1, 28, 0, 0, 0, 1, 0, 0];
+      await page.evaluate(diagnosis => window.sample({ state: 'FALL_RECOVERY_WAIT',
+        recovery: 'UPRIGHT_REQUIRED', recovery_checks: 14, disabled: true,
+        stop_reason: 'TILT_STOP', imu_valid: true, imu_reason: 'OK', diagnosis,
+        values: { angle_deg: 15, reference_deg: 0, left_command_v: 0, right_command_v: 0 } }), initialized);
+      for (const key of ['imu', 'wheels', 'foc']) {
+        assert.equal(await page.locator(`#condition-${key}`).getAttribute('data-ok'), 'true');
+      }
+      assert.equal(await page.locator('#left-reading').textContent(), '遮断');
+      await page.evaluate(diagnosis => window.sample({ state: 'BALANCING', recovery: 'RECOVERED',
+        recovery_checks: 15, disabled: false, imu_valid: true, imu_reason: 'OK', diagnosis,
+        values: { angle_deg: 1.9, reference_deg: 0, left_command_v: 0.1, right_command_v: -0.1 } }), initialized);
+      assert.equal(await page.locator('#health').textContent(), '倒立中');
+      const wheelFault = [...initialized]; wheelFault[0] = 200; wheelFault[1] = 'RIGHT_SENSOR'; wheelFault[3] = 3;
+      await page.evaluate(diagnosis => window.sample({ state: 'FAULT', recovery_checks: 11,
+        disabled: true, faults: 1, imu_valid: true, imu_reason: 'OK', right_error: 'I2C_ADDRESS/NACK', diagnosis }), wheelFault);
+      assert.equal(await page.locator('#condition-wheels').getAttribute('data-ok'), 'false');
+      for (const key of ['imu', 'foc']) assert.equal(await page.locator(`#condition-${key}`).getAttribute('data-ok'), 'true');
+      assert((await page.locator('#health-diagnosis').textContent()).includes('右車輪センサー 実行して失敗：I2C_ADDRESS/NACK'));
       await page.evaluate(() => { for (let i = 0; i < 1200; i++) window.sample(); });
       await page.click('#pause'); await page.click('#pause');
       assert(await page.evaluate(() => window.axisLabels.some(x => x.id === 'pose' && x.text === '30.0')));

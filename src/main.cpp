@@ -771,6 +771,7 @@ void updateBalanceWait();
 bool bootAutoMeasurementsReady();
 void serviceBootAutoStart();
 void serviceFallAutoRecovery();
+void updateStoppedMeasurements();
 uint8_t fallRecoveryChecks();
 void publishDiagnosticSnapshot(bool force);
 void requestWheelCalibration();
@@ -1242,7 +1243,7 @@ void loop() {
   if (!test_system_ready) {
     gateWheelOutputsOff();
     handleSerialCommand();
-    if(diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()&&wheelSensorsOK()){
+    if(diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()){
       mpu6050.update();LQR_angle=mpu6050.getAngleY();LQR_gyro=mpu6050.getGyroY();noteImuMeasurement();
     }
     serviceHttpRequests();
@@ -1254,26 +1255,31 @@ void loop() {
   const uint32_t loop_start_us = micros();
 
   uint32_t section_start_us = micros();
-  motor1.loopFOC();
-  if (stopOnWheelFault()) return;
-  const uint32_t motor1_loopfoc_us =
-      micros() - section_start_us;
-
-  section_start_us = micros();
-  motor2.loopFOC();
-  if (stopOnWheelFault()) return;
-  const uint32_t motor2_loopfoc_us =
-      micros() - section_start_us;
+  const bool stopped_measurement = emergency_stop_active;
+  uint32_t motor1_loopfoc_us=0,motor2_loopfoc_us=0;
+  if(stopped_measurement){
+    // EN remains LOW. Measure without depending on a disabled motor's FOC path.
+    updateStoppedMeasurements();
+    if(stopOnWheelFault()){serviceHttpRequests();return;}
+  } else {
+    motor1.loopFOC();
+    if (stopOnWheelFault()){serviceHttpRequests();return;}
+    motor1_loopfoc_us=micros()-section_start_us;
+    section_start_us=micros();
+    motor2.loopFOC();
+    if (stopOnWheelFault()){serviceHttpRequests();return;}
+    motor2_loopfoc_us=micros()-section_start_us;
+  }
   // Preserve the values actually used by FOC before control/stop code can
   // clear current_sp or voltage.q. Observation only, no additional I2C.
   captureFocOutputSnapshot();
 
   section_start_us = micros();
-  mpu6050.update();
-  const uint32_t mpu_update_us =
+  if(!stopped_measurement)mpu6050.update();
+  const uint32_t mpu_update_us = stopped_measurement ? diagnostic_imu_us :
       micros() - section_start_us;
 
-  updateLqrState();
+  if(!stopped_measurement)updateLqrState();
   serviceBootAutoStart();
   serviceFallAutoRecovery();
 
@@ -1790,6 +1796,18 @@ void updateLqrState() {
   LQR_speed = motor1.shaft_velocity * m1_direction +
               motor2.shaft_velocity * m2_direction;
   lqr_simplefoc_speed_read_ms = millis();
+}
+
+void updateStoppedMeasurements() {
+  gateWheelOutputsOff();
+  if(sensor1.ready&&!sensor1.fault)sensor1.update();
+  if(sensor2.ready&&!sensor2.fault)sensor2.update();
+  // A wheel fault does not by itself invalidate an independently successful IMU read.
+  if(diagnostic_imu_initialized.load()&&!diagnostic_imu_calibrating.load()){
+    const uint32_t start=micros();
+    mpu6050.update();diagnostic_imu_us=micros()-start;
+    updateLqrState(); // Existing cached wheel values, no extra wheel I2C reads.
+  }
 }
 
 void updateWheelVelocityDiagnostic() {
@@ -3635,7 +3653,7 @@ uint8_t fallRecoveryChecks(){
       diagnostic_imu_io_seen&&diagnostic_imu_io_ok&&diagnostic_imu_seq&&diagnostic_imu_finite&&
       uint32_t(millis()-diagnostic_imu_ms)<=250&&isfinite(LQR_angle)&&isfinite(LQR_gyro);
   const bool wheels=wheelSensorsOK()&&isfinite(LQR_distance)&&isfinite(LQR_speed);
-  const bool foc=test_system_ready&&startup_foc_ready.load()&&calibration_loaded&&
+  const bool foc=startup_foc_ready.load()&&calibration_loaded&&
       !calibration_active.load()&&!foc_initialization_failed&&driver1_initialized&&driver2_initialized&&
       motor1.motor_status==FOCMotorStatus::motor_ready&&motor2.motor_status==FOCMotorStatus::motor_ready;
   return (imu&&abs(LQR_angle)<=kBalanceWaitAngleLimitDeg?1u:0u)|
@@ -3644,13 +3662,29 @@ uint8_t fallRecoveryChecks(){
 void serviceFallAutoRecovery(){
   if(!fall_auto_recovery.pending)return;
   if(strcmp(last_stop_reason,"TILT_STOP")){fall_auto_recovery.cancel();return;}
+  // A disabled driver/motor is not a failed FOC calibration.
+  if(startup_foc_ready.load()&&!calibration_active.load()){
+    portENTER_CRITICAL(&health_diagnostics_lock);
+    if(motor1.motor_status!=FOCMotorStatus::motor_ready){
+      health_diagnostics.first("RIGHT_FOC_STATE",millis());
+      health_diagnostics.report.stages[diagnostic::RightFoc]=diagnostic::Failed;
+      health_diagnostics.report.foc_reason[0]=10;
+    }
+    if(motor2.motor_status!=FOCMotorStatus::motor_ready){
+      health_diagnostics.first("LEFT_FOC_STATE",millis());
+      health_diagnostics.report.stages[diagnostic::LeftFoc]=diagnostic::Failed;
+      health_diagnostics.report.foc_reason[1]=10;
+    }
+    portEXIT_CRITICAL(&health_diagnostics_lock);
+  }
   const uint8_t checks=fallRecoveryChecks();
-  if(!fall_auto_recovery.tick((checks&14u)==14u,(checks&1u)!=0))return;
+  if(!fall_auto_recovery.tick(test_system_ready&&(checks&14u)==14u,(checks&1u)!=0))return;
   setBothTargetsToZero();emergency_stop_active=false;
-  driver1.enable();driver2.enable();
   if(!startBalanceTest(true)){
     disableBothDrivers();emergency_stop_active=true;fall_auto_recovery.reason="RESTART_REJECTED";
   } else {
+    if(!motor1.enabled)motor1.enable();else driver1.enable();
+    if(!motor2.enabled)motor2.enable();else driver2.enable();
     fall_auto_recovery.reason="RECOVERED";
     Serial.println("FALL RECOVERY: BALANCING; reference=0 deg; new position origin.");
   }
@@ -4400,14 +4434,14 @@ void publishDiagnosticSnapshot(bool force){
   diagnostic::Snapshot s;s.sample_ms=now;s.source_seq=++seq;s.foc_capture_us=last_foc_output.capture_us;
   s.stop_ms=diagnostic_stop_ms;memcpy(s.stop_reason,diagnostic_stop_reason,sizeof(s.stop_reason));
   s.running=lqr_direction_test_armed||balance_wait_active||polarity_test_active;
-  s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=test_system_ready;
+  s.disabled=emergency_stop_active||!last_foc_output.right_driver_en||!last_foc_output.left_driver_en;s.ps4=ps4_was_connected;s.foc_ready=(fallRecoveryChecks()&8u)!=0;
   s.faults=(sensor1.fault?1u:0u)|(sensor2.fault?2u:0u)|(foc_initialization_failed?4u:0u);
   s.gyro_window=gyro_vibration.latest;s.imu_config=imu_registers.config;
   s.imu_ms=diagnostic_imu_ms;s.imu_seq=diagnostic_imu_seq;
   s.imu_tx=diagnostic_imu_tx;s.imu_rx=diagnostic_imu_rx;
   s.imu_reason=!diagnostic_imu_initialized.load()?1:
       diagnostic_imu_calibrating.load()?2:diagnostic_calibration_done.load()&&!diagnostic_calibration_ok.load()?10:diagnostic_imu_io_seen&&!diagnostic_imu_io_ok?9:!diagnostic_imu_seq?3:
-      sensor1.fault?(sensor2.fault?6:4):sensor2.fault?5:!diagnostic_imu_finite?7:0;
+      !diagnostic_imu_finite?7:0;
   s.reference_valid=lqr_zero_set||(test_system_ready&&boot_auto_start.pending());
   s.recovery_checks=fallRecoveryChecks();
   snprintf(s.calibration,sizeof(s.calibration),"%s",calibration_status);

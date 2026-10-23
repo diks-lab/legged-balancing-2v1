@@ -179,6 +179,8 @@ struct DriveTestMotor {
   struct {float q=0,d=0;} voltage;
   float shaftAngle(){return shaft_angle;}
   float shaftVelocity(){return shaft_velocity;}
+  int enablePin=-1;
+  void enable(){enabled=1;if(enablePin>=0)digitalWrite(enablePin,HIGH);}
   void move(float v){target=current_sp=v;}
 };
 struct DriveTestDriver {
@@ -189,7 +191,10 @@ struct DriveTestDriver {
 };
 struct MPU6050 {
   explicit MPU6050(TwoWire&){}
-  float getAngleY(){return 0;} float getGyroY(){return 0;}
+  int updates=0;float angle=0,gyro=0;
+  std::function<void()> onUpdate;
+  void update(){++updates;if(onUpdate)onUpdate();}
+  float getAngleY(){return angle;} float getGyroY(){return gyro;}
 };
 unsigned long _micros(){return micros();}
 '''
@@ -214,8 +219,9 @@ prefix += source[bridge_start:bridge_end]
 prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void printHttpStartupMemory(const char*) {}')
 prefix += source[source.index('struct HttpResponseTransport {'):source.index('void serviceHttpFileResponse()')]
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
+prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -279,6 +285,7 @@ void setupCase(LqrTestMode mode=LqrTestMode::Full){
   test_system_ready=true; startup_foc_ready.store(true); emergency_stop_active=false;
   sensor1.fault=sensor2.fault=false;
   diagnostic_calibration_done.store(true);diagnostic_calibration_ok.store(true);
+  motor1.enablePin=motor1EnablePin;motor2.enablePin=motor2EnablePin;
   motor1.enabled=motor2.enabled=1;motor1.motor_status=motor2.motor_status=FOCMotorStatus::motor_ready;
   lqr_diagnostic_armed=true; lqr_direction_test_armed=true;
   LQR_angle=LQR_gyro=LQR_speed=LQR_distance=0;
@@ -914,6 +921,47 @@ int main(){
     stopForActualFall(br,bl);LQR_angle=boundary;recoverFrame(0);
     assert(lqr_direction_test_armed);
   }
+  // Real stopped measurement path: no FOC dependency, no hidden hold, no recalibration.
+  bootFixture();serviceBootAutoStart();stopForActualFall(br,bl);
+  health_diagnostics=diagnostic::HealthDiagnostics{};
+  for(auto&stage:health_diagnostics.report.stages)stage=diagnostic::Passed;
+  mpu6050.angle=15;mpu6050.gyro=20;mpu6050.onUpdate=[](){observeImuTransaction(0,14);};
+  motor1.enabled=motor2.enabled=0;
+  const auto savedCalibration=saved_wheel_calibration;
+  for(int i=0;i<100;++i){
+    nowMs+=10;const int r=I2Cone.requests,l=I2Ctwo.requests,m=mpu6050.updates;
+    updateStoppedMeasurements();serviceFallAutoRecovery();
+    assert(I2Cone.requests==r+1&&I2Ctwo.requests==l+1&&mpu6050.updates==m+1);
+    assert(!digitalRead(motor1EnablePin)&&!digitalRead(motor2EnablePin));
+    assert(test_system_ready&&startup_foc_ready.load()&&diagnostic_calibration_ok.load());
+    assert((fallRecoveryChecks()&14)==14&&fall_auto_recovery.pending);
+  }
+  assert(!memcmp(&savedCalibration,&saved_wheel_calibration,sizeof(savedCalibration)));
+  assert(health_diagnostics.report.first[0]==0);
+  for(auto stage:health_diagnostics.report.stages)assert(stage==diagnostic::Passed);
+  mpu6050.angle=1.9f;motor1.shaft_angle=-7;motor2.shaft_angle=7;
+  const auto stoppedEntryMs=millis();updateStoppedMeasurements();serviceFallAutoRecovery();
+  assert(millis()==stoppedEntryMs&&lqr_direction_test_armed&&motor1.enabled&&motor2.enabled);
+  assert(digitalRead(motor1EnablePin)&&digitalRead(motor2EnablePin));near(angle_zeropoint,0);near(distance_zeropoint,7);
+  // A real NACK cancels recovery and gates off. A healthy IMU stays independently valid.
+  for(int side=0;side<2;++side){
+    bootFixture();serviceBootAutoStart();stopForActualFall(br,bl);
+    health_diagnostics=diagnostic::HealthDiagnostics{};
+    mpu6050.angle=0;TwoWire&bus=side?I2Ctwo:I2Cone;bus.nack=2;
+    updateStoppedMeasurements();assert(stopOnWheelFault());publishDiagnosticSnapshot(true);
+    assert(!test_system_ready&&!fall_auto_recovery.pending&&diagnostic_latest.imu_valid&&diagnostic_latest.foc_ready);
+    assert(!strcmp(health_diagnostics.report.first,side?"LEFT_SENSOR":"RIGHT_SENSOR"));
+    assert(!strcmp(side?sensor2.error:sensor1.error,"I2C_ADDRESS/NACK"));
+    assert(!digitalRead(motor1EnablePin)&&!digitalRead(motor2EnablePin));bus.nack=0;
+    serviceFallAutoRecovery();assert(!lqr_direction_test_armed);
+  }
+  bootFixture();serviceBootAutoStart();stopForActualFall(br,bl);
+  mpu6050.onUpdate=[](){observeImuTransaction(2,0);};mpu6050.angle=0;
+  updateStoppedMeasurements();serviceFallAutoRecovery();publishDiagnosticSnapshot(true);
+  assert(!lqr_direction_test_armed&&!fall_auto_recovery.pending&&!diagnostic_latest.imu_valid);
+  assert(diagnostic_latest.imu_tx==2&&diagnostic_latest.imu_rx==0);
+  assert(!digitalRead(motor1EnablePin)&&!digitalRead(motor2EnablePin));
+  mpu6050.onUpdate={};mpu6050.angle=mpu6050.gyro=0;diagnostic_imu_io_ok=diagnostic_imu_finite=true;
   // Traversing between samples never invents an unseen in-range measurement.
   stopForActualFall(br,bl);LQR_angle=2.1f;recoverFrame(0);
   LQR_angle=-2.1f;recoverFrame(0);assert(!lqr_direction_test_armed);
@@ -1038,7 +1086,10 @@ int main(){
   assert(diagnostic_latest.imu_ms==measurement_ms&&diagnostic_latest.imu_seq==measurement_seq);
   assert(std::isnan(diagnostic_latest.values[0]));
   sensor2.fault=true;nowMs+=50;publishDiagnosticSnapshot(false);
-  assert(diagnostic_latest.state==6&&diagnostic_latest.imu_reason==5);
+  assert(diagnostic_latest.state==6&&diagnostic_latest.imu_reason==8);
+  updateStoppedMeasurements();publishDiagnosticSnapshot(true);
+  assert(diagnostic_latest.state==6&&diagnostic_latest.imu_valid&&diagnostic_latest.imu_reason==0);
+  assert(diagnostic_latest.foc_ready&&(diagnostic_latest.recovery_checks&8));
   sensor2.fault=false;
   Serial.output.clear();printLqrStatus();
   assert(Serial.output.find("speed_control=0.000000")!=std::string::npos);

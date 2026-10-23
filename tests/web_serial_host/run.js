@@ -70,6 +70,7 @@ vm.runInContext(`
   }
   const unrun = [...failure.diagnosis]; unrun[2] = 0;
   if (!healthLines({ ...failure, diagnosis: unrun }).includes('IMU 未実行')) throw Error('not run');
+  if (!diagnosisName('RIGHT_FOC_STATE').includes('readyでない') || !FOC_FAILURES[10].includes('motor_status')) throw Error('FOC state detail');
   const failedFoc = [...failure.diagnosis]; failedFoc[5] = 3; failedFoc[8] = 5;
   if (!healthLines({ ...failure, diagnosis: failedFoc }).join(' / ').includes('右FOC 実行して失敗（タイムアウト）')) throw Error('real FOC failure');
   if (DEFAULTS.length !== 1 || PRESETS.position.length !== 8 || PRESETS.drive.length !== 10) throw Error('presets');

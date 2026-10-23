@@ -8,6 +8,7 @@ const DIAG_BARRIERS = [
   'Web等の必須初期化未完了', '校正中断', '校正値保存失敗'
 ];
 const DIAG_FIRST = {
+  RIGHT_FOC_STATE: '右FOC状態がreadyでない', LEFT_FOC_STATE: '左FOC状態がreadyでない',
   RIGHT_FOC_NOT_RUN: '右FOC前提不足（未実行）', LEFT_FOC_NOT_RUN: '左FOC前提不足（未実行）',
   FOC_ALIGNMENT_TIMEOUT: 'FOC監視タイムアウト（左右はFOC詳細参照）',
   WIFI_TIMEOUT: 'Wi-Fi接続タイムアウト', HTTP_LISTEN: 'HTTP待受開始失敗',
@@ -21,7 +22,7 @@ const MPU_FAILURES = ['未実行', '正常', '設定書込み失敗', 'レジス
   '受信長不足', 'read失敗', '設定不一致'];
 const FOC_FAILURES = ['詳細なし', 'センサー前提未成立', '保存校正なし',
   '監視タイマー未準備', '監視タイマー開始失敗', 'タイムアウト',
-  '車輪センサー異常', '校正中断', 'initFOC戻り値0', 'PP未合格'];
+  '車輪センサー異常', '校正中断', 'initFOC戻り値0', 'PP未合格', '初期化済みFOCのmotor_statusがreadyでない'];
 function diagnosisName(reason) {
   const codes = ['NONE', 'WHEEL_ALIGN_TIMER', 'WHEEL_SENSORS', 'RIGHT_AS5600',
     'MPU6050', 'IMU_CONFIG_FAILED', 'IMU_CALIBRATION_FAILED', 'CALIBRATION_REQUIRED',
