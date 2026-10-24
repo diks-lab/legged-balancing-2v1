@@ -83,11 +83,11 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         document.getElementById('details').open = true;
         const original = geometry();
         const node = document.getElementById('leg-blocker');
-        const sendLeg = (reason, height = 15, mode = 1, rx = null) => {
+        const sendLeg = (reason, height = 15, mode = 1, rx = null, position = null) => {
           window.sample();
           window.peer.onmessage({ data: JSON.stringify({
             type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
-            leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1, leg_rx: rx,
+            leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1, leg_rx: rx, leg_position: position,
             legs: [height, 0, 0, -48.9, 16, 14, 2034, 2055, 40, 30, reason, 3,
               reason === 1 || reason === 17 ? 0 : 1, [1, 8, 17].includes(reason) ? 0 : 1,
               0, reason === 1 ? 0 : 1, 4, 0, 27]
@@ -109,6 +109,12 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         const rx = ['target', 'id', 'length', 'status', 'checksum', 'raw'].map(key =>
           document.getElementById(`leg-rx-${key}`).textContent);
         const rxBlocker = node.textContent;
+        sendLeg(7, 16, 1, [53587, 8, 2, 56, 2, 8, 26, 8, 171, 0, 0, 0,
+          'FFFF010420F407DD', 'FFFF010420F407DD', 221, 1],
+          [1000, 0, 3, 3, [1002, 2009, 217, 7, 2009, 30.76923, 2010, 2061, false, 2061, 1892],
+            [1052, 2053, 5, 8, 2053, 14.835165, 2026, 2081, true, 2026, 2208]]);
+        const positionText = ['right', 'left', 'limits'].map(key => document.getElementById(`leg-position-${key}`).textContent);
+        const positionGeometry = geometry();
         // An unchanged status update must not rewrite text, attributes or elements.
         let mutations = 0;
         const observer = new MutationObserver(records => { mutations += records.length; });
@@ -121,7 +127,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         const closed = [...section.querySelectorAll('details')].every(e => !e.open);
         const overflow = rows.some(e => e.querySelector('dd').getBoundingClientRect().height > e.clientHeight);
         document.getElementById('details').open = false;
-        return { original, states, mutations, stale, sameNode, closed, overflow, rx, rxBlocker, rxGeometry };
+        return { original, states, mutations, stale, sameNode, closed, overflow, rx, rxBlocker, rxGeometry, positionText, positionGeometry };
       });
       for (const state of legResult.states) assert.deepEqual(state.geometry, legResult.original);
       assert(legResult.states[1].operation.includes('伸長'));
@@ -137,6 +143,12 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert(legResult.sameNode && legResult.closed && !legResult.overflow);
       assert.equal(legResult.mutations, 0);
       assert.deepEqual(legResult.rxGeometry, legResult.original);
+      assert.deepEqual(legResult.positionGeometry, legResult.original);
+      assert(legResult.positionText[0].includes('2009 tick') && legResult.positionText[0].includes('D9 07'));
+      assert(legResult.positionText[0].includes('30.769230%') && legResult.positionText[0].includes('2010～2061'));
+      assert(legResult.positionText[0].includes('操作範囲外・駆動拒否'));
+      assert(legResult.positionText[1].includes('操作範囲内'));
+      assert(legResult.positionText[2].includes('機械的可動限界：未設定'));
       assert(legResult.rxBlocker.includes('左：ID・状態・チェックサム'));
       assert(legResult.rx[1].includes('期待 0x02 ／ 取得 0x01'));
       assert(legResult.rx[3].includes('期待 0x00 ／ 取得 0x20'));

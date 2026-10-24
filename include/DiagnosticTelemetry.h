@@ -134,6 +134,22 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   (unsigned long)l.tx_frames,(unsigned long)l.tx_busy,(unsigned long)l.max_service_us);
  j.add(",\"leg_mode\":%u,\"leg_roll_confirmed\":%s,\"leg_roll_sign\":%d",unsigned(l.mode),
   leg::RollDirectionConfirmed?"true":"false",int(leg::ImuRollSign));
+ const auto&p=l.positions;
+ j.add(",\"leg_position\":[%lu,%u,%u,%u",(unsigned long)p.attempt_ms,
+  unsigned(p.read_only),unsigned(p.acquired),unsigned(p.current));
+ for(unsigned side=0;side<2;++side){
+  const bool right=side==0,valid=(p.acquired&(1u<<side))!=0;
+  const int16_t decoded=leg::decodePosition(p.word[side]);
+  const int home=leg::position(right,0),end=leg::position(right,30);
+  j.add(",[" );
+  if(valid)j.add("%lu,%u,%u,%u,%d,%.8g",(unsigned long)p.received_ms[side],unsigned(p.word[side]),
+   unsigned(p.word[side]&255),unsigned(p.word[side]>>8),int(decoded),double(leg::percent(right,decoded)));
+  else j.add("null,null,null,null,null,null");
+  j.add(",%d,%d,",int(fminf(home,end)),int(fmaxf(home,end)));
+  if(valid)j.add("%s",leg::inRange(right,decoded)?"true":"false");else j.add("null");
+  j.add(",%d,%d]",right?leg::RightHome:leg::LeftHome,right?leg::RightExtended:leg::LeftExtended);
+ }
+ j.add("]");
  const auto&r=l.rx_failure;
  j.add(",\"leg_rx\":");
  if(!r.issues)j.add("null");

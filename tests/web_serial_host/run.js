@@ -10,7 +10,8 @@ const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.strin
   legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
 });
 const legRxJson = process.env.LEG_RX_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_RX_JSON_OUTPUT, 'utf8') : null;
-const context = vm.createContext({ legReadyJson, legRxJson });
+const legPositionJson = process.env.LEG_POSITION_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_POSITION_JSON_OUTPUT, 'utf8') : null;
+const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson });
 for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
@@ -84,6 +85,22 @@ vm.runInContext(`
       throw Error('production receiver -> snapshot -> JSON -> Web mismatch');
     }
   }
+  if (legPositionJson) {
+    const position = legPositionPresentation(JSON.parse(legPositionJson).leg_position);
+    if (!position.right.includes('2009 tick') || !position.right.includes('D9 07') ||
+        !position.right.includes('30.769230%') || !position.right.includes('2010～2061') ||
+        !position.right.includes('操作範囲外・駆動拒否') || !position.left.includes('操作範囲内')) {
+      throw Error('real position response -> snapshot -> JSON -> UI');
+    }
+  }
+  const positionData = [100, 0, 3, 1,
+    [101, 0, 0, 0, 0, 1219.5266, 2010, 2061, false, 2061, 1892],
+    [50, 2053, 5, 8, 2053, 14.835165, 2026, 2081, true, 2026, 2208]];
+  const positionView = legPositionPresentation(positionData);
+  if (!positionView.right.includes('実位置 0 tick') || positionView.right.includes('未取得') ||
+      !positionView.left.includes('前回取得・今回未取得')) throw Error('zero/old position distinct');
+  positionData[2] = 0;
+  if (!legPositionPresentation(positionData).right.includes('未取得')) throw Error('not acquired position');
   const rxFailure = [53587, 8, 2, 56, 2, 8, 26, 8, 171, 0, 0, 0,
     'FFFF010420F407DD', 'FFFF010420F407DD', 221, 1];
   const rxView = legReplyPresentation(rxFailure);

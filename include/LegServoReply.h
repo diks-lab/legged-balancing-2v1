@@ -2,6 +2,11 @@
 #include <stdint.h>
 #include <string.h>
 namespace leg {
+// SMS_STS::ReadPos uses bit 15 as a sign bit with a 15-bit magnitude.
+inline int16_t decodePosition(uint16_t word){
+ const int16_t magnitude=int16_t(word&0x7fff);
+ return word&0x8000?int16_t(-magnitude):magnitude;
+}
 enum RxIssue : uint8_t { RxHeader=1, RxId=2, RxLength=4, RxStatus=8,
  RxChecksum=16, RxTimeout=32 };
 struct RxFailure {
@@ -61,7 +66,8 @@ class ServoReply {
   if(record_.received_checksum!=record_.expected_checksum)record_.issues|=RxChecksum;
   return record_.issues?Bad:Good;
  }
- int16_t position()const{return uint16_t(frame_[5])|(uint16_t(frame_[6])<<8);}
+ uint16_t positionWord()const{return uint16_t(frame_[5])|(uint16_t(frame_[6])<<8);}
+ int16_t position()const{return decodePosition(positionWord());}
  RxFailure failure(uint32_t now)const{
   RxFailure result=record_;
   result.ms=now;result.elapsed_ms=now-start_;

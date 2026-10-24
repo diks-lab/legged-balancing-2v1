@@ -40,6 +40,17 @@ inline bool inRange(bool right,int16_t pos){
  const int home=position(right,0),end=position(right,30);
  return pos>=fminf(home,end)&&pos<=fmaxf(home,end);
 }
+// Latest valid protocol observation per side, not a position command/history.
+struct PositionObservation {
+ uint32_t received_ms[2]{},attempt_ms=0;
+ uint16_t word[2]{};
+ uint8_t acquired=0,current=0;
+ bool read_only=false;
+ void begin(uint32_t now,bool diagnostic){attempt_ms=now;current=0;read_only=diagnostic;}
+ void capture(unsigned side,uint16_t raw,uint32_t now){
+  word[side]=raw;received_ms[side]=now;acquired|=uint8_t(1u<<side);current|=uint8_t(1u<<side);
+ }
+};
 enum class Reason:uint8_t { ReleaseRequired,Idle,Syncing,Accepted,Driving,Stopped,
  ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest };
 struct State {
@@ -52,6 +63,7 @@ struct State {
  bool active=false,synced=false,limited=false,command_valid=false;
  uint8_t mode=0; // unavailable, supported stopped test, stationary balance
  RxFailure rx_failure;
+ PositionObservation positions;
 };
 class Control {
  public:

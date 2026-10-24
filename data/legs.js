@@ -4,7 +4,7 @@ const LEG_BLOCKERS = {
   4: '走行・減速中。停止後に解放・再操作',
   5: '停止中。支持試験は全解放→Share',
   6: 'IMU左右姿勢が無効',
-  7: '実位置が0～30%相当外。設定・機構を確認',
+  7: '操作範囲外。取得値・判定範囲を確認',
   8: '実位置の応答なし。接続確認後に解放・再操作',
   9: '位置応答不正。ID・通信を確認',
   10: 'UART送信失敗。解放して再操作',
@@ -120,7 +120,7 @@ function renderLegDiagnostics(view, current) {
   const state = legPresentation(view.legPacket, current, view.sample.sample_ms, ui.cache);
   const update = (node, text) => { if (node.textContent !== text) node.textContent = text; };
   update(ui.note, state.note);
-  renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh);
+  renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh, view.legPacket?.leg_position);
   for (const [key, text] of Object.entries(state.values)) update(ui.nodes[key], text);
   for (const [key, text] of Object.entries(state.detail)) update(ui.detail[key], text);
   const blocked = String(state.fresh && state.values.blocker !== 'なし');

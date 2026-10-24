@@ -144,6 +144,7 @@ window.startLogger = function () {
           dashboard.legPacket = {
             legs: s.legs,
             leg_rx: s.leg_rx,
+            leg_position: s.leg_position,
             leg_ms: s.leg_ms,
             leg_mode: s.leg_mode,
             leg_roll_confirmed: s.leg_roll_confirmed,

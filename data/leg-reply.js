@@ -50,13 +50,60 @@ function createLegReplyPanel(section) {
     node.appendChild(p);
     nodes[key] = p;
   }
-  return nodes;
+  const positionDetails = document.createElement('details');
+  positionDetails.id = 'leg-position';
+  const positionTitle = document.createElement('summary');
+  positionTitle.textContent = '実位置確認（取得値・変換・操作範囲）';
+  positionDetails.appendChild(positionTitle);
+  section.appendChild(positionDetails);
+  const position = {};
+  for (const key of ['attempt', 'right', 'left', 'limits']) {
+    const text = document.createElement('p');
+    text.id = `leg-position-${key}`;
+    positionDetails.appendChild(text);
+    position[key] = text;
+  }
+  return { rx: nodes, position };
 }
-function renderLegReply(nodes, record, fresh) {
+function legPositionPresentation(record) {
+  if (!Array.isArray(record) || record.length !== 6) return {
+    attempt: '実位置確認の診断未受信', right: '右：未取得', left: '左：未取得',
+    limits: '機械的可動限界：未設定。0～30%は操作制限です。'
+  };
+  const [attempt, readOnly, acquired, current, right, left] = record;
+  const hex = x => Number.isInteger(x) ? x.toString(16).toUpperCase().padStart(2, '0') : '不明';
+  const side = (row, index, name) => {
+    if (!Array.isArray(row) || row.length !== 11) return `${name}：未取得`;
+    const [ms, word, low, high, decoded, percent, min, max, inside, home, extended] = row;
+    const range = `操作判定の整数上下限 ${min}～${max} tick（0～30%）`;
+    if (!(acquired & (1 << index))) return `${name}：未取得 ／ ${range}`;
+    const pct = Number.isFinite(percent) ? percent.toFixed(6) : '不明';
+    return `${name}：${current & (1 << index) ? '今回取得' : '前回取得・今回未取得'} @ ${ms} ms
+` +
+      `実位置 ${decoded} tick ／ 生データL,H=${hex(low)} ${hex(high)} ／ 結合word=${word}
+` +
+      `換算 ${pct}%（制限前） ／ ${range} ／ ${inside ? '操作範囲内' : '操作範囲外・駆動拒否'}
+` +
+      `換算係数 HOME=${home}、100%=${extended}（機械的限界ではありません）`;
+  };
+  return {
+    attempt: `確認開始 ${attempt} ms ／ ${readOnly ? '読取り専用診断' : '操作開始時の実位置同期'}（指令値ではありません）`,
+    right: side(right, 0, '右'), left: side(left, 1, '左'),
+    limits: '機械的可動限界：未設定・未確認。初回同期にも操作範囲を適用する現行の拒否条件を維持。' +
+      '整数への既存換算で境界の%値に端数が出ます。表示値を0～30%へ丸めません。'
+  };
+}
+function renderLegReply(groups, record, fresh, positions) {
+  const nodes = groups.rx;
   const view = legReplyPresentation(record);
   for (const [key, node] of Object.entries(nodes)) {
     let text = view ? view.fields[key] : key === 'record' ? '位置応答の失敗記録なし' : '未取得';
     if (key === 'record' && !fresh) text += ' ／ 通信停止・最終受信時の情報';
     if (node.textContent !== text) node.textContent = text;
+  }
+  const position = legPositionPresentation(positions);
+  if (!fresh) position.attempt += ' ／ 通信停止・最終受信時の情報';
+  for (const [key, node] of Object.entries(groups.position)) {
+    if (node.textContent !== position[key]) node.textContent = position[key];
   }
 }

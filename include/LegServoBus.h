@@ -29,6 +29,8 @@ template<class IO> class ServoBus {
    const auto result=reply_.feed(uint8_t(byte));
    if(result==ServoReply::Bad){failReceive(c,now);break;}
    if(result!=ServoReply::Good)continue;
+   const unsigned side=phase_==WaitRight?0:1;
+   c.state.positions.capture(side,reply_.positionWord(),now);
    const int16_t pos=reply_.position();
    reply_.clearFrame();
    if(phase_==WaitRight){positions_[0]=pos;first_ms_=now;phase_=ReadLeft;}
@@ -42,7 +44,7 @@ template<class IO> class ServoBus {
   }
   if(int32_t(now-next_send_)<0)return;
   if(off_pending_){if(torque(io,c,false,now))off_pending_=false;return;}
-  if(c.want_sync&&phase_==Idle){phase_=ReadRight;reply_.clearFrame();}
+  if(c.want_sync&&phase_==Idle){c.state.positions.begin(now,observe_only_);phase_=ReadRight;reply_.clearFrame();}
   if(phase_==ReadRight||phase_==ReadLeft){
    uint8_t p[]={255,255,uint8_t(phase_==ReadRight?RightId:LeftId),4,2,56,2,0};
    checksum(p,8);
