@@ -126,7 +126,7 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
  }
  const auto&l=s.legs;
  j.add(",\"leg_ms\":%lu,\"legs\":[",(unsigned long)s.sample_ms);
- const float values[]={l.height,l.requested_roll,l.applied_roll,l.measured_roll,l.command_valid?leg::clamp(leg::percent(true,l.right_command),0,30):NAN,l.command_valid?leg::clamp(leg::percent(false,l.left_command),0,30):NAN};
+ const float values[]={l.height,l.requested_roll,l.applied_roll,l.measured_roll,l.command_valid?leg::percent(true,l.right_command):NAN,l.command_valid?leg::percent(false,l.left_command):NAN};
  bool first=true;for(float value:values){j.add("%s",first?"":",");if(isfinite(value))j.add("%.4g",double(value));else j.add("null");first=false;}
  j.add(",%d,%d,%lu,%lu,%u,%u,%u,%u,%u,%u,%lu,%lu,%lu]",int(l.right_command),int(l.left_command),
   (unsigned long)l.command_ms,(unsigned long)l.sync_ms,unsigned(l.reason),unsigned(l.torque),
@@ -166,12 +166,25 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   }
   j.add("]]");
  }
+ const auto&a=l.acceptance;const auto&cfg=l.configuration;
+ j.add(",\"leg_accept\":[%u,%u,%d,%d,%d,%d,%u,%u],\"leg_config\":[%lu,%lu,%lu,%u,%u,%u,%u,%u,%u",
+  unsigned(a.extra),unsigned(a.valid()),int(a.right_min),int(a.right_max),int(a.left_min),int(a.left_max),
+  unsigned(l.recovery),unsigned(l.return_directions),(unsigned long)cfg.started_ms,(unsigned long)cfg.finished_ms,
+  (unsigned long)cfg.rejected_ms,unsigned(cfg.status),unsigned(cfg.error),unsigned(cfg.step),unsigned(cfg.acquired),unsigned(cfg.current),unsigned(cfg.reject_reason));
+ for(unsigned side=0;side<2;++side){
+  const unsigned limits=side*2,mode=limits+1;
+  j.add(",[%lu,%lu,",(unsigned long)cfg.sample_ms[limits],(unsigned long)cfg.sample_ms[mode]);
+  if(cfg.acquired&(1u<<limits))j.add("%u,%u",unsigned(cfg.minimum[side]),unsigned(cfg.maximum[side]));else j.add("null,null");
+  j.add(",");if(cfg.acquired&(1u<<mode))j.add("%u",unsigned(cfg.mode[side]));else j.add("null");
+  j.add("]");
+ }
+ j.add("]");
  const auto&r=l.rx_failure;
  j.add(",\"leg_rx\":");
  if(!r.issues)j.add("null");
  else {
-  j.add("[%lu,%lu,%u,56,2,%u,%u,%u,%u,%u,%u,%u,\"",
-   (unsigned long)r.ms,(unsigned long)r.elapsed_ms,unsigned(r.target),unsigned(r.received),
+  j.add("[%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,\"",
+   (unsigned long)r.ms,(unsigned long)r.elapsed_ms,unsigned(r.target),unsigned(r.reg),unsigned(r.requested),unsigned(r.received),
    unsigned(r.issues),unsigned(r.frame_size),unsigned(r.expected_checksum),
    unsigned(r.echoes),unsigned(r.skipped),unsigned(r.truncated));
   for(unsigned i=0;i<r.raw_size&&i<sizeof(r.raw);++i)j.add("%02X",unsigned(r.raw[i]));

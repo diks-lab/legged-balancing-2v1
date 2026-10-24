@@ -173,7 +173,7 @@ struct {
   bool begin(){++begins;return ok;} // No pairing-argument overload is allowed here.
 } PS4;
 struct {
- uint8_t rx[8]{},last[24]{};unsigned head=0,tail=0,mode=0;int capacity=128;
+ uint8_t rx[16]{},last[24]{};unsigned head=0,tail=0,mode=0;int capacity=128;
  size_t writes=0,last_size=0,reads=0,goals=0,ons=0;
  int available(){return int(tail-head);}int read(){return head<tail?rx[head++]:-1;}
  int availableForWrite(){return capacity;}
@@ -185,9 +185,12 @@ struct {
    ++reads;
    if(mode){
     const uint16_t pos=p[2]==1?(mode==2?2009:2036):2053;
-    const uint8_t data[]={255,255,p[2],4,0,uint8_t(pos),uint8_t(pos>>8),0};
-    memcpy(rx,data,8);uint8_t sum=0;for(unsigned i=2;i<7;++i)sum+=rx[i];
-    rx[7]=uint8_t(~sum)+uint8_t(mode==3&&p[2]==2);head=0;tail=8;
+    const uint8_t data[]={255,255,p[2],uint8_t(p[6]+2),0,uint8_t(pos),uint8_t(pos>>8),0,0,0};
+    memcpy(rx,data,sizeof(data));
+    if(p[5]==9){rx[5]=rx[6]=0;rx[7]=255;rx[8]=15;}
+    if(p[5]==33)rx[5]=0;
+    tail=p[6]+6;uint8_t sum=0;for(unsigned i=2;i+1<tail;++i)sum+=rx[i];
+    rx[tail-1]=uint8_t(~sum)+uint8_t(mode==3&&p[2]==2);head=0;
    }
   }
   return n;
@@ -247,7 +250,7 @@ prefix += source[source.index('struct HttpResponseTransport {'):source.index('vo
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','readLegConfiguration','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -1044,6 +1047,22 @@ int main(){
   }
 
   puts("PASS: callback/FIFO STOP-Share-press-hold-release, normal/range/CRC/timeout, UART wait and real gate transition; no repeated held-key requests");
+
+  // HTTP queue -> stopped main task -> UART configuration reads only.
+  bootFixture();serviceBootAutoStart();step();assert(executeOperatorCommand(OperatorCommand::FullStop));
+  Serial2.mode=1;const auto configGoals=Serial2.goals,configOns=Serial2.ons,configReads=Serial2.reads;
+  if(!http_status_queue)http_status_queue=xQueueCreate(1,sizeof(HttpStatus));
+  if(!http_command_queue)http_command_queue=xQueueCreate(1,sizeof(char));
+  http_command_queue->full=false;const char readConfig='L';assert(xQueueSend(http_command_queue,&readConfig,0)==pdTRUE);
+  serviceHttpRequests();assert(leg_bus.inspecting());
+  for(unsigned i=0;i<300;++i){++nowMs;noteImuMeasurement();serviceLegControl();}
+  assert(leg_control.state.configuration.status==2&&leg_control.state.configuration.current==15);
+  assert(Serial2.reads==configReads+4&&Serial2.goals==configGoals&&Serial2.ons==configOns);
+  assert(emergency_stop_active&&!lqr_direction_test_armed&&!balance_wait_active);
+  near(motor1.target,0);near(motor2.target,0);
+  lqr_direction_test_armed=true;assert(!readLegConfiguration());
+  assert(leg_control.state.configuration.reject_reason==uint8_t(leg::Reason::ConfigBusy));
+  lqr_direction_test_armed=false;
 
   // Actual leg integration uses cached IMU only, never stops wheel balance.
   bootFixture();serviceBootAutoStart();step();

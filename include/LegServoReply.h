@@ -7,12 +7,15 @@ inline int16_t decodePosition(uint16_t word){
  const int16_t magnitude=int16_t(word&0x7fff);
  return word&0x8000?int16_t(-magnitude):magnitude;
 }
+inline uint16_t encodePosition(int16_t value){
+ return value<0?uint16_t(0x8000u|uint16_t(-int32_t(value))):uint16_t(value);
+}
 enum RxIssue : uint8_t { RxHeader=1, RxId=2, RxLength=4, RxStatus=8,
  RxChecksum=16, RxTimeout=32 };
 struct RxFailure {
  uint32_t ms=0,elapsed_ms=0;
  uint16_t received=0;
- uint8_t target=0,issues=0,frame_size=0,raw_size=0,echoes=0,skipped=0;
+ uint8_t target=0,issues=0,frame_size=0,raw_size=0,echoes=0,skipped=0,reg=56,requested=2;
  bool truncated=false;
  uint8_t expected_checksum=0,raw[32]{},frame[8]{},received_checksum=0;
  bool checksum_ready=false;
@@ -27,8 +30,8 @@ class ServoReply {
    memcpy(echo_,p,n);echo_size_=uint8_t(n);
   }
  }
- void begin(uint8_t target,uint32_t now){
-  record_=RxFailure{};record_.target=target;start_=now;clearFrame();
+ void begin(uint8_t target,uint32_t now,uint8_t reg=56,uint8_t requested=2){
+  record_=RxFailure{};record_.target=target;record_.reg=reg;record_.requested=requested;start_=now;clearFrame();
  }
  void clearFrame(){used_=0;}
  bool expired(uint32_t now,uint32_t limit)const{return uint32_t(now-start_)>limit;}
@@ -45,7 +48,11 @@ class ServoReply {
   if(used_<4)return Pending;
   const bool broadcast_prefix=echo_size_&&used_<=echo_size_&&!memcmp(frame_,echo_,used_);
   if(broadcast_prefix&&used_==echo_size_)return echo();
-  if(frame_[3]!=4){
+  uint8_t request[]={255,255,record_.target,4,2,record_.reg,record_.requested,0};
+  request[7]=uint8_t(~uint8_t(request[2]+request[3]+request[4]+request[5]+request[6]));
+  const bool read_prefix=used_<=sizeof(request)&&!memcmp(frame_,request,used_);
+  if(read_prefix){if(used_==sizeof(request))return echo();return Pending;}
+  if(frame_[3]!=record_.requested+2){
    if(broadcast_prefix)return Pending;
    record_.issues|=RxLength;
    if(frame_[2]!=record_.target)record_.issues|=RxId;
@@ -55,9 +62,6 @@ class ServoReply {
   }
   const unsigned total=unsigned(frame_[3])+4;
   if(used_<total)return Pending;
-  uint8_t request[]={255,255,record_.target,4,2,56,2,0};
-  request[7]=uint8_t(~uint8_t(request[2]+request[3]+request[4]+request[5]+request[6]));
-  if(total==sizeof(request)&&!memcmp(frame_,request,sizeof(request)))return echo();
   if(frame_[2]!=record_.target)record_.issues|=RxId;
   if(frame_[4])record_.issues|=RxStatus;
   uint8_t sum=0;for(unsigned i=2;i+1<total;++i)sum+=frame_[i];
@@ -66,6 +70,7 @@ class ServoReply {
   if(record_.received_checksum!=record_.expected_checksum)record_.issues|=RxChecksum;
   return record_.issues?Bad:Good;
  }
+ uint8_t parameter(unsigned index)const{return frame_[5+index];}
  uint16_t positionWord()const{return uint16_t(frame_[5])|(uint16_t(frame_[6])<<8);}
  int16_t position()const{return decodePosition(positionWord());}
  RxFailure failure(uint32_t now)const{

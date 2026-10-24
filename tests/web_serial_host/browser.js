@@ -3,17 +3,21 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
   try {
     for (const size of [{ width: 1366, height: 768 }, { width: 1920, height: 1080 }]) {
       const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 });
-      const requests = [], errors = [], calibrationRequests = [];
+      const requests = [], errors = [], calibrationRequests = [], legReadRequests = [];
       page.on('pageerror', e => errors.push(e.message));
       await page.route('http://127.0.0.1:8765/**', async route => {
         const file = new URL(route.request().url()).pathname.slice(1) || 'index.html';
+        if (file === 'legs/read-config') {
+          legReadRequests.push(route.request().method());
+          await route.fulfill({ status: 202, body: 'queued read-only' }); return;
+        }
         if (file.startsWith('calibration/')) {
           calibrationRequests.push([file, route.request().method()]);
           await route.fulfill({ status: 202, body: 'queued' }); return;
@@ -181,6 +185,29 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.waitForFunction(() => window.peer.readyState === 1);
       await page.evaluate(() => window.sample());
 
+
+      await page.evaluate(() => {
+        window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
+          leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
+          leg_roll_confirmed: false, leg_roll_sign: 1,
+          leg_accept: [0, 1, 2010, 2061, 2026, 2081, 0, 0],
+          leg_config: [1000, 1151, 0, 2, 0, 4, 15, 15, 0,
+            [1001, 1051, 0, 4095, 0], [1101, 1151, 0, 4095, 1]],
+          legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
+        }) });
+        document.getElementById('details').open = true;
+        document.getElementById('leg-config').open = true;
+      });
+      await page.click('#leg-read-config');
+      await page.waitForFunction(() => document.getElementById('leg-config-request').textContent.includes('読取要求を送信'));
+      assert.deepEqual(legReadRequests, ['POST']);
+      const configText = await page.locator('#leg-config-values').textContent();
+      assert(configText.includes('追加受付：無効（既定）') && configText.includes('0～4095'));
+      assert(configText.includes('0（位置モード）') && configText.includes('1（車輪モード）'));
+      await page.evaluate(() => {
+        document.getElementById('leg-config').open = false;
+        document.getElementById('details').open = false;
+      });
 
       await page.evaluate(() => window.sample({ gyro_window: [0, (window.sequence + 1) * 50, 200000, 101, 0, 1800, 2200, 2.5, 8.5] }));
       assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x00'));

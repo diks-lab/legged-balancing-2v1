@@ -100,6 +100,11 @@ int main(){
   o.confirmed.raw=o.confirmed.keys=15;o.confirmed.flags=63;o.confirmed.phase=8;o.confirmed.gates=1023;
   o.mode=2;o.allowed=1;o.operation=8;o.blocker=255;
   for(auto&e:o.events){e.ms=e.sequence=UINT32_MAX;e.gates=1023;e.raw=e.keys=e.reason=e.phase=e.flags=e.mode=e.from_reason=e.from_phase=255;e.source=3;}
+  auto&cfg=all.legs.configuration;cfg.started_ms=cfg.finished_ms=cfg.rejected_ms=UINT32_MAX;
+  for(auto&t:cfg.sample_ms)t=UINT32_MAX;
+  cfg.minimum[0]=cfg.minimum[1]=cfg.maximum[0]=cfg.maximum[1]=65535;
+  cfg.mode[0]=cfg.mode[1]=255;cfg.acquired=cfg.current=15;cfg.status=3;cfg.error=cfg.reject_reason=25;cfg.step=4;
+  all.legs.acceptance={-32767,32767,-32767,32767,true};all.legs.recovery=2;all.legs.return_directions=3;
   char wheel[2048];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef",UINT32_MAX));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   assert(strstr(wheel,"\"legs\":["));

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 const readyFile = process.env.DRIVE_LEG_READY_OUTPUT;
 const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.stringify({
   leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
@@ -14,7 +14,7 @@ const legRxJson = process.env.LEG_RX_JSON_OUTPUT ? fs.readFileSync(process.env.L
 const legPositionJson = process.env.LEG_POSITION_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_POSITION_JSON_OUTPUT, 'utf8') : null;
 const legFlowJson = process.env.DRIVE_LEG_FLOW_OUTPUT ? fs.readFileSync(process.env.DRIVE_LEG_FLOW_OUTPUT, 'utf8') : null;
 const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson, legFlowJson });
-for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'legs.js', 'status.js', 'dashboard.js']) {
+for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -112,6 +112,19 @@ vm.runInContext(`
       !positionView.left.includes('前回取得・今回未取得')) throw Error('zero/old position distinct');
   positionData[2] = 0;
   if (!legPositionPresentation(positionData).right.includes('未取得')) throw Error('not acquired position');
+  const cfgPacket = {
+    leg_accept: [0, 1, 2010, 2061, 2026, 2081, 0, 0],
+    leg_config: [1000, 1151, 0, 2, 0, 4, 15, 15, 0,
+      [1001, 1051, 0, 4095, 0], [1101, 1151, 0, 4095, 1]]
+  };
+  if (!legAcceptanceLines(cfgPacket).join(' ').includes('無効（既定）')) throw Error('extra default disabled');
+  const configText = legConfigurationLines(cfgPacket).join(' ');
+  if (!configText.includes('0～4095') || !configText.includes('0（位置モード）') ||
+      !configText.includes('1（車輪モード）') || !configText.includes('自動適用しません')) throw Error('mode/angle readout');
+  cfgPacket.leg_config[7] = 7;
+  if (!legConfigurationLines(cfgPacket).join(' ').includes('前回取得・今回未取得')) throw Error('old mode read separated');
+  cfgPacket.leg_accept = [1, 1, 1950, 2100, 2000, 2110, 2, 2];
+  if (!legAcceptanceLines(cfgPacket).join(' ').includes('↑×・↓○')) throw Error('return directions');
   const rxFailure = [53587, 8, 2, 56, 2, 8, 26, 8, 171, 0, 0, 0,
     'FFFF010420F407DD', 'FFFF010420F407DD', 221, 1];
   const rxView = legReplyPresentation(rxFailure);

@@ -3,6 +3,7 @@
 #include <math.h>
 #include "LegServoReply.h"
 #include "LegOperation.h"
+#include "LegAcceptance.h"
 namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
 constexpr int RightHome=2061,RightExtended=1892,LeftHome=2026,LeftExtended=2208;
@@ -53,7 +54,7 @@ struct PositionObservation {
  }
 };
 enum class Reason:uint8_t { ReleaseRequired,Idle,Syncing,Accepted,Driving,Stopped,
- ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest };
+ ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy };
 struct State {
  float height=0,requested_roll=0,applied_roll=0,measured_roll=NAN;
  float right_percent=0,left_percent=0;
@@ -66,10 +67,13 @@ struct State {
  RxFailure rx_failure;
  PositionObservation positions;
  OperationObservation operation;
+ Acceptance acceptance=ConfiguredAcceptance;
+ ServoConfiguration configuration;
+ uint8_t recovery=0,return_directions=0; // normal, holding until release, manual inward return
 };
 class Control {
  public:
- explicit Control(bool roll_confirmed=RollDirectionConfirmed):roll_confirmed_(roll_confirmed){}
+ explicit Control(bool roll_confirmed=RollDirectionConfirmed,Acceptance acceptance=ConfiguredAcceptance):roll_confirmed_(roll_confirmed){state.acceptance=acceptance;}
  State state;
  uint8_t keys=0; // up/down/left/right
  bool input_gate=false,want_sync=false;
@@ -82,18 +86,33 @@ class Control {
  void received(uint8_t value,uint32_t now){state.operation.raw_keys=value;observe(Source::Input,now,state.operation.phase);}
  void disconnect(){keys=0;input_gate=false;} // active height holds, roll returns smoothly to zero
  void stop(Reason reason){
-  state.operation.tx_wait=false;
+  state.operation.tx_wait=false;state.recovery=state.return_directions=0;
   state.active=state.synced=false;want_sync=false;armed_=false;state.reason=reason;
   state.requested_roll=state.applied_roll=0;state.limited=false;last_=0;
  }
+ bool accepted(bool right,int16_t tick)const{
+  return state.acceptance.valid()&&(inRange(right,tick)||(state.acceptance.extra&&state.acceptance.contains(right,tick)));
+ }
+ int16_t target(bool right)const{
+  const float pct=right?state.right_percent:state.left_percent;
+  return int16_t(lroundf((right?RightHome:LeftHome)+
+    ((right?RightExtended:LeftExtended)-(right?RightHome:LeftHome))*pct/100));
+ }
+ bool commandAllowed(int16_t right,int16_t left)const{
+  return state.recovery?accepted(true,right)&&accepted(false,left):inRange(true,right)&&inRange(false,left);
+ }
  bool seed(int16_t right,int16_t left,uint32_t now){
-  if(!inRange(true,right)||!inRange(false,left)){stop(Reason::PositionRange);return false;}
-  const float r=clamp(percent(true,right),0,30),l=clamp(percent(false,left),0,30);
+  if(!accepted(true,right)||!accepted(false,left)){stop(Reason::PositionRange);return false;}
+  const bool outside=!inRange(true,right)||!inRange(false,left);
+  const float r=outside?percent(true,right):clamp(percent(true,right),0,30);
+  const float l=outside?percent(false,left):clamp(percent(false,left),0,30);
   state.height=(r+l)/2;difference_=(r-l)/2;
   state.right_percent=r;state.left_percent=l;state.requested_roll=state.applied_roll=0;
+  state.recovery=outside?1:0;
+  roll_rearm_=state.recovery!=0;state.return_directions=0;
   state.synced=true;state.sync_ms=now;want_sync=false;last_=now;return true;
  }
- void activate(uint32_t now){state.active=true;state.reason=Reason::Accepted;last_=now;}
+ void activate(uint32_t now){state.active=true;state.reason=state.recovery?Reason::RecoveryRelease:Reason::Accepted;last_=now;}
  void tick(uint32_t now,bool eligible,bool moving,bool imu_valid,float roll){
   update(now,eligible,moving,imu_valid,roll);
   observe(Source::Control,now,state.operation.phase);
@@ -106,7 +125,7 @@ class Control {
      previous->reason==uint8_t(state.reason)&&previous->phase==phase&&previous->flags==flags&&previous->mode==state.mode)return;
   const uint8_t prior=previous?previous->reason:255;
   if((state.reason==Reason::PositionRange||state.reason==Reason::ReplyTimeout||state.reason==Reason::ReplyInvalid||
-      state.reason==Reason::TxFailed||state.reason==Reason::ClockGap||state.reason==Reason::RollUnconfirmed)&&prior!=uint8_t(state.reason)){
+      state.reason==Reason::TxFailed||state.reason==Reason::ClockGap||state.reason==Reason::RollUnconfirmed||state.reason==Reason::RecoveryDirection||state.reason==Reason::PairLimit)&&prior!=uint8_t(state.reason)){
    o.failure=uint8_t(state.reason);o.failure_ms=now;o.failure_source=uint8_t(source);
   }
   Transition event;event.ms=now;event.sequence=++o.revision;event.gates=o.gates;
@@ -134,6 +153,7 @@ class Control {
   o.blocker=255;
   if(phase==7){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::Stopped);return;}
   if(o.tx_wait){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::TxBusy);return;}
+  if(phase>=9){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::ConfigReadOnly);return;}
   if(want_sync||(phase>=1&&phase<=6)){o.operation=uint8_t(Operation::Sync);return;}
   if(!input_gate){o.operation=uint8_t(Operation::Release);o.blocker=uint8_t(Reason::ReleaseRequired);return;}
   if(!state.active&&!armed_){
@@ -143,7 +163,11 @@ class Control {
    o.operation=uint8_t(failed?Operation::Failed:Operation::Release);
    o.blocker=failed?o.failure:uint8_t(Reason::ReleaseRequired);return;
   }
+  if(state.recovery==1){o.operation=uint8_t(Operation::Release);o.blocker=uint8_t(Reason::RecoveryRelease);return;}
   o.allowed=1;o.operation=uint8_t(Operation::Wait);
+  if(state.recovery&&(state.reason==Reason::RecoveryDirection||state.reason==Reason::PairLimit)){
+   o.allowed=0;o.operation=uint8_t(Operation::Failed);o.blocker=uint8_t(state.reason);return;
+  }
   if(!roll_confirmed_&&(keys&12)){o.blocker=uint8_t(Reason::RollUnconfirmed);return;}
   if(state.active){
    const int height=int(bool(keys&1))-int(bool(keys&2)),rollAxis=int(bool(keys&4))-int(bool(keys&8));
@@ -167,7 +191,7 @@ class Control {
     case Reason::ReleaseRequired: case Reason::Stopped: case Reason::ExplicitStop:
     case Reason::Initializing: case Reason::StartWaiting: case Reason::Calibrating:
     case Reason::PolarityTest: case Reason::Driving: case Reason::ImuInvalid:
-    case Reason::WheelRetry:
+    case Reason::WheelRetry: case Reason::ConfigReadOnly:
      state.reason=armed_?Reason::Idle:Reason::ReleaseRequired;break;
     default:break; // preserve position/UART failures until another explicit operation
    }
@@ -179,23 +203,75 @@ class Control {
   const float dt=elapsed*.001f;
   const int height_axis=((keys&1)!=0)-((keys&2)!=0);
   const int roll_axis=((keys&4)!=0)-((keys&8)!=0);
-  state.height=clamp(state.height+height_axis*HeightRate*dt,0,30);
-  const bool height_limited=(height_axis<0&&state.height<=0)||(height_axis>0&&state.height>=30);
-  if(roll_confirmed_&&roll_axis)state.requested_roll=clamp(state.requested_roll+roll_axis*RollRate*dt,-MaxRoll,MaxRoll);
-  else if(roll_confirmed_&&!(keys&12))state.requested_roll=toward(state.requested_roll,0,RollRate*dt);
-  const float room=fminf(state.height,30-state.height);
-  state.applied_roll=roll_confirmed_?clamp(state.requested_roll,-room/RollGain,room/RollGain):0;
-  // Height-only commissioning holds the synchronized differential, never AngleX feedback.
-  const float desired=roll_confirmed_?RollGain*(state.applied_roll-roll):difference_;
-  difference_=clamp(toward(difference_,clamp(desired,-room,room),DifferentialRate*dt),-room,room);
+  if(state.recovery){
+   if(state.recovery==1){
+    state.reason=Reason::RecoveryRelease;
+    if(!keys&&input_gate){
+     state.recovery=2;state.reason=Reason::Accepted;float low,high;pairBounds(low,high,true);
+     state.return_directions=(high>.00001f?1:0)|(low<-.00001f?2:0);
+    }
+    return;
+   }
+   float low,high;pairBounds(low,high,true);
+   state.return_directions=(high>.00001f?1:0)|(low<-.00001f?2:0);
+   if(keys&12){state.reason=Reason::RecoveryDirection;return;}
+   const float requested=height_axis*HeightRate*dt;
+   const float delta=clamp(requested,low,high);
+   state.limited=fabsf(delta-requested)>.00001f;
+   if(height_axis&&fabsf(delta)<.000001f){
+    const float rh=percent(true,position(true,30)),lh=percent(false,position(false,30));
+    const bool above=state.right_percent>rh||state.left_percent>lh;
+    const bool below=state.right_percent<0||state.left_percent<0;
+    state.reason=((height_axis<0&&above&&!below)||(height_axis>0&&below&&!above))?Reason::PairLimit:Reason::RecoveryDirection;
+    return;
+   }
+   state.right_percent+=delta;state.left_percent+=delta;
+   state.height=(state.right_percent+state.left_percent)/2;difference_=(state.right_percent-state.left_percent)/2;
+   state.reason=state.operation.tx_wait?Reason::TxBusy:Reason::Accepted;
+   if(inRange(true,target(true))&&inRange(false,target(false))){
+    // Adopt exactly the emitted ticks; never re-level at the mode transition.
+    state.right_percent=clamp(percent(true,target(true)),0,30);state.left_percent=clamp(percent(false,target(false)),0,30);
+    state.height=(state.right_percent+state.left_percent)/2;difference_=(state.right_percent-state.left_percent)/2;
+    state.recovery=state.return_directions=0;roll_rearm_=true;
+   }
+   return;
+  }
+  float low,high;pairBounds(low,high,false);
+  const float requested=height_axis*HeightRate*dt,delta=clamp(requested,low,high);
+  state.right_percent+=delta;state.left_percent+=delta;
+  state.height=(state.right_percent+state.left_percent)/2;
+  const bool height_limited=height_axis&&fabsf(delta-requested)>.00001f;
+  if(roll_rearm_&&(keys&12)&&roll_confirmed_)roll_rearm_=false;
+  if(roll_confirmed_&&!roll_rearm_&&roll_axis)state.requested_roll=clamp(state.requested_roll+roll_axis*RollRate*dt,-MaxRoll,MaxRoll);
+  else if(roll_confirmed_&&!roll_rearm_&&!(keys&12))state.requested_roll=toward(state.requested_roll,0,RollRate*dt);
+  const float rightHi=30,leftHi=30;
+  const float diffLo=fmaxf(-state.height,state.height-leftHi),diffHi=fminf(rightHi-state.height,state.height);
+  const float room=fminf(fabsf(diffLo),fabsf(diffHi));
+  state.applied_roll=roll_confirmed_&&!roll_rearm_?clamp(state.requested_roll,-room/RollGain,room/RollGain):0;
+  const float desired=roll_confirmed_&&!roll_rearm_?RollGain*(state.applied_roll-roll):difference_;
+  difference_=clamp(toward(difference_,clamp(desired,diffLo,diffHi),DifferentialRate*dt),diffLo,diffHi);
   state.right_percent=state.height+difference_;state.left_percent=state.height-difference_;
-  state.limited=height_limited||fabsf(state.applied_roll-state.requested_roll)>.0001f||fabsf(desired)>room;
+  state.limited=height_limited||fabsf(state.applied_roll-state.requested_roll)>.0001f||desired<diffLo||desired>diffHi;
   state.reason=(!roll_confirmed_&&(keys&12))?Reason::RollUnconfirmed:
       state.operation.tx_wait?Reason::TxBusy:Reason::Accepted;
+
  }
  private:
  uint32_t last_=0;
  float difference_=0;
- bool armed_=false,roll_confirmed_=false;
+ bool armed_=false,roll_confirmed_=false,roll_rearm_=false;
+ void pairBounds(float&low,float&high,bool inward)const{
+  low=-100000;high=100000;
+  const float values[]={state.right_percent,state.left_percent};
+  for(unsigned side=0;side<2;++side){
+   const bool right=side==0;const float p=values[side];
+   const float hi=inward?percent(right,position(right,30)):30;
+   float loDelta=-p,hiDelta=hi-p;
+   if(inward&&p>hi)hiDelta=0;
+   if(inward&&p<0)loDelta=0;
+   low=fmaxf(low,loDelta);high=fminf(high,hiDelta);
+  }
+ }
+
 };
 }

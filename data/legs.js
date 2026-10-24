@@ -16,7 +16,13 @@ const LEG_BLOCKERS = {
   16: '起立待ち。支持試験は×→全解放→Share',
   17: '明示停止中。支持・全解放後にShareで有効化',
   18: 'FOC校正中',
-  19: '車輪極性試験中'
+  19: '車輪極性試験中',
+  20: '初回受付設定が無効',
+  21: '範囲へ戻る共通方向のみ許可。左右操作は無効',
+  22: '現在位置保持。十字キーを解放して再操作',
+  23: '片脚が端。両脚を保持し、片側だけは動かさない',
+  24: 'サーボ設定を読取り中／再操作前に解放',
+  25: '読取り拒否。車輪・脚・他の通信を停止して再要求'
 };
 const LEG_LABELS = {
   mode: '試験モード', available: '操作可否', correction: '左右姿勢補正',
@@ -91,7 +97,8 @@ function createLegPanel(view) {
   ]) make('li', text, list);
   const reply = createLegReplyPanel(section);
   const state = createLegStatePanel(section);
-  return { nodes, detail, note, reply, state, cache: {} };
+  const config = createLegConfigPanel(section);
+  return { nodes, detail, note, reply, state, config, cache: {} };
 }
 function renderLegDiagnostics(view, current) {
   const ui = view.legUI || (view.legUI = createLegPanel(view));
@@ -103,6 +110,7 @@ function renderLegDiagnostics(view, current) {
   const update = (node, text) => { if (node.textContent !== text) node.textContent = text; };
   update(ui.note, state.note);
   renderLegState(ui.state, view.legPacket);
+  renderLegConfig(ui.config, view.legPacket, state.fresh);
   renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh, view.legPacket?.leg_position);
   for (const [key, text] of Object.entries(state.values)) update(ui.nodes[key], text);
   for (const [key, text] of Object.entries(state.detail)) update(ui.detail[key], text);

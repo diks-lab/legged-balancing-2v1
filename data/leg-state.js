@@ -1,6 +1,6 @@
 'use strict';
 const LEG_SOURCES = ['未確定', 'PS4入力', '脚制御', 'UART処理', '安全判定', '停止処理', 'シリアル'];
-const LEG_PHASES = ['待機', '右要求', '右応答待ち', '左要求', '左応答待ち', '位置プリロード', 'トルクON待ち', 'OFF処理', '動作中'];
+const LEG_PHASES = ['待機', '右要求', '右応答待ち', '左要求', '左応答待ち', '位置プリロード', 'トルクON待ち', 'OFF処理', '動作中', '設定要求', '設定応答待ち'];
 const LEG_OPERATIONS = ['待機・高さ保持', '伸長指令', '短縮指令', '左傾斜指令', '右傾斜指令',
   '位置確認・同期中', '停止・条件待ち', '操作失敗・解放して再操作', '十字キー解放待ち'];
 function legDecision(packet, live, elapsed) {
@@ -8,6 +8,7 @@ function legDecision(packet, live, elapsed) {
   const valid = Array.isArray(s) && s.length === 17;
   const age = Math.max(0, elapsed) + (packet?.leg_age_ms || 0);
   const fresh = valid && live && age <= 1500;
+  const recovery = packet?.leg_accept?.[6] || 0;
   const reason = n => n === 255 ? 'なし' : LEG_BLOCKERS[n] || `理由${n}`;
   const rx = legReplyPresentation(packet?.leg_rx);
   const blocker = valid && s[5] === 9 && rx && rx.ms === s[12] ? rx.summary : valid ? reason(s[5]) : '未受信';
@@ -15,7 +16,7 @@ function legDecision(packet, live, elapsed) {
     fresh,
     mode: valid ? ['操作不可', '支持試験（倒立OFF）', '静止倒立'][s[2]] || '未確定' : '未取得',
     available: !fresh ? '現在不明' : s[4] === 5 ? '同期処理中' : s[3] ?
-      packet.leg_roll_confirmed ? '上下・左右操作可能' : '上下操作可能' : '操作不可／条件待ち',
+      recovery ? '範囲へ戻す方向のみ操作可' : packet.leg_roll_confirmed ? '上下・左右操作可能' : '上下操作可能' : '操作不可／条件待ち',
     operation: fresh ? LEG_OPERATIONS[s[4]] || '未確定' : '現在不明',
     blocker: fresh ? blocker : valid ? '通信停止。現在状態は不明' : '確定状態未受信',
     sync: !valid ? '未確認' : s[4] === 5 ? '確認中' : s[4] === 7 ? '失敗' :

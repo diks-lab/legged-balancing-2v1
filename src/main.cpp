@@ -820,6 +820,7 @@ void printLqrStatus();
 void printDistanceDiagnostic();
 void printSpeedDiagnostic();
 void serviceLegControl();
+bool readLegConfiguration();
 bool prepareLegacyLegAction();
 void pingLegServos();
 void ensureLegServoTorqueEnabled();
@@ -4623,6 +4624,7 @@ void serviceHttpRequests() {
       case 'd': executeOperatorCommand(OperatorCommand::EndTest); break;
       case 'g': executeOperatorCommand(OperatorCommand::CycleMode); break;
       case 'i': cycleLqrSpeedSource(); break;
+      case 'L': readLegConfiguration(); break;
     }
   }
   static uint32_t last_status_ms = 0;
@@ -5001,6 +5003,12 @@ void startWifiHttpServer() {
     wifi_log_server.on("/diagnosis.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/diagnosis.js", "application/javascript"); });
     wifi_log_server.on("/leg-reply.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-reply.js", "application/javascript"); });
     wifi_log_server.on("/leg-state.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-state.js", "application/javascript"); });
+    wifi_log_server.on("/leg-config.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-config.js", "application/javascript"); });
+    wifi_log_server.on("/legs/read-config", HTTP_POST, [](){
+      HttpMemoryRequest observed{4};
+      if(!http_command_queue){sendSmallHttpResponse(503,"Control queue unavailable\n");return;}
+      enqueueHttpCommand('L');
+    });
     wifi_log_server.on("/legs.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/legs.js", "application/javascript"); });
     wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
     wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });
@@ -6176,6 +6184,7 @@ void serviceLegControl() {
   leg_control.state.mode=eligible&&!moving&&imu&&!wheel_comm_suspended?(bench?1:2):0;
   const bool hard_stop=!test_system_ready||emergency_stop_active||calibration_active.load()||
       polarity_test_active||!imu;
+  const bool inspecting=leg_bus.inspecting();
   const bool observing=leg_bus.observing();
   // A brief wheel retry freezes the leg target; do not release load-bearing legs.
   if(observing){
@@ -6185,7 +6194,7 @@ void serviceLegControl() {
     leg_bus.cancel();
   } else {
     if(hard_stop&&(leg_control.state.active||leg_control.state.synced||leg_bus.busy()||leg_control.state.torque==3)){
-      leg_bus.off(leg_control);
+      leg_bus.off(leg_control,now);
     } else if((moving||!eligible)&&leg_bus.busy())leg_bus.cancel();
     leg_control.tick(now,eligible,moving,imu,roll);
     if(!eligible){
@@ -6204,7 +6213,7 @@ void serviceLegControl() {
       emergency_stop_active?leg::Reason::ExplicitStop:!eligible?leg::Reason::StartWaiting:
       !imu?leg::Reason::ImuInvalid:wheel_comm_suspended?leg::Reason::WheelRetry:leg::Reason::Driving;
   leg_control.commit(now,healthy,gate,leg_bus.stage(leg_control));
-  if(observing&&!leg_bus.observing()){
+  if(observing&&!inspecting&&!leg_bus.observing()){
     if(leg_control.state.reason==leg::Reason::Idle||leg_control.state.reason==leg::Reason::PositionRange){
       Serial.printf("LEG READ: right=%d left=%d received_ms=%lu reason=%u; no motion command\n",
         int(leg_bus.readPosition(true)),int(leg_bus.readPosition(false)),
@@ -6223,6 +6232,15 @@ bool prepareLegacyLegAction(){
   leg_control.stop(leg::Reason::Stopped);leg_control.state.command_valid=false;
   leg_bus.cancel();leg_control.observe(leg::Source::Legacy,millis(),leg_bus.stage(leg_control));
   leg_control.commit(millis(),false,leg::Reason::Stopped,leg_bus.stage(leg_control));return true;
+}
+
+bool readLegConfiguration(){
+  if(lqr_direction_test_armed||balance_wait_active||polarity_test_active||
+      boot_auto_start.pending()||fall_auto_recovery.pending||lqr_auto_drive_active||lqr_drive_start_pending||lqr_soft_stop_active||calibration_active.load()){
+    leg_control.state.configuration.rejected_ms=millis();
+    leg_control.state.configuration.reject_reason=uint8_t(leg::Reason::ConfigBusy);return false;
+  }
+  return leg_bus.inspect(leg_control,millis());
 }
 
 void pingLegServos() {
@@ -6245,8 +6263,7 @@ void ensureLegServoTorqueEnabled() {
 void disableLegServoTorqueForTestEnd(const char* reason) {
   const uint32_t start=micros();
   // Priority nonblocking OFF; never HOME, never re-enable a stale goal.
-  leg_bus.off(leg_control);
-  const uint32_t now=millis();leg_control.state.mode=0;
+  const uint32_t now=millis();leg_bus.off(leg_control,now);leg_control.state.mode=0;
   if(emergency_stop_active)leg_control.state.operation.gates|=leg::Emergency;
   leg_control.observe(leg::Source::Stop,now,leg_bus.stage(leg_control));
   leg_bus.service(leg_uart,leg_control,now);
