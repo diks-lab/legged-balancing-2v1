@@ -7,6 +7,12 @@ void gateBoth() { digitalWrite(27, LOW); digitalWrite(32, LOW); }
 void enableBoth() { digitalWrite(27, HIGH); digitalWrite(32, HIGH); }
 void expectBothOff() { assert(!pins[27] && !pins[32]); }
 
+class InspectSensor : public CheckedWheelSensor {
+ public:
+  using CheckedWheelSensor::CheckedWheelSensor;
+  long angleTime()const{return angle_prev_ts;}
+  long velocityTime()const{return vel_angle_prev_ts;}
+};
 int main() {
   TwoWire rightBus(0), leftBus(1);
   CheckedWheelSensor right(rightBus, gateBoth), left(leftBus, gateBoth);
@@ -38,19 +44,33 @@ int main() {
   assert(wrap.getFullRotations() == 0 && wrap.getVelocity() < 0);
   // Either wheel's communication failure immediately gates BOTH outputs.
   enableBoth();
+  right.setDiagnosticContext(5, 1234);
+  rightBus.latency=5;
   rightBus.nack = 2;
   right.update();
   expectBothOff();
   assert(right.fault && !left.fault);
+  assert(right.diagnostics.latched);
+  const auto first=right.diagnostics.first;
+  assert(first.reg==0x0c&&first.requested==2&&first.tx==2&&first.received==-1);
+  assert(first.elapsed_us==5000&&first.context==5&&first.fall_ms==1234);
   const int reads = rightBus.requests;
   rightBus.nack = 0;
-  right.update();
-  assert(right.fault && rightBus.requests == reads); // reboot-only latch
+  right.prepareControlCycle();right.releaseControlCycle();
+  assert(!right.fault && rightBus.requests == reads+1); // next update retries
+  right.probeWhileGated();expectBothOff();
+  assert(right.diagnostics.probes==2&&right.diagnostics.probe.result==1);
+  assert(!right.fault&&right.diagnostics.first.ms==first.ms&&right.diagnostics.first.tx==2);
+  rightBus.count=0;right.probeWhileGated();expectBothOff();
+  assert(right.diagnostics.probes==3&&right.diagnostics.probe.result==3);
+  assert(right.diagnostics.probe.received==0&&!right.fault);
+  right.update();assert(right.fault);
   enableBoth();
   leftBus.count = 1;
   left.update();
   expectBothOff();
   assert(left.fault);
+  assert(left.diagnostics.first.received==1&&left.diagnostics.first.available==1);
   TwoWire invalidBus(0);
   CheckedWheelSensor invalid(invalidBus, gateBoth);
   invalidBus.raw = 0xFFFF;
@@ -65,5 +85,27 @@ int main() {
   missing.begin(19, 18);
   expectBothOff();
   assert(missing.fault && !missing.ready);
-  std::cout << "PASS: stopped velocity, wraps, either-wheel gate-off, latched faults, init failures\n";
+  // Failed reads leave every base cache intact; next-cycle wrap recovery
+  // rebases velocity once without changing the continuous position origin.
+  for(bool reverse:{false,true}){
+    TwoWire bus(0);bus.raw=reverse?5:4090;InspectSensor sensor(bus,gateBoth);
+    sensor.begin(19,18);const float angle=sensor.getAngle();
+    const auto time=sensor.angleTime();const auto rotations=sensor.getFullRotations();
+    for(int n=0;n<3;++n){
+      sensor.releaseControlCycle();bus.count=0;delay(1);enableBoth();
+      const int reads=bus.requests;assert(!sensor.prepareControlCycle());expectBothOff();
+      assert(bus.requests==reads+1&&sensor.getAngle()==angle&&sensor.angleTime()==time);
+      assert(sensor.getFullRotations()==rotations);
+      sensor.update();assert(bus.requests==reads+1); // FOC cache reuse, no hidden retry
+    }
+    const auto failures=sensor.diagnostics.failures,first_ms=sensor.diagnostics.first.ms;
+    sensor.releaseControlCycle();bus.count=2;bus.raw=reverse?4090:5;delay(1);
+    const auto start=millis();assert(sensor.prepareControlCycle());assert(millis()==start);
+    assert(!sensor.fault&&sensor.ready&&fabsf(sensor.getAngle()-angle)<.1f);
+    assert(sensor.getVelocity()==0&&sensor.velocityTime()==sensor.angleTime());
+    assert(sensor.diagnostics.failures==failures&&sensor.diagnostics.first.ms==first_ms);
+    sensor.releaseControlCycle();delay(10);bus.raw=reverse?4085:10;sensor.prepareControlCycle();
+    const float speed=sensor.getVelocity();assert(isfinite(speed)&&fabsf(speed)<2);
+  }
+  std::cout << "PASS: stopped velocity, wraps, either-wheel gate-off, next-cycle retry, wraps, failure cache preservation, init failures\n";
 }

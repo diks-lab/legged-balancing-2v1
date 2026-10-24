@@ -1,15 +1,16 @@
 #pragma once
 #include "Arduino.h"
+#define I2C_BUFFER_LENGTH 128
 class TwoWire {
  public:
   explicit TwoWire(int) {}
   bool busOK = true;
   uint8_t nack = 0, count = 2, magnet = 0x20;
   uint16_t raw = 0;
-  int index = 0, requests = 0;
+  int index = 0, requests = 0, begins = 0;
   uint32_t latency = 0;
   std::function<void()> onRequest;
-  bool begin(int, int, int) { return busOK; }
+  bool begin(int, int, int) { ++begins; return busOK; }
   void setTimeOut(uint16_t) {}
   void beginTransmission(uint8_t) {}
   void write(uint8_t) {}
