@@ -43,6 +43,7 @@
 
 #include "Servo_STS3032.h"
 #include "LegServoBus.h"
+#include "LegSerialDiagnostics.h"
 #include "ssid.h"
 
 namespace {
@@ -362,6 +363,9 @@ float stop_speed_max = 0.0f;
 float stop_speed_abs_max = 0.0f;
 Ps4InputState previous_ps4_input = {};
 leg::Control leg_control;
+leg::SerialDiagnostics leg_serial_records;
+leg::SerialOutput leg_serial_output;
+portMUX_TYPE leg_serial_lock=portMUX_INITIALIZER_UNLOCKED;
 struct LegUartIO {
  int available(){return Serial2.available();}
  int read(){return Serial2.read();}
@@ -820,6 +824,9 @@ void printLqrStatus();
 void printDistanceDiagnostic();
 void printSpeedDiagnostic();
 void serviceLegControl();
+void recordLegInput(uint32_t now);
+void captureLegSerial(uint32_t now);
+void serviceLegSerial();
 bool readLegConfiguration();
 bool prepareLegacyLegAction();
 void pingLegServos();
@@ -4978,10 +4985,11 @@ void httpTask(void*) {
       if(deferred)reportStartupFailure(deferred);
       if(foc_deferred_http_started){Serial.println("WiFi trace HTTP server started.");foc_deferred_http_started=false;}
     }
-    serviceHttpPs4DiagnosticSerial();
+    serviceLegSerial();
+    if(leg_serial_output.idle())serviceHttpPs4DiagnosticSerial();
     serviceHttpFileResponse();
     serviceDiagnosticWebSocket();
-    serviceReleaseMemoryObservation();
+    if(leg_serial_output.idle())serviceReleaseMemoryObservation();
     vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -5942,6 +5950,7 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
   leg_control.input((input.dpad_up?1:0)|(input.dpad_down?2:0)|
       (input.dpad_left?4:0)|(input.dpad_right?8:0),
       ps4_was_connected&&ps4_controls_released&&!input.cross,now_ms);
+  recordLegInput(now_ms);
 
   const bool can_move = lqr_direction_test_armed && !emergency_stop_active &&
       drive_recovery_state == DriveRecoveryState::Inactive &&
@@ -6063,6 +6072,7 @@ void rearmPs4AfterFoc() {
 void observePs4InputOnly(const Ps4InputState& input, uint32_t now) {
   leg_control.received((input.dpad_up?1:0)|(input.dpad_down?2:0)|
       (input.dpad_left?4:0)|(input.dpad_right?8:0),now);
+  recordLegInput(now);
   ps4_diagnostics.observe(input, now);
   previous_ps4_input=input;
   ps4_input_initialized=true;
@@ -6164,6 +6174,32 @@ void updatePs4Controller() {
   }
 }
 
+// Producer runs only in the control task, after input processing / UART service.
+void recordLegInput(uint32_t now){
+  portENTER_CRITICAL(&leg_serial_lock);
+  leg_serial_records.input(leg_control.state.operation.raw_keys,leg_control.input_gate,now);
+  portEXIT_CRITICAL(&leg_serial_lock);
+}
+void captureLegSerial(uint32_t now){
+  portENTER_CRITICAL(&leg_serial_lock);
+  leg_serial_records.capture(leg_control.state,leg_bus.stage(leg_control),now);
+  portEXIT_CRITICAL(&leg_serial_lock);
+}
+// Existing HTTP task is the sole consumer; no output from control or BT/UART callbacks.
+void serviceLegSerial(){
+  if(foc_alignment_observer.active()||release_memory_serial_active||
+      ps4_diagnostic_serial_offset<ps4_diagnostic_serial_size)return;
+  if(leg_serial_output.idle()){
+    leg::SerialDiagnostics::Record record;uint32_t lost;
+    portENTER_CRITICAL(&leg_serial_lock);
+    const bool have=leg_serial_records.pop(record,lost);
+    portEXIT_CRITICAL(&leg_serial_lock);
+    if(have)leg_serial_output.begin(record,lost);
+    else leg_serial_output.loss(lost);
+  }
+  leg_serial_output.service(Serial);
+}
+
 void serviceLegControl() {
   const uint32_t start=micros(),now=millis();
   const bool moving=lqr_auto_drive_active||lqr_drive_start_pending||lqr_soft_stop_active||
@@ -6184,7 +6220,6 @@ void serviceLegControl() {
   leg_control.state.mode=eligible&&!moving&&imu&&!wheel_comm_suspended?(bench?1:2):0;
   const bool hard_stop=!test_system_ready||emergency_stop_active||calibration_active.load()||
       polarity_test_active||!imu;
-  const bool inspecting=leg_bus.inspecting();
   const bool observing=leg_bus.observing();
   // A brief wheel retry freezes the leg target; do not release load-bearing legs.
   if(observing){
@@ -6213,13 +6248,7 @@ void serviceLegControl() {
       emergency_stop_active?leg::Reason::ExplicitStop:!eligible?leg::Reason::StartWaiting:
       !imu?leg::Reason::ImuInvalid:wheel_comm_suspended?leg::Reason::WheelRetry:leg::Reason::Driving;
   leg_control.commit(now,healthy,gate,leg_bus.stage(leg_control));
-  if(observing&&!inspecting&&!leg_bus.observing()){
-    if(leg_control.state.reason==leg::Reason::Idle||leg_control.state.reason==leg::Reason::PositionRange){
-      Serial.printf("LEG READ: right=%d left=%d received_ms=%lu reason=%u; no motion command\n",
-        int(leg_bus.readPosition(true)),int(leg_bus.readPosition(false)),
-        (unsigned long)now,unsigned(leg_control.state.reason));
-    } else Serial.printf("LEG READ: positions unconfirmed reason=%u; no motion command\n",unsigned(leg_control.state.reason));
-  }
+  captureLegSerial(now);
   if(leg_control.state.torque) sms_sts.servo_off=leg_control.state.torque!=3;
   const uint32_t duration=micros()-start;
   if(duration>leg_control.state.max_service_us)leg_control.state.max_service_us=duration;

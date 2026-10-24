@@ -26,6 +26,7 @@ prelude = r'''
 #include "Arduino.h"
 #include "CheckedWheelSensor.h"
 #include "LegServoBus.h"
+#include "LegSerialDiagnostics.h"
 #include "common/lowpass_filter.h"
 #include "LqrMotorVoltage.h"
 #include "Ps4Diagnostics.h"
@@ -184,7 +185,7 @@ struct {
   if(n==8){
    ++reads;
    if(mode){
-    const uint16_t pos=p[2]==1?(mode==2?2009:2036):2053;
+    const uint16_t pos=mode==4?(p[2]==1?1977:2082):(p[2]==1?(mode==2?2009:2036):2053);
     const uint8_t data[]={255,255,p[2],uint8_t(p[6]+2),0,uint8_t(pos),uint8_t(pos>>8),0,0,0};
     memcpy(rx,data,sizeof(data));
     if(p[5]==9){rx[5]=rx[6]=0;rx[7]=255;rx[8]=15;}
@@ -250,7 +251,7 @@ prefix += source[source.index('struct HttpResponseTransport {'):source.index('vo
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','readLegConfiguration','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','recordLegInput','captureLegSerial','readLegConfiguration','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -1048,6 +1049,29 @@ int main(){
 
   puts("PASS: callback/FIFO STOP-Share-press-hold-release, normal/range/CRC/timeout, UART wait and real gate transition; no repeated held-key requests");
 
+  // Confirmed minimum envelope through actual callbacks/FIFO/STOP/Share path.
+  bootFixture();serviceBootAutoStart();step();
+  leg_control=leg::Control(false,leg::Acceptance{1977,2061,2026,2082,true});
+  ps4_was_connected=false;PS4.ok=true;setupPs4Controller();PS4.connect_cb();updatePs4Controller();
+  auto measuredCycle=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();};
+  auto measuredInput=[&](const Ps4InputState&v){PS4.input=v;PS4.input_cb();measuredCycle();};
+  Ps4InputState measuredDown{};measuredDown.dpad_down=true;
+  measuredInput(legNeutral);measuredInput(legStop);measuredInput(legNeutral);measuredInput(legShare);measuredInput(legNeutral);
+  Serial2.mode=4;const auto heldGoals=Serial2.goals;measuredInput(legUp);
+  for(unsigned i=0;i<500;++i)measuredCycle();
+  assert(leg_control.state.active&&leg_control.state.recovery==1&&Serial2.goals==heldGoals+1);
+  assert(leg_control.state.right_command==1977&&leg_control.state.left_command==2082);
+  measuredInput(legNeutral);measuredInput(measuredDown);
+  for(unsigned i=0;i<500;++i)measuredCycle();
+  assert(leg_control.state.right_command>1977&&leg_control.state.left_command<2082);
+  measuredInput(legNeutral);for(unsigned i=0;i<200;++i)measuredCycle();
+  const auto pauseR=leg_control.state.right_command,pauseL=leg_control.state.left_command;
+  for(unsigned i=0;i<200;++i)measuredCycle();
+  assert(leg_control.state.right_command==pauseR&&leg_control.state.left_command==pauseL);
+  measuredInput(measuredDown);for(unsigned i=0;i<7000&&leg_control.state.recovery;++i)measuredCycle();
+  assert(!leg_control.state.recovery&&leg::inRange(true,leg_control.target(true))&&leg::inRange(false,leg_control.target(false)));
+  assert(!lqr_direction_test_armed&&!balance_wait_active);
+
   // HTTP queue -> stopped main task -> UART configuration reads only.
   bootFixture();serviceBootAutoStart();step();assert(executeOperatorCommand(OperatorCommand::FullStop));
   Serial2.mode=1;const auto configGoals=Serial2.goals,configOns=Serial2.ons,configReads=Serial2.reads;
@@ -1413,3 +1437,12 @@ assert 'handleSerialCommand();serviceLegControl();serviceHttpRequests();return;'
 
 assert 'delay(' not in function('serviceLegControl')
 assert 'Ping(' not in function('serviceLegControl')
+
+# New diagnostics only capture fixed records in the main task; no synchronous log in leg service.
+for name in ('recordLegInput','captureLegSerial'):
+    body=function(name)
+    for forbidden in ('Serial.', 'malloc(', 'new ', 'delay(', 'Wire', 'snprintf'):
+        assert forbidden not in body, (name,forbidden)
+assert 'Serial.' not in function('serviceLegControl')
+assert source.count('    serviceLegSerial();')==1
+assert 'serviceLegSerial();' not in function('updatePs4Controller')

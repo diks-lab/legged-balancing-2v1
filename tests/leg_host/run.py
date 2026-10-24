@@ -38,8 +38,15 @@ with tempfile.TemporaryDirectory() as tmp:
         '-DLEG_ACCEPT_RIGHT_MAX=2100','-DLEG_ACCEPT_LEFT_MIN=2000','-DLEG_ACCEPT_LEFT_MAX=2110']
     subprocess.run(['c++','-std=c++17','-Iinclude',*configured,str(acceptance),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
-    for flags in (['-DLEG_ACCEPT_EXTRA_CONFIRMED=1'],configured[:-1],
+    for bad_flags in (['-DLEG_ACCEPT_EXTRA_CONFIRMED=1'],configured[:-1],
                   [*configured,'-ULEG_ACCEPT_RIGHT_MIN','-DLEG_ACCEPT_RIGHT_MIN=2020']):
-        result=subprocess.run(['c++','-std=c++17','-Iinclude',*flags,str(acceptance),'-o',str(binary)],capture_output=True)
+        result=subprocess.run(['c++','-std=c++17','-Iinclude',*bad_flags,str(acceptance),'-o',str(binary)],capture_output=True)
         assert result.returncode
     print('PASS: default extra acceptance disabled, explicit four-limit build, incomplete/invalid configurations fail build')
+
+    import configparser,shlex
+    ini=configparser.ConfigParser();ini.read('platformio.ini')
+    production=shlex.split(ini['env:esp32dev']['build_flags'])
+    subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',*production,
+        'tests/leg_host/measured.cpp','-o',str(binary),*flags],check=True)
+    subprocess.run([str(binary)],check=True)
