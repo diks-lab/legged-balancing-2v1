@@ -5000,6 +5000,7 @@ void startWifiHttpServer() {
     wifi_log_server.on("/panels.css", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/panels.css", "text/css"); });
     wifi_log_server.on("/diagnosis.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/diagnosis.js", "application/javascript"); });
     wifi_log_server.on("/leg-reply.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-reply.js", "application/javascript"); });
+    wifi_log_server.on("/leg-state.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-state.js", "application/javascript"); });
     wifi_log_server.on("/legs.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/legs.js", "application/javascript"); });
     wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
     wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });
@@ -5932,7 +5933,7 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
 
   leg_control.input((input.dpad_up?1:0)|(input.dpad_down?2:0)|
       (input.dpad_left?4:0)|(input.dpad_right?8:0),
-      ps4_was_connected&&ps4_controls_released&&!input.cross);
+      ps4_was_connected&&ps4_controls_released&&!input.cross,now_ms);
 
   const bool can_move = lqr_direction_test_armed && !emergency_stop_active &&
       drive_recovery_state == DriveRecoveryState::Inactive &&
@@ -6052,6 +6053,8 @@ void rearmPs4AfterFoc() {
 }
 
 void observePs4InputOnly(const Ps4InputState& input, uint32_t now) {
+  leg_control.received((input.dpad_up?1:0)|(input.dpad_down?2:0)|
+      (input.dpad_left?4:0)|(input.dpad_right?8:0),now);
   ps4_diagnostics.observe(input, now);
   previous_ps4_input=input;
   ps4_input_initialized=true;
@@ -6164,6 +6167,11 @@ void serviceLegControl() {
       !polarity_test_active&&!calibration_active.load();
   const bool imu=(fallRecoveryChecks()&2u)&&isfinite(mpu6050.getAngleX());
   const float roll=imu?leg::ImuRollSign*mpu6050.getAngleX():NAN;
+  leg_control.state.operation.gates=(test_system_ready?leg::Ready:0)|(lqr_direction_test_armed?leg::Balancing:0)|
+      (bench?leg::Bench:0)|(emergency_stop_active?leg::Emergency:0)|(moving?leg::Moving:0)|
+      (imu?leg::Imu:0)|(wheel_comm_suspended?leg::WheelPause:0)|
+      (calibration_active.load()?leg::Calibration:0)|(polarity_test_active?leg::Polarity:0)|
+      (ps4_was_connected?leg::Connected:0);
   leg_control.state.measured_roll=roll;
   leg_control.state.mode=eligible&&!moving&&imu&&!wheel_comm_suspended?(bench?1:2):0;
   const bool hard_stop=!test_system_ready||emergency_stop_active||calibration_active.load()||
@@ -6188,7 +6196,14 @@ void serviceLegControl() {
     }
     if(!imu&&test_system_ready&&!emergency_stop_active)leg_control.state.reason=leg::Reason::ImuInvalid;
   }
+  leg_control.observe(leg::Source::Guard,now,leg_bus.stage(leg_control));
   leg_bus.service(leg_uart,leg_control,now);
+  const bool healthy=eligible&&!moving&&imu&&!wheel_comm_suspended;
+  const leg::Reason gate=!test_system_ready?leg::Reason::Initializing:
+      calibration_active.load()?leg::Reason::Calibrating:polarity_test_active?leg::Reason::PolarityTest:
+      emergency_stop_active?leg::Reason::ExplicitStop:!eligible?leg::Reason::StartWaiting:
+      !imu?leg::Reason::ImuInvalid:wheel_comm_suspended?leg::Reason::WheelRetry:leg::Reason::Driving;
+  leg_control.commit(now,healthy,gate,leg_bus.stage(leg_control));
   if(observing&&!leg_bus.observing()){
     if(leg_control.state.reason==leg::Reason::Idle||leg_control.state.reason==leg::Reason::PositionRange){
       Serial.printf("LEG READ: right=%d left=%d received_ms=%lu reason=%u; no motion command\n",
@@ -6206,7 +6221,8 @@ bool prepareLegacyLegAction(){
     Serial.println("LEG SERIAL: stop balance and pending leg communication first.");return false;
   }
   leg_control.stop(leg::Reason::Stopped);leg_control.state.command_valid=false;
-  leg_bus.cancel();return true;
+  leg_bus.cancel();leg_control.observe(leg::Source::Legacy,millis(),leg_bus.stage(leg_control));
+  leg_control.commit(millis(),false,leg::Reason::Stopped,leg_bus.stage(leg_control));return true;
 }
 
 void pingLegServos() {
@@ -6230,7 +6246,11 @@ void disableLegServoTorqueForTestEnd(const char* reason) {
   const uint32_t start=micros();
   // Priority nonblocking OFF; never HOME, never re-enable a stale goal.
   leg_bus.off(leg_control);
-  leg_bus.service(leg_uart,leg_control,millis());
+  const uint32_t now=millis();leg_control.state.mode=0;
+  if(emergency_stop_active)leg_control.state.operation.gates|=leg::Emergency;
+  leg_control.observe(leg::Source::Stop,now,leg_bus.stage(leg_control));
+  leg_bus.service(leg_uart,leg_control,now);
+  leg_control.commit(now,false,!strcmp(reason,"DISARM")?leg::Reason::ExplicitStop:leg::Reason::Stopped,leg_bus.stage(leg_control));
   sms_sts.servo_off=true;
   const uint32_t duration=micros()-start;
   if(duration>leg_control.state.max_service_us)leg_control.state.max_service_us=duration;

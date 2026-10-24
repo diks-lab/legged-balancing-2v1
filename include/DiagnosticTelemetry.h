@@ -108,7 +108,7 @@ inline bool sample(char*dest,size_t capacity,const Snapshot&s,const char*boot,ui
  j.add("}}");return j.ok;
 }
 // Separate bounded diagnostic frame: never enlarge the 2048-byte sample budget.
-inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const char*boot){
+inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const char*boot,uint32_t source_age_ms=0){
  Json j(dest,capacity);j.add("{\"type\":\"wheel_diagnostics\",\"boot_id\":\"%s\"",boot);
  for(unsigned side=0;side<2;++side){
   const auto&d=s.wheel_reads[side];if(!d.latched)continue;
@@ -150,6 +150,22 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   j.add(",%d,%d]",right?leg::RightHome:leg::LeftHome,right?leg::RightExtended:leg::LeftExtended);
  }
  j.add("]");
+ const auto&o=l.operation;const auto&c=o.confirmed;
+ j.add(",\"leg_age_ms\":%lu,\"leg_state\":",(unsigned long)source_age_ms);
+ if(!o.committed)j.add("null");
+ else {
+  j.add("[%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%lu,%u,%lu,%u,[",
+   (unsigned long)c.sequence,(unsigned long)o.confirmed_ms,unsigned(o.mode),unsigned(o.allowed),
+   unsigned(o.operation),unsigned(o.blocker),unsigned(c.raw),unsigned(c.keys),unsigned(c.flags),
+   unsigned(c.phase),unsigned(c.gates),unsigned(o.failure),(unsigned long)o.failure_ms,
+   unsigned(o.failure_source),(unsigned long)o.overwritten,unsigned(o.source));
+  for(unsigned i=0;i<o.count;++i){const auto&e=o.events[(o.next+4-o.count+i)%4];
+   j.add("%s[%lu,%lu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u]",i?",":"",
+    (unsigned long)e.sequence,(unsigned long)e.ms,unsigned(e.source),unsigned(e.from_reason),unsigned(e.reason),
+    unsigned(e.from_phase),unsigned(e.phase),unsigned(e.raw),unsigned(e.keys),unsigned(e.flags),unsigned(e.gates),unsigned(e.mode));
+  }
+  j.add("]]");
+ }
  const auto&r=l.rx_failure;
  j.add(",\"leg_rx\":");
  if(!r.issues)j.add("null");

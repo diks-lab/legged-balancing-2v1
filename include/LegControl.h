@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <math.h>
 #include "LegServoReply.h"
+#include "LegOperation.h"
 namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
 constexpr int RightHome=2061,RightExtended=1892,LeftHome=2026,LeftExtended=2208;
@@ -64,6 +65,7 @@ struct State {
  uint8_t mode=0; // unavailable, supported stopped test, stationary balance
  RxFailure rx_failure;
  PositionObservation positions;
+ OperationObservation operation;
 };
 class Control {
  public:
@@ -71,12 +73,16 @@ class Control {
  State state;
  uint8_t keys=0; // up/down/left/right
  bool input_gate=false,want_sync=false;
- void input(uint8_t value,bool released_gate){
+ void input(uint8_t value,bool released_gate,uint32_t now=0){
+  state.operation.raw_keys=value;
   keys=released_gate?value:0;input_gate=released_gate;
   if(released_gate&&!value)armed_=true; // preserve release events within a FIFO batch
+  observe(Source::Input,now,state.operation.phase);
  }
+ void received(uint8_t value,uint32_t now){state.operation.raw_keys=value;observe(Source::Input,now,state.operation.phase);}
  void disconnect(){keys=0;input_gate=false;} // active height holds, roll returns smoothly to zero
  void stop(Reason reason){
+  state.operation.tx_wait=false;
   state.active=state.synced=false;want_sync=false;armed_=false;state.reason=reason;
   state.requested_roll=state.applied_roll=0;state.limited=false;last_=0;
  }
@@ -89,6 +95,64 @@ class Control {
  }
  void activate(uint32_t now){state.active=true;state.reason=Reason::Accepted;last_=now;}
  void tick(uint32_t now,bool eligible,bool moving,bool imu_valid,float roll){
+  update(now,eligible,moving,imu_valid,roll);
+  observe(Source::Control,now,state.operation.phase);
+ }
+ void observe(Source source,uint32_t now,uint8_t phase){
+  auto&o=state.operation;
+  const uint8_t flags=(input_gate?1:0)|(armed_?2:0)|(state.active?4:0)|(state.synced?8:0)|(want_sync?16:0)|(state.operation.tx_wait?32:0);
+  const Transition*previous=o.count?&o.events[(o.next+3)%4]:nullptr;
+  if(previous&&previous->gates==o.gates&&previous->raw==o.raw_keys&&previous->keys==keys&&
+     previous->reason==uint8_t(state.reason)&&previous->phase==phase&&previous->flags==flags&&previous->mode==state.mode)return;
+  const uint8_t prior=previous?previous->reason:255;
+  if((state.reason==Reason::PositionRange||state.reason==Reason::ReplyTimeout||state.reason==Reason::ReplyInvalid||
+      state.reason==Reason::TxFailed||state.reason==Reason::ClockGap||state.reason==Reason::RollUnconfirmed)&&prior!=uint8_t(state.reason)){
+   o.failure=uint8_t(state.reason);o.failure_ms=now;o.failure_source=uint8_t(source);
+  }
+  Transition event;event.ms=now;event.sequence=++o.revision;event.gates=o.gates;
+  event.raw=o.raw_keys;event.keys=keys;event.reason=uint8_t(state.reason);event.phase=phase;
+  event.source=uint8_t(source);event.flags=flags;event.mode=state.mode;
+  event.from_reason=prior;event.from_phase=previous?previous->phase:255;
+  if(o.count==4)++o.overwritten;else ++o.count;
+  o.events[o.next]=event;o.next=(o.next+1)%4;o.phase=phase;
+ }
+ void commit(uint32_t now,bool healthy,Reason gate,uint8_t phase){
+  observe(Source::Guard,now,phase);
+  auto&o=state.operation;
+  const bool new_press=(o.raw_keys&uint8_t(~o.confirmed.raw))!=0;
+  const bool interrupted=(o.confirmed.flags&(4u|16u))!=0;
+  if(!healthy&&gate!=Reason::ExplicitStop&&(o.raw_keys||interrupted)&&
+      (o.failure==255||interrupted||new_press)&&(o.guard!=uint8_t(gate)||new_press)){
+   o.failure=uint8_t(gate);o.failure_ms=now;o.failure_source=uint8_t(Source::Guard);
+  }
+  o.guard=healthy?255:uint8_t(gate);
+  if(o.count)o.confirmed=o.events[(o.next+3)%4];
+  o.confirmed.ms=now;o.confirmed.sequence=o.revision;
+  o.committed=true;o.confirmed_ms=now;o.mode=healthy?state.mode:0;
+  o.source=o.count?o.events[(o.next+3)%4].source:0;o.blocker=uint8_t(gate);o.allowed=0;
+  if(!healthy){o.operation=uint8_t(Operation::Stopped);return;}
+  o.blocker=255;
+  if(phase==7){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::Stopped);return;}
+  if(o.tx_wait){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::TxBusy);return;}
+  if(want_sync||(phase>=1&&phase<=6)){o.operation=uint8_t(Operation::Sync);return;}
+  if(!input_gate){o.operation=uint8_t(Operation::Release);o.blocker=uint8_t(Reason::ReleaseRequired);return;}
+  if(!state.active&&!armed_){
+   const Reason failure=Reason(o.failure);
+   const bool failed=failure==Reason::PositionRange||failure==Reason::ReplyTimeout||
+       failure==Reason::ReplyInvalid||failure==Reason::TxFailed||failure==Reason::ClockGap;
+   o.operation=uint8_t(failed?Operation::Failed:Operation::Release);
+   o.blocker=failed?o.failure:uint8_t(Reason::ReleaseRequired);return;
+  }
+  o.allowed=1;o.operation=uint8_t(Operation::Wait);
+  if(!roll_confirmed_&&(keys&12)){o.blocker=uint8_t(Reason::RollUnconfirmed);return;}
+  if(state.active){
+   const int height=int(bool(keys&1))-int(bool(keys&2)),rollAxis=int(bool(keys&4))-int(bool(keys&8));
+   o.operation=uint8_t(height>0?Operation::Extend:height<0?Operation::Retract:
+      rollAxis>0?Operation::Left:rollAxis<0?Operation::Right:Operation::Wait);
+  }
+ }
+ private:
+ void update(uint32_t now,bool eligible,bool moving,bool imu_valid,float roll){
   state.measured_roll=imu_valid?roll:NAN;
   const uint32_t elapsed=last_?uint32_t(now-last_):0;last_=now;
   if(!eligible){stop(Reason::Stopped);return;}
@@ -126,7 +190,8 @@ class Control {
   difference_=clamp(toward(difference_,clamp(desired,-room,room),DifferentialRate*dt),-room,room);
   state.right_percent=state.height+difference_;state.left_percent=state.height-difference_;
   state.limited=height_limited||fabsf(state.applied_roll-state.requested_roll)>.0001f||fabsf(desired)>room;
-  state.reason=(!roll_confirmed_&&(keys&12))?Reason::RollUnconfirmed:Reason::Accepted;
+  state.reason=(!roll_confirmed_&&(keys&12))?Reason::RollUnconfirmed:
+      state.operation.tx_wait?Reason::TxBusy:Reason::Accepted;
  }
  private:
  uint32_t last_=0;

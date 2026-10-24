@@ -122,7 +122,7 @@
           style.textContent = await asset(target);
           document.head.appendChild(style);
         }
-        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/diagnosis.js', '/leg-reply.js', '/legs.js', '/status.js', '/dashboard.js', '/app.js']) {
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/diagnosis.js', '/leg-reply.js', '/leg-state.js', '/legs.js', '/status.js', '/dashboard.js', '/app.js']) {
           const script = document.createElement('script');
           script.textContent = await asset(target);
           document.head.appendChild(script);

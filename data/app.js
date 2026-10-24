@@ -119,6 +119,8 @@ window.startLogger = function () {
     generation = first = null;
     subscription.disconnected();
     dashboard.stop();
+    dashboard.legPacket = null;
+    dashboard.legReceivedAt = 0;
     // Keep old lines separate even if reconnect preserves the device generation.
     history.breakNext = true;
     const ws = new WebSocket(`ws://${location.hostname}:81/diagnostics`);
@@ -143,6 +145,8 @@ window.startLogger = function () {
           dashboard.wheelReads = { wheel0: s.wheel0, wheel1: s.wheel1 };
           dashboard.legPacket = {
             legs: s.legs,
+            leg_state: s.leg_state,
+            leg_age_ms: s.leg_age_ms,
             leg_rx: s.leg_rx,
             leg_position: s.leg_position,
             leg_ms: s.leg_ms,
@@ -150,6 +154,7 @@ window.startLogger = function () {
             leg_roll_confirmed: s.leg_roll_confirmed,
             leg_roll_sign: s.leg_roll_sign
           };
+          dashboard.legReceivedAt = performance.now();
           dashboard.status();
         }
         return;

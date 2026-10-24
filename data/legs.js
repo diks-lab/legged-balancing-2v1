@@ -23,42 +23,24 @@ const LEG_LABELS = {
   operation: '現在の操作', blocker: '動作を妨げる理由', sync: '位置同期',
   height: '高さ指令', roll: '左右傾斜', failure: '直近の操作失敗'
 };
-function legPresentation(packet, live, sampleMs, cache) {
+function legPresentation(packet, live, elapsed, cache) {
   const l = packet?.legs;
   const valid = Array.isArray(l) && l.length === 19;
-  const fresh = valid && live && ((sampleMs - packet.leg_ms) >>> 0) <= 1500;
+  const decision = legDecision(packet, live, elapsed);
+  const fresh = decision.fresh;
   const n = (v, unit) => Number.isFinite(v) ? `${v.toFixed(1)} ${unit}` : '不明';
-  const reason = valid ? l[10] : -1;
-  if (fresh && cache.ms !== packet.leg_ms) {
-    const previous = cache.height;
-    cache.operation = reason === 2 ? '位置確認中' : !l[12] ? '待機' :
-      Number.isFinite(previous) && l[0] > previous ? '伸長（高さ指令）' :
-      Number.isFinite(previous) && l[0] < previous ? '短縮（高さ指令）' : '待機・高さ保持';
-    if ([7, 8, 9, 10, 11, 14].includes(reason) && cache.reason !== reason) {
-      cache.failure = `${LEG_BLOCKERS[reason]}（発生 ${packet.leg_ms} ms）`;
-    }
-    cache.height = l[0];
-    cache.reason = reason;
-    cache.ms = packet.leg_ms;
-  }
-  const rx = legReplyPresentation(packet?.leg_rx);
-  if (rx && cache.rxMs !== rx.ms) {
-    cache.failure = `${rx.summary}（発生 ${rx.ms} ms）`;
-    cache.rxMs = rx.ms;
-  }
   const confirmed = packet?.leg_roll_confirmed === true;
-  const blocked = !fresh || packet.leg_mode === 0 || ![1, 2, 3, 14].includes(reason);
   const raw = valid && Math.abs(packet.leg_roll_sign) === 1 ? l[3] / packet.leg_roll_sign : null;
   const values = {
-    mode: valid ? ['操作不可', '支持試験（倒立OFF）', '静止倒立'][packet.leg_mode] || '未取得' : '未取得',
-    available: fresh ? blocked ? '操作不可／条件待ち' : confirmed ? '上下・左右操作可能' : '上下操作可能' : '現在不明',
+    mode: decision.mode,
+    available: decision.available,
     correction: confirmed ? '有効・確認済設定' : '無効・方向未確認',
-    operation: fresh ? reason === 2 ? '位置確認中' : blocked ? '停止・条件待ち' : cache.operation || '待機' : '現在不明',
-    blocker: fresh ? reason === 9 && rx ? rx.summary : LEG_BLOCKERS[reason] || 'なし' : valid ? '通信停止。現在状態は不明' : '診断未受信',
-    sync: !valid ? '未確認' : reason === 2 ? '確認中' : [7, 8, 9, 10].includes(reason) ? '失敗' : l[13] ? '確認済' : '実位置確認前',
+    operation: decision.operation,
+    blocker: decision.blocker,
+    sync: decision.sync,
     height: valid && l[15] ? `左 ${n(l[5], '%')} ／ 右 ${n(l[4], '%')}\n最終送信指令・実位置ではありません` : '指令未送信',
     roll: valid ? `AngleX ${Number.isFinite(l[3]) ? n(raw, '°') : '不明'}\n目標 ${n(l[1], '°')} ／ 適用 ${n(l[2], '°')}` : '未取得',
-    failure: cache.failure ? `過去の記録：${cache.failure}` : '記録なし（この画面で受信した範囲）'
+    failure: decision.failure
   };
   const detail = valid ? {
     position: `最終送信位置指令：左 ${l[15] ? l[7] : '未送信'} ／ 右 ${l[15] ? l[6] : '未送信'}（実位置ではありません）`,
@@ -67,8 +49,7 @@ function legPresentation(packet, live, sampleMs, cache) {
     torque: `トルク：${['未確認', 'OFF送信待ち', 'OFF指令送信済', 'ON指令送信済'][l[11]] || '不明'}（応答未確認）`,
     limits: `可動制限：${l[14] ? 'あり' : 'なし'} ／ 共通高さ目標 ${n(l[0], '%')}`
   } : { position: '未取得', timing: '未取得', counters: '未取得', torque: '未取得', limits: '未取得' };
-  return { values, detail, fresh, note: fresh ? '最新受信情報（操作表示は1 Hzの指令変化から判定）' :
-    valid ? '通信停止・最終受信時の情報。現在の状態ではありません' : '診断未受信' };
+  return { values, detail, fresh, note: decision.note };
 }
 function createLegPanel(view) {
   const make = (tag, text, parent, id) => {
@@ -109,7 +90,8 @@ function createLegPanel(view) {
     '再接続・転倒後：解放・再操作から位置を再確認。未確認の古い目標へ戻しません。'
   ]) make('li', text, list);
   const reply = createLegReplyPanel(section);
-  return { nodes, detail, note, reply, cache: {} };
+  const state = createLegStatePanel(section);
+  return { nodes, detail, note, reply, state, cache: {} };
 }
 function renderLegDiagnostics(view, current) {
   const ui = view.legUI || (view.legUI = createLegPanel(view));
@@ -117,9 +99,10 @@ function renderLegDiagnostics(view, current) {
     ui.cache = {};
     ui.boot = view.sample.boot_id;
   }
-  const state = legPresentation(view.legPacket, current, view.sample.sample_ms, ui.cache);
+  const state = legPresentation(view.legPacket, view.live, performance.now() - (view.legReceivedAt || 0), ui.cache);
   const update = (node, text) => { if (node.textContent !== text) node.textContent = text; };
   update(ui.note, state.note);
+  renderLegState(ui.state, view.legPacket);
   renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh, view.legPacket?.leg_position);
   for (const [key, text] of Object.entries(state.values)) update(ui.nodes[key], text);
   for (const [key, text] of Object.entries(state.detail)) update(ui.detail[key], text);

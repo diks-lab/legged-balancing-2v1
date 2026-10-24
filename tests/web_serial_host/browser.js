@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
@@ -43,6 +43,17 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
             if (window.autoAck) window.reply(packet); }
           close() { this.readyState = 3; this.onclose({ code: 1006 }); }
         };
+        window.legState = (reason, mode = 1, rx = null) => {
+          if ([7, 8, 9, 10, 11, 14].includes(reason)) window.legFailure = [reason, rx?.[0] || window.sequence * 50];
+          const failure = window.legFailure || [255, 0];
+          const allowed = reason === 1 || reason === 3 || reason === 14;
+          const operation = reason === 2 ? 5 : reason === 3 ? 1 : reason === 17 ? 6 :
+            [7, 8, 9, 10, 11].includes(reason) ? 7 : 0;
+          return [window.sequence, window.sequence * 50, mode, Number(allowed), operation,
+            [1, 2, 3].includes(reason) ? 255 : reason, reason === 3 ? 1 : 0, reason === 3 ? 1 : 0,
+            reason === 3 ? 15 : 3, reason === 2 ? 2 : reason === 3 ? 8 : 0,
+            549, failure[0], failure[1], 3, 0, 2, []];
+        };
         window.sample = (extra = {}) => {
           const seq = ++window.sequence, request = window.sent.at(-1);
           const values = Object.fromEntries((request.fields || []).map(key => [key,
@@ -70,12 +81,23 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
         type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
         leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
+        leg_age_ms: 0, leg_state: window.legState(3),
         legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 40, 30, 3, 3, 1, 1, 1, 1, 4, 0, 27]
       }) }));
       assert((await page.locator('#leg-diagnostics').textContent()).includes('実位置ではありません'));
       assert((await page.locator('#leg-diagnostics').textContent()).includes('応答未確認'));
       assert((await page.locator('#leg-diagnostics').textContent()).includes('可動制限：あり'));
       assert.equal(await page.locator('#leg-mode').textContent(), '支持試験（倒立OFF）');
+      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
+        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50 + 1,
+        leg_age_ms: 0, leg_state: window.legState(1), leg_mode: 1,
+        leg_roll_confirmed: false, leg_roll_sign: 1,
+        legs: [15, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
+      }) }));
+      assert.equal(await page.locator('#leg-available').textContent(), '上下操作可能');
+      await page.waitForTimeout(120);
+      assert.equal(await page.locator('#leg-available').textContent(), '上下操作可能');
+
       const legResult = await page.evaluate(async () => {
         const section = document.getElementById('leg-diagnostics');
         const rows = [...section.querySelectorAll('.leg-field')];
@@ -88,6 +110,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
           window.peer.onmessage({ data: JSON.stringify({
             type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
             leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1, leg_rx: rx, leg_position: position,
+            leg_age_ms: 0, leg_state: window.legState(reason, mode, rx),
             legs: [height, 0, 0, -48.9, 16, 14, 2034, 2055, 40, 30, reason, 3,
               reason === 1 || reason === 17 ? 0 : 1, [1, 8, 17].includes(reason) ? 0 : 1,
               0, reason === 1 ? 0 : 1, 4, 0, 27]
@@ -131,10 +154,10 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       });
       for (const state of legResult.states) assert.deepEqual(state.geometry, legResult.original);
       assert(legResult.states[1].operation.includes('伸長'));
-      assert(legResult.states[2].operation.includes('位置確認中'));
+      assert(legResult.states[2].operation.includes('位置確認'));
       assert(legResult.states[3].blocker.includes('応答なし'));
       assert.equal(legResult.states[4].blocker, 'なし');
-      assert(legResult.states[4].failure.includes('過去の記録'));
+      assert(legResult.states[4].failure.includes('直近操作の記録'));
       assert(legResult.states[5].blocker.includes('Share'));
       assert.equal(legResult.states[6].blocker, 'なし');
       assert.equal(legResult.states[6].available, '上下操作可能');

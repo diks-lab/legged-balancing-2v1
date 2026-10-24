@@ -173,9 +173,25 @@ struct {
   bool begin(){++begins;return ok;} // No pairing-argument overload is allowed here.
 } PS4;
 struct {
- int available(){return 0;}int read(){return -1;}
- int availableForWrite(){return 128;}size_t writes=0,last_size=0;uint8_t last[24]{};
- size_t write(const uint8_t*p,size_t n){assert(n<=sizeof(last));memcpy(last,p,n);last_size=n;++writes;return n;}
+ uint8_t rx[8]{},last[24]{};unsigned head=0,tail=0,mode=0;int capacity=128;
+ size_t writes=0,last_size=0,reads=0,goals=0,ons=0;
+ int available(){return int(tail-head);}int read(){return head<tail?rx[head++]:-1;}
+ int availableForWrite(){return capacity;}
+ size_t write(const uint8_t*p,size_t n){
+  assert(n<=sizeof(last));memcpy(last,p,n);last_size=n;++writes;
+  if(n==24)++goals;
+  if(n==12&&p[5]==40&&p[8])++ons;
+  if(n==8){
+   ++reads;
+   if(mode){
+    const uint16_t pos=p[2]==1?(mode==2?2009:2036):2053;
+    const uint8_t data[]={255,255,p[2],4,0,uint8_t(pos),uint8_t(pos>>8),0};
+    memcpy(rx,data,8);uint8_t sum=0;for(unsigned i=2;i<7;++i)sum+=rx[i];
+    rx[7]=uint8_t(~sum)+uint8_t(mode==3&&p[2]==2);head=0;tail=8;
+   }
+  }
+  return n;
+ }
 } Serial2;
 struct {bool servo_off=false;} sms_sts;
 enum class FOCMotorStatus { motor_ready=4, motor_calib_failed=5 };
@@ -289,6 +305,7 @@ void nearAt(float x,float y,int line){if(!(std::fabs(x-y)<1e-5f))fprintf(stderr,
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
   leg_control=leg::Control{};leg_bus=leg::ServoBus<LegUartIO>{};sms_sts.servo_off=false;
+  Serial2.mode=0;Serial2.head=Serial2.tail=0;Serial2.capacity=128;
   motor1.cachedSensor=motor2.cachedSensor=nullptr;
   wheel_comm_suspended=false;sensor1.releaseControlCycle();sensor2.releaseControlCycle();
   boot_auto_start=BootAutoStart{false};
@@ -940,7 +957,7 @@ int main(){
   near(motor1.target,0);near(motor2.target,0);
   publishDiagnosticSnapshot(true);
   assert(diagnostic_latest.legs.mode==1&&diagnostic_latest.legs.reason==leg::Reason::Idle);
-  char legReadyJson[1024];
+  char legReadyJson[2048];
   assert(diagnostic::wheelReadMessage(legReadyJson,sizeof(legReadyJson),diagnostic_latest,"bench-share"));
   const char* legOutput=getenv("DRIVE_LEG_READY_OUTPUT");
   if(legOutput){FILE*f=fopen(legOutput,"w");assert(f);fputs(legReadyJson,f);fclose(f);}
@@ -957,6 +974,76 @@ int main(){
   test_system_ready=false;serviceLegControl();
   assert(leg_control.state.mode==0&&leg_control.state.reason==leg::Reason::Initializing);
   assert(!executeOperatorCommand(OperatorCommand::EnableDrivers));
+
+  // Full callback/FIFO/held-input path, not hand-seeded controller tests.
+  for(unsigned responseMode:{1u,2u,3u,0u}){
+    bootFixture();serviceBootAutoStart();step();
+    ps4_was_connected=false;PS4.ok=true;setupPs4Controller();
+    PS4.connect_cb();updatePs4Controller();
+    auto cycleLeg=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();publishDiagnosticSnapshot(true);};
+    auto sendLeg=[&](const Ps4InputState&input){PS4.input=input;PS4.input_cb();cycleLeg();};
+    Ps4InputState neutral{},cross{},share{},up{};cross.cross=true;share.share=true;up.dpad_up=true;
+    sendLeg(neutral);sendLeg(cross);sendLeg(neutral);sendLeg(share);sendLeg(neutral);
+    assert(!emergency_stop_active&&!lqr_direction_test_armed&&!balance_wait_active);
+    assert(leg_control.state.operation.allowed&&leg_control.state.operation.blocker==255);
+    const auto oldReads=Serial2.reads,oldGoals=Serial2.goals,oldOns=Serial2.ons;
+    Serial2.mode=responseMode;sendLeg(up);
+    for(unsigned tick=0;tick<400;++tick){
+      cycleLeg();const auto&o=leg_control.state.operation;
+      assert(ps4_was_connected&&o.confirmed.raw==1&&o.confirmed.keys==1); // no disconnect or new notifications
+      assert(diagnostic_latest.legs.operation.confirmed.sequence==o.confirmed.sequence);
+      assert(!lqr_direction_test_armed&&!balance_wait_active);
+      if(leg_control.state.active)assert(o.allowed&&o.operation==uint8_t(leg::Operation::Extend)&&o.blocker==255);
+    }
+    const auto&o=leg_control.state.operation;
+    if(responseMode==1){
+      assert(leg_control.state.active&&Serial2.goals>oldGoals&&Serial2.ons==oldOns+1);
+      const float height=leg_control.state.height;
+      for(unsigned tick=0;tick<300;++tick)cycleLeg();
+      assert(leg_control.state.height>height); // identical/no packets still ramp
+      Serial2.capacity=0;
+      for(unsigned tick=0;tick<100;++tick)cycleLeg();
+      for(unsigned tick=0;tick<100;++tick){
+        cycleLeg();assert(!o.allowed&&o.blocker==12&&(o.confirmed.flags&32)&&leg_control.state.reason==leg::Reason::TxBusy);
+      }
+      Serial2.capacity=128;
+      for(unsigned tick=0;tick<60;++tick)cycleLeg();
+      assert(o.allowed&&o.blocker==255&&!(o.confirmed.flags&32));
+      wheel_comm_suspended=true;cycleLeg();
+      assert(!o.allowed&&o.blocker==13&&(o.confirmed.gates&leg::WheelPause)&&o.failure==13);
+      wheel_comm_suspended=false;
+      for(unsigned tick=0;tick<10;++tick){cycleLeg();assert(!o.allowed&&o.blocker==0);}
+      assert(o.confirmed.raw==1&&o.confirmed.keys==1); // no false waiting/permission while held
+    }else{
+      const unsigned reason=responseMode==2?7:responseMode==3?9:8;
+      assert(!leg_control.state.active&&o.failure==reason&&o.blocker==reason);
+      assert(o.operation==uint8_t(leg::Operation::Failed)&&!o.allowed);
+      assert(Serial2.goals==oldGoals&&Serial2.ons==oldOns);
+      const auto failedAt=o.failure_ms;const auto readCount=Serial2.reads;
+      for(unsigned tick=0;tick<100;++tick){if(!(tick%10))sendLeg(up);else cycleLeg();}
+      assert(o.failure_ms==failedAt&&Serial2.reads==readCount); // no held-key retry or flicker
+      wheel_comm_suspended=true;cycleLeg();assert(o.blocker==13&&o.failure==reason);
+      wheel_comm_suspended=false;cycleLeg();assert(!o.allowed&&o.blocker==reason&&o.failure_ms==failedAt);
+    }
+    assert(Serial2.reads>oldReads);
+    sendLeg(neutral);
+    assert(leg_control.state.operation.allowed&&leg_control.state.operation.blocker==255);
+    assert(leg_control.state.operation.operation==uint8_t(leg::Operation::Wait));
+    if(responseMode!=1)assert(leg_control.state.operation.failure!=255); // separate from waiting
+    const char*output=getenv("DRIVE_LEG_FLOW_OUTPUT");
+    if(output&&responseMode==2){
+      char json[2048];assert(diagnostic::wheelReadMessage(json,sizeof(json),diagnostic_latest,"flow-test"));
+      FILE*f=fopen(output,"w");assert(f);fputs(json,f);fclose(f);
+    }
+    sendLeg(up);
+    if(responseMode!=1){
+      for(unsigned tick=0;tick<200;++tick)cycleLeg();
+      assert(Serial2.reads>oldReads+1&&leg_control.state.operation.failure!=255);
+    }
+    sendLeg(cross);assert(!leg_control.state.operation.allowed&&leg_control.state.operation.blocker==17);
+  }
+
+  puts("PASS: callback/FIFO STOP-Share-press-hold-release, normal/range/CRC/timeout, UART wait and real gate transition; no repeated held-key requests");
 
   // Actual leg integration uses cached IMU only, never stops wheel balance.
   bootFixture();serviceBootAutoStart();step();

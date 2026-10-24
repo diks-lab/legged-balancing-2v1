@@ -29,7 +29,7 @@ void operator delete(void*p)noexcept{free(p);}void operator delete(void*p,size_t
 struct IO{
  diagnostic::WsObservation events[64]{};unsigned eventCount=0;unsigned snapshotCost=0,clockStep=0;
  void observe(const diagnostic::WsObservation&r){assert(eventCount<64);events[eventCount++]=r;}
- bool wheelFault=false;
+ bool wheelFault=false,staleLeg=false;
  uint32_t tick=0;bool open=true;unsigned closes=0,reads=0,writes=0;
  char input[16384]{},output[200000]{};size_t in=0,pos=0,out=0;int limit=256,readLimit=128,error=0,readError=0;
  uint32_t now(){auto n=tick;tick+=clockStep;return n;}bool connected(){return open;}
@@ -37,7 +37,7 @@ struct IO{
  int read(char*p,size_t n){++reads;if(readError)return readError;if(pos==in)return -EAGAIN;size_t amount=std::min({n,in-pos,size_t(readLimit)});memcpy(p,input+pos,amount);pos+=amount;return amount;}
  int write(const char*p,size_t n){++writes;if(error)return error;size_t amount=std::min(n,size_t(limit));assert(out+amount<sizeof(output));memcpy(output+out,p,amount);out+=amount;return amount;}
  bool acceptKey(const char*key,char*out){if(strcmp(key,"dGhlIHNhbXBsZSBub25jZQ=="))return false;strcpy(out,"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");return true;}
- void snapshot(diagnostic::Snapshot&s){tick+=snapshotCost;s.wheel_reads[0].latched=wheelFault;s.wheel_reads[0].probes=3;s.sample_ms=tick;s.source_seq=tick/50;s.values[2]=-2.42;s.values[6]=.15;s.values[7]=.14;s.values[24]=12345;}
+ void snapshot(diagnostic::Snapshot&s){tick+=snapshotCost;if(staleLeg){s.legs.operation.committed=true;s.legs.operation.confirmed_ms=tick-2000;}s.wheel_reads[0].latched=wheelFault;s.wheel_reads[0].probes=3;s.sample_ms=tick;s.source_seq=tick/50;s.values[2]=-2.42;s.values[6]=.15;s.values[7]=.14;s.values[24]=12345;}
  void raw(const char*p,size_t n){assert(in+n<sizeof(input));memcpy(input+in,p,n);in+=n;}
  void message(const std::string&msg,unsigned op=1,bool mask=true){size_t n=msg.size();unsigned char h[8]={uint8_t(0x80|op),uint8_t((mask?128:0)|(n<126?n:126)),0,0,1,2,3,4};size_t at=2;if(n>=126){h[2]=n>>8;h[3]=n;at=4;}if(mask){h[at]=1;h[at+1]=2;h[at+2]=3;h[at+3]=4;}raw((char*)h,at+(mask?4:0));for(size_t i=0;i<n;++i){char c=msg[i]^(mask?char(i%4+1):0);raw(&c,1);}}
 };
@@ -58,9 +58,9 @@ int main(){
   i.message("{\"type\":\"stop\",\"request_id\":3}");poll(w,i,30);assert(w.generation()==3&&w.mask()==0);w.disconnect(i);assert(i.closes==1);i.open=true;i.in=i.pos=i.out=0;handshake(w,i);assert(w.mask()==0&&w.generation()==3);i.message(sub);poll(w,i,25);assert(w.generation()==4&&w.mask()==(diagnostic::PermanentMask|(1u<<2)|(1u<<6)));w.disconnect(i);assert(i.closes==2);
  }
  // Fault diagnostics use the same bounded slot, independent of sample sequence.
- {IO i;WS w;handshake(w,i);i.wheelFault=true;i.message(sub);poll(w,i,650);
+ {IO i;WS w;handshake(w,i);i.wheelFault=true;i.staleLeg=true;i.message(sub);poll(w,i,650);
   assert(w.active());size_t at=0;unsigned wheel=0,samples=0;
-  while(at+4<i.out){auto msg=payload(i,at);wheel+=msg.find("wheel_diagnostics")!=msg.npos;samples+=msg.find("\"sample\"")!=msg.npos;}
+  while(at+4<i.out){auto msg=payload(i,at);if(msg.find("wheel_diagnostics")!=msg.npos)assert(msg.find("\"leg_age_ms\":2000")!=msg.npos);wheel+=msg.find("wheel_diagnostics")!=msg.npos;samples+=msg.find("\"sample\"")!=msg.npos;}
   assert(wheel>=1&&samples>=10);}
  // Reproduce real time advancing during snapshot/JSON and timer reads.
  for(unsigned cost:{1u,5u})for(unsigned step:{0u,1u}){
@@ -94,7 +94,13 @@ int main(){
   auto&position=all.legs.positions;position.attempt_ms=UINT32_MAX;
   position.acquired=position.current=3;position.received_ms[0]=position.received_ms[1]=UINT32_MAX;
   position.word[0]=UINT16_MAX;position.word[1]=32767;
-  char wheel[1024];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef"));
+  auto&o=all.legs.operation;o.committed=true;o.count=4;o.next=0;o.revision=o.overwritten=UINT32_MAX;
+  o.failure_ms=o.confirmed_ms=UINT32_MAX;o.failure=10;o.failure_source=3;o.gates=1023;
+  o.confirmed.ms=o.confirmed.sequence=UINT32_MAX;
+  o.confirmed.raw=o.confirmed.keys=15;o.confirmed.flags=63;o.confirmed.phase=8;o.confirmed.gates=1023;
+  o.mode=2;o.allowed=1;o.operation=8;o.blocker=255;
+  for(auto&e:o.events){e.ms=e.sequence=UINT32_MAX;e.gates=1023;e.raw=e.keys=e.reason=e.phase=e.flags=e.mode=e.from_reason=e.from_phase=255;e.source=3;}
+  char wheel[2048];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef",UINT32_MAX));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   assert(strstr(wheel,"\"legs\":["));
   assert(strstr(wheel,"\"leg_rx\":[4294967295"));

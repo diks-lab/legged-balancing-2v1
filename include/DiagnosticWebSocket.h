@@ -118,7 +118,7 @@ template<class IO> class WebSocket {
   if(handshakeSent_&&!txSize_&&!rxSize_&&int32_t(now-wheelDiagDue_)>=0){
    wheelDiagDue_=now+1000;Snapshot s;io.snapshot(s);
    { // Latest leg status shares the bounded low-rate device diagnostics frame.
-    if(!wheelReadMessage(tx_,2048,s,boot_)){end(io,WsReason::JsonError);return;}
+    if(!wheelReadMessage(tx_,2048,s,boot_,uint32_t(io.now()-(s.legs.operation.committed?s.legs.operation.confirmed_ms:s.sample_ms)))){end(io,WsReason::JsonError);return;}
     frame(io,1,strlen(tx_));return;
    }
   }

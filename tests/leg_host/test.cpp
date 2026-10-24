@@ -91,6 +91,21 @@ int main(){
   Control x;x.stop(failure);x.input(0,true);x.tick(1000,true,false,true,0);
   assert(x.state.reason==failure&&!x.want_sync); // failures are not hidden by neutral packets
  }
+ // Observations are bounded and change-driven; committed fields cannot mix with later input.
+ {Control x;x.state.mode=1;x.state.operation.gates=Ready|Bench|Imu|Connected;
+  x.input(0,true,1000);x.tick(1000,true,false,true,0);x.commit(1000,true,Reason::Stopped,0);
+  const uint32_t stable=x.state.operation.revision;
+  for(uint32_t t=1001;t<2000;++t){x.tick(t,true,false,true,0);x.commit(t,true,Reason::Stopped,0);}
+  assert(x.state.operation.revision==stable&&x.state.operation.confirmed_ms==1999);
+  x.stop(Reason::ReplyInvalid);x.observe(Source::Bus,2500,0);x.commit(2500,true,Reason::Stopped,0);
+  assert(x.state.operation.failure==9&&x.state.operation.failure_ms==2500&&!x.state.operation.allowed);
+  x.input(0,true,2501);x.tick(2501,true,false,true,0);x.commit(2501,true,Reason::Stopped,0);
+  assert(x.state.operation.allowed&&x.state.operation.blocker==255&&x.state.operation.failure==9);
+  const auto before=x.state.operation.confirmed;
+  for(uint32_t t=2502;t<2520;++t)x.received(uint8_t(t&1),t);
+  assert(x.state.operation.count==4&&x.state.operation.overwritten>0);
+  assert(x.state.operation.confirmed.sequence==before.sequence&&x.state.operation.confirmed.raw==before.raw);
+ }
  // Short release/press events in one FIFO batch retain the release gate.
  {Control x(true);x.input(0,true);x.input(1,true);x.tick(1000,true,false,true,0);assert(x.want_sync);}
  // Fragmented replies consume one byte per cycle without blocking.

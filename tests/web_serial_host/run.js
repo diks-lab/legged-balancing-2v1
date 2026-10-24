@@ -3,16 +3,18 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 const readyFile = process.env.DRIVE_LEG_READY_OUTPUT;
 const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.stringify({
   leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
+  leg_state: [1, 100, 1, 1, 0, 255, 0, 0, 3, 0, 549, 255, 0, 0, 0, 2, []],
   legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
 });
 const legRxJson = process.env.LEG_RX_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_RX_JSON_OUTPUT, 'utf8') : null;
 const legPositionJson = process.env.LEG_POSITION_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_POSITION_JSON_OUTPUT, 'utf8') : null;
-const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson });
-for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'legs.js', 'status.js', 'dashboard.js']) {
+const legFlowJson = process.env.DRIVE_LEG_FLOW_OUTPUT ? fs.readFileSync(process.env.DRIVE_LEG_FLOW_OUTPUT, 'utf8') : null;
+const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson, legFlowJson });
+for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -47,37 +49,46 @@ vm.runInContext(`
   for (const [v, text] of [[-0.01, '0.0'], [-0, '0.0'], [-48.94, '-48.9'], [42.25, '42.3']]) {
     if (formatAttitude(v) !== text) throw Error('attitude presentation');
   }
-  const legPacket = { leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1, legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 90, 50, 3, 3, 1, 1, 1, 1, 4, 0, 27] };
-  // Feed the JSON emitted after the actual C++ PS4 STOP/Share path into the UI.
+  if (legFlowJson) {
+    const flow = JSON.parse(legFlowJson);
+    flow.legs[10] = 17; flow.leg_mode = 0; // contradictory legacy fields must not drive the new UI
+    const view = legPresentation(flow, true, 0, {});
+    if (view.values.available !== '上下操作可能' ||
+        view.values.blocker !== 'なし' || !view.values.failure.includes('操作範囲外')) throw Error('real failed operation/release is separate');
+  }
+  const confirmed = [1, 100, 1, 1, 0, 255, 0, 0, 3, 0, 549, 255, 0, 0, 0, 2, []];
+  const legPacket = { leg_ms: 1001, leg_age_ms: 0, leg_state: confirmed,
+    leg_mode: 0, leg_roll_confirmed: false, leg_roll_sign: 1,
+    legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 90, 50, 17, 3, 1, 1, 1, 1, 4, 0, 27] };
   const ready = JSON.parse(legReadyJson);
-  const readyView = legPresentation(ready, true, ready.leg_ms, {});
+  const readyView = legPresentation(ready, true, 0, {});
   if (readyView.values.mode !== '支持試験（倒立OFF）' ||
       readyView.values.available !== '上下操作可能' ||
       readyView.values.sync !== '実位置確認前' || readyView.values.blocker !== 'なし' ||
       readyView.values.height !== '指令未送信') throw Error('real Share snapshot consistency');
   const legCache = {};
-  const legState = legPresentation(legPacket, true, 120, legCache);
-  if (legState.values.mode !== '支持試験（倒立OFF）' ||
-      legState.values.available !== '上下操作可能' ||
-      !legState.values.height.includes('実位置ではありません') ||
-      !legState.detail.torque.includes('応答未確認')) throw Error('leg status');
-  const progress = { ...legPacket, leg_ms: 150, legs: [...legPacket.legs] };
-  progress.legs[0] = 16;
-  if (!legPresentation(progress, true, 170, legCache).values.operation.includes('伸長')) throw Error('height progress');
-  if (!legPresentation(progress, true, 170, legCache).values.operation.includes('伸長')) throw Error('same packet stable');
-  for (const reason of [1, 3, 1, 3]) {
-    progress.leg_ms += 50; progress.legs[10] = reason;
-    if (legPresentation(progress, true, progress.leg_ms, legCache).values.operation !== '待機・高さ保持') throw Error('stable accepted/idle');
+  const legState = legPresentation(legPacket, true, 0, legCache);
+  if (legState.values.mode !== '支持試験（倒立OFF）' || legState.values.available !== '上下操作可能' ||
+      legState.values.blocker !== 'なし') throw Error('confirmed tuple beats stale raw fields');
+  const progress = { ...legPacket, leg_state: [...confirmed], legs: [...legPacket.legs] };
+  progress.leg_state[4] = 1;progress.leg_state[6] = progress.leg_state[7] = 1;
+  if (!legPresentation(progress, true, 0, legCache).values.operation.includes('伸長')) throw Error('held input operation');
+  for (const legacyTime of [0, 1000, 1002, 0xffffffff]) {
+    progress.leg_ms = legacyTime;
+    if (legPresentation(progress, true, 0, legCache).values.available !== '上下操作可能') throw Error('separate stream timing');
   }
-  progress.leg_ms += 50; progress.legs[10] = 8; progress.legs[13] = 0;
-  const legFailure = legPresentation(progress, true, progress.leg_ms, legCache);
-  if (legFailure.values.sync !== '失敗' || !legFailure.values.blocker.includes('応答なし')) throw Error('sync failure immediate');
-  progress.leg_ms += 50; progress.legs[10] = 1;
-  const afterFailure = legPresentation(progress, true, progress.leg_ms, legCache);
-  if (afterFailure.values.blocker !== 'なし' || !afterFailure.values.failure.includes('過去の記録')) throw Error('past failure separate');
-  progress.leg_ms += 50; progress.legs[10] = 17; progress.leg_mode = 0;
-  if (!legPresentation(progress, true, progress.leg_ms, legCache).values.blocker.includes('Share')) throw Error('explicit stop immediate');
-  if (!legPresentation(progress, false, progress.leg_ms, legCache).note.includes('最終受信時')) throw Error('leg disconnect');
+  progress.leg_state[3] = 0;progress.leg_state[4] = 7;
+  progress.leg_state[5] = progress.leg_state[11] = 8;progress.leg_state[12] = 200;
+  if (!legPresentation(progress, true, 0, legCache).values.blocker.includes('応答なし')) throw Error('immediate failure');
+  progress.leg_state[3] = 1;progress.leg_state[4] = 0;progress.leg_state[5] = 255;
+  const afterFailure = legPresentation(progress, true, 0, legCache);
+  if (afterFailure.values.blocker !== 'なし' || !afterFailure.values.failure.includes('応答なし')) throw Error('firmware failure separate');
+  progress.leg_state[2] = progress.leg_state[3] = 0;progress.leg_state[4] = 6;progress.leg_state[5] = 17;
+  if (!legPresentation(progress, true, 0, legCache).values.blocker.includes('Share')) throw Error('explicit stop immediate');
+  if (!legPresentation(progress, false, 0, legCache).note.includes('最終受信時')) throw Error('leg disconnect');
+  if (legPresentation(progress, true, 1501, legCache).fresh) throw Error('arrival stale');
+  progress.leg_age_ms = 1600;
+  if (legPresentation(progress, true, 0, legCache).fresh) throw Error('cached server snapshot stale');
   if (legPresentation(null, false, 0, {}).values.mode !== '未取得') throw Error('no packet');
   if (legRxJson) {
     const fromBus = legReplyPresentation(JSON.parse(legRxJson).leg_rx);
@@ -115,7 +126,7 @@ vm.runInContext(`
       !partialView.fields.checksum.includes('未算出') || !partialView.fields.raw.includes('記録打切り')) throw Error('rx missing/truncation');
   const oldRxPacket = { ...legPacket, leg_rx: rxFailure };
   const oldRxState = legPresentation(oldRxPacket, true, 120, {});
-  if (!oldRxState.values.failure.includes('左：ID') || oldRxState.values.blocker !== 'なし') throw Error('rx retained as past');
+  if (oldRxState.values.failure.includes('左：ID') || oldRxState.values.blocker !== 'なし') throw Error('rx retained as past');
   const wheelFirst = [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3];
   const wheelProbe = [55000, 100, 53000, 0, 2, 2, 2, 3, 12, 2, 4, 1];
   const wheelSample = { diagnosis: [100, 'RIGHT_SENSOR', 2, 3, 2, 2, 2, 0, 0, 0, 1, 26, 3, 3, 0, 1, 3, 0], sample_ms: 55020, wheel0: [...wheelFirst, ...wheelProbe, 1, 1] };

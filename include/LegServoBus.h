@@ -5,6 +5,7 @@ namespace leg {
 // At most 16 received bytes and one capacity-checked contiguous TX per service.
 template<class IO> class ServoBus {
  public:
+ uint8_t stage(const Control&c)const{return off_pending_?7:phase_==Idle&&c.state.active?8:uint8_t(phase_);}
  bool busy()const{return phase_!=Idle||off_pending_;}
  bool observing()const{return observe_only_;}
  int16_t readPosition(bool right)const{return positions_[right?0:1];}
@@ -19,6 +20,10 @@ template<class IO> class ServoBus {
  }
  void cancel(){phase_=Idle;reply_.clearFrame();observe_only_=false;}
  void service(IO& io,Control& c,uint32_t now){
+  serviceOnce(io,c,now);c.observe(Source::Bus,now,stage(c));
+ }
+ private:
+ void serviceOnce(IO& io,Control& c,uint32_t now){
   // The original whole-request deadline is not extended by bytes or echoes.
   if(waiting()&&reply_.expired(now,ReplyTimeoutMs)){
    reply_.timeout();failReceive(c,now);
@@ -80,8 +85,11 @@ template<class IO> class ServoBus {
  void fail(Control&c,Reason reason){phase_=Idle;reply_.clearFrame();observe_only_=false;c.stop(reason);}
  bool send(IO&io,Control&c,uint8_t*p,unsigned n,uint32_t now){
   next_send_=now+SendIntervalMs;
-  if(io.availableForWrite()<int(n)){++c.state.tx_busy;c.state.reason=Reason::TxBusy;return false;}
+  if(io.availableForWrite()<int(n)){c.state.operation.tx_wait=true;++c.state.tx_busy;c.state.reason=Reason::TxBusy;return false;}
   if(io.write(p,n)!=n){fail(c,Reason::TxFailed);off_pending_=true;c.state.torque=1;return false;}
+  c.state.operation.tx_wait=false;
+  if(c.state.reason==Reason::TxBusy)c.state.reason=c.state.active?Reason::Accepted:
+      c.want_sync||phase_!=Idle?Reason::Syncing:Reason::Idle;
   reply_.noteTransmit(p,n);++c.state.tx_frames;return true;
  }
  bool torque(IO&io,Control&c,bool on,uint32_t now){
