@@ -3,17 +3,21 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
   try {
     for (const size of [{ width: 1366, height: 768 }, { width: 1920, height: 1080 }]) {
       const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 });
-      const requests = [], errors = [], calibrationRequests = [], legReadRequests = [];
+      const requests = [], errors = [], calibrationRequests = [], legReadRequests = [], legMeasureRequests = [];
       page.on('pageerror', e => errors.push(e.message));
       await page.route('http://127.0.0.1:8765/**', async route => {
         const file = new URL(route.request().url()).pathname.slice(1) || 'index.html';
+        if (file.startsWith('legs/measure/')) {
+          legMeasureRequests.push([file, route.request().method()]);
+          await route.fulfill({ status: 202, body: 'queued read-only measurement' }); return;
+        }
         if (file === 'legs/read-config') {
           legReadRequests.push(route.request().method());
           await route.fulfill({ status: 202, body: 'queued read-only' }); return;
@@ -173,9 +177,10 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert.deepEqual(legResult.positionGeometry, legResult.original);
       assert(legResult.positionText[0].includes('2009 tick') && legResult.positionText[0].includes('D9 07'));
       assert(legResult.positionText[0].includes('30.769230%') && legResult.positionText[0].includes('2010～2061'));
-      assert(legResult.positionText[0].includes('操作範囲外・駆動拒否'));
+      assert(legResult.positionText[0].includes('通常操作範囲外（初回受付は別判定）'));
       assert(legResult.positionText[1].includes('操作範囲内'));
-      assert(legResult.positionText[2].includes('機械的可動限界：未設定'));
+      assert(legResult.positionText[2].includes('初回受付・保持範囲と通常操作0～30%は別'));
+      assert(legResult.positionText[2].includes('機械的限界は未設定'));
       assert(legResult.rxBlocker.includes('左：ID・状態・チェックサム'));
       assert(legResult.rx[1].includes('期待 0x02 ／ 取得 0x01'));
       assert(legResult.rx[3].includes('期待 0x00 ／ 取得 0x20'));
@@ -206,6 +211,30 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert(configText.includes('0（位置モード）') && configText.includes('1（車輪モード）'));
       await page.evaluate(() => {
         document.getElementById('leg-config').open = false;
+        document.getElementById('details').open = false;
+      });
+
+      await page.evaluate(() => {
+        document.getElementById('details').open = true;
+        document.getElementById('leg-measure').open = true;
+      });
+      await page.click('#leg-measure-start');
+      assert.equal(legMeasureRequests.length, 0);
+      assert((await page.locator('#leg-measure-action').textContent()).includes('開始しません'));
+      await page.check('#leg-measure-supported');await page.click('#leg-measure-start');
+      await page.waitForFunction(() => document.getElementById('leg-measure-action').textContent.includes('開始要求を送信'));
+      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
+        leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
+        leg_measure: [100, 0, 0, 3, 1, 3, 3, 0, 0, 0,
+          [200, 2, 1900, 1890, 1977], [250, 2, 2200, 2082, 2200]],
+        legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
+      }) }));
+      await page.waitForFunction(() => document.getElementById('leg-measure-values').textContent.includes('最小 1890・最大 1977'));
+      await page.click('#leg-measure-stop');
+      await page.waitForFunction(() => document.getElementById('leg-measure-action').textContent.includes('終了要求を送信'));
+      assert.deepEqual(legMeasureRequests, [['legs/measure/start', 'POST'], ['legs/measure/stop', 'POST']]);
+      await page.evaluate(() => {
+        document.getElementById('leg-measure').open = false;
         document.getElementById('details').open = false;
       });
 

@@ -7,12 +7,12 @@ namespace leg {
 // No formatting, Serial access, allocation or waits in capture/input/pop.
 class SerialDiagnostics {
  public:
- enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed };
+ enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected };
  struct Sync { Acceptance accept;int16_t right,left;uint8_t acquired,recovery,directions; };
  struct Record {
   uint32_t ms=0;
   Type type=Input;uint8_t keys=0,allowed=0,reason=0;
-  union Payload { Sync sync;RxFailure rx;ServoConfiguration config;Payload():rx{}{} } data;
+  union Payload { Sync sync;RxFailure rx;ServoConfiguration config;Measurement measurement;Payload():rx{}{} } data;
  };
  static constexpr unsigned Capacity=8,Chunk=48;
  void input(uint8_t keys,bool gate,uint32_t now){
@@ -53,6 +53,10 @@ class SerialDiagnostics {
   }
   if((phase_>=1&&phase_<=6)&&(phase==0||phase==7)&&!s.synced&&!s.active&&!read_done){
    Record r;r.type=SyncFailed;r.ms=now;r.reason=uint8_t(s.reason);push(r);
+   if(s.reason==Reason::PositionRange&&s.positions.current==3){
+    r.type=AcceptanceOutside;r.data.sync.accept=s.acceptance;
+    r.data.sync.right=decodePosition(s.positions.word[0]);r.data.sync.left=decodePosition(s.positions.word[1]);push(r);
+   }
   }
   if(s.rx_failure.issues&&s.rx_failure.ms!=rx_ms_){
    rx_ms_=s.rx_failure.ms;Record r;r.type=Receive;r.ms=now;r.data.rx=s.rx_failure;push(r);
@@ -61,6 +65,15 @@ class SerialDiagnostics {
   if((c.status==2||c.status==3)&&(c.finished_ms!=config_ms_||c.status!=config_status_)){
    Record r;r.type=Configuration;r.ms=now;r.data.config=c;push(r);
   }
+  const auto&m=s.measurement;
+  if(m.revision!=measure_revision_&&(m.status!=measure_status_||now-measure_log_ms_>=MeasurementPrintIntervalMs)){
+   Record r;r.type=Measure;r.ms=now;r.data.measurement=m;push(r);
+   measure_revision_=m.revision;measure_status_=m.status;measure_log_ms_=now;
+  }
+  if(m.rejected_ms&&m.rejected_ms!=measure_rejected_ms_){
+   Record r;r.type=MeasureRejected;r.ms=m.rejected_ms;r.reason=m.reject_reason;push(r);measure_rejected_ms_=m.rejected_ms;
+  }
+  if(!m.rejected_ms)measure_rejected_ms_=0;
   synced_=s.synced;recovery_=s.recovery;directions_=s.return_directions;phase_=phase;
   allowed_=o.allowed;operation_=o.operation;blocker_=o.blocker;decision_keys_=o.raw_keys;
   config_ms_=c.finished_ms;config_status_=c.status;
@@ -72,9 +85,9 @@ class SerialDiagnostics {
  }
  private:
  Record records_[Capacity];
- uint32_t attempt_=0,rx_ms_=0,config_ms_=0,lost_=0;
+ uint32_t attempt_=0,rx_ms_=0,config_ms_=0,lost_=0,measure_revision_=0,measure_log_ms_=0,measure_rejected_ms_=0;
  uint8_t head_=0,count_=0,raw_=0,allowed_=255,operation_=255,blocker_=255,
-  recovery_=0,directions_=0,phase_=0,config_status_=0,decision_keys_=255;
+  recovery_=0,directions_=0,phase_=0,config_status_=0,decision_keys_=255,measure_status_=0;
  bool synced_=false;
  void push(const Record&r){
   if(count_==Capacity){if(lost_!=UINT32_MAX)++lost_;return;}
@@ -85,7 +98,7 @@ inline const char* serialReason(uint8_t n){
  static const char*const names[]={"RELEASE_REQUIRED","IDLE","SYNCING","ACCEPTED","DRIVING","STOPPED",
   "IMU_INVALID","POSITION_RANGE","REPLY_TIMEOUT","REPLY_INVALID","TX_FAILED","CLOCK_GAP","TX_BUSY",
   "WHEEL_RETRY","ROLL_UNCONFIRMED","INITIALIZING","START_WAITING","EXPLICIT_STOP","CALIBRATING",
-  "POLARITY_TEST","ACCEPTANCE_INVALID","INWARD_ONLY","RELEASE_THEN_PRESS","PAIR_LIMIT","READ_ONLY","CONFIG_BUSY"};
+  "POLARITY_TEST","ACCEPTANCE_INVALID","INWARD_ONLY","RELEASE_THEN_PRESS","PAIR_LIMIT","READ_ONLY","CONFIG_BUSY","MEASURE_READ_ONLY","MEASURE_STOP_REQUIRED"};
  return n<sizeof(names)/sizeof(*names)?names[n]:"NONE";
 }
 // Consumer-only formatter. A maximum 48-byte write, and no call when TX is full.
@@ -143,6 +156,21 @@ class SerialOutput {
       x.target,x.requested+2,x.frame_size>2?x.frame[2]:255,x.frame_size>3?x.frame[3]:255,x.frame_size>4?x.frame[4]:255,x.expected_checksum,x.received_checksum,x.checksum_ready);}
     else {size_=snprintf(line_,sizeof(line_),"LEG RX RAW: ");for(unsigned i=0;i<x.raw_size&&i<sizeof(x.raw);++i)size_+=snprintf(line_+size_,sizeof(line_)-size_,"%02X",x.raw[i]);size_+=snprintf(line_+size_,sizeof(line_)-size_," truncated=%u\n",x.truncated);}
     pending_=++part_<3;break;
+   case D::AcceptanceOutside:
+    size_=snprintf(line_,sizeof(line_),"LEG ACCEPTANCE: 初回受付範囲外 (OUTSIDE_INITIAL_RANGE) right=%d limits=%d..%d left=%d limits=%d..%d; no preload/ON\n",
+     s.right,s.accept.right_min,s.accept.right_max,s.left,s.accept.left_min,s.accept.left_max);break;
+   case D::MeasureRejected:size_=snprintf(line_,sizeof(line_),"LEG MEASURE: REJECTED reason=%s ms=%lu\n",serialReason(r.reason),(unsigned long)r.ms);break;
+   case D::Measure:{
+    const auto&m=r.data.measurement;
+    if(!part_)size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s start=%lu end=%lu reason=%s; READ ONLY, limits unchanged\n",
+     m.status==1?"ACTIVE":m.status==2?"STOPPED":"FAILED",(unsigned long)m.started_ms,(unsigned long)m.finished_ms,m.status==3?serialReason(m.error):"NONE");
+    else {const unsigned side=part_-1;const bool have=m.acquired&(1u<<side);
+     if(have)size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s current=%d min=%d max=%d tick sample=%lu count=%lu valid=%u\n",
+      side?"LEFT":"RIGHT",m.latest[side],m.minimum[side],m.maximum[side],(unsigned long)m.sample_ms[side],(unsigned long)m.count[side],unsigned(bool(m.valid&(1u<<side))));
+     else size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s UNREAD (not zero)\n",side?"LEFT":"RIGHT");
+    }
+    pending_=++part_<3;break;
+   }
    case D::Configuration:
     if(!part_)size_=snprintf(line_,sizeof(line_),"LEG CONFIG: %s reason=%s current_mask=%u; mode 0=POSITION 1=WHEEL\n",c.status==2?"COMPLETE":"FAILED",c.status==2?"NONE":serialReason(c.error),c.current);
     else {const unsigned side=part_-1;size_=snprintf(line_,sizeof(line_),"LEG CONFIG: %s mode=%u limits=%u..%u tick acquired=%u current=%u\n",side?"LEFT":"RIGHT",c.mode[side],c.minimum[side],c.maximum[side],unsigned((c.acquired>>(side*2))&3),unsigned((c.current>>(side*2))&3));}

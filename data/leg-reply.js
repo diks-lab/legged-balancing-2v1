@@ -53,7 +53,7 @@ function createLegReplyPanel(section) {
   const positionDetails = document.createElement('details');
   positionDetails.id = 'leg-position';
   const positionTitle = document.createElement('summary');
-  positionTitle.textContent = '実位置確認（取得値・変換・操作範囲）';
+  positionTitle.textContent = '実位置確認（取得値・変換・初回受付）';
   positionDetails.appendChild(positionTitle);
   section.appendChild(positionDetails);
   const position = {};
@@ -65,7 +65,7 @@ function createLegReplyPanel(section) {
   }
   return { rx: nodes, position };
 }
-function legPositionPresentation(record) {
+function legPositionPresentation(record, acceptance) {
   if (!Array.isArray(record) || record.length !== 6) return {
     attempt: '実位置確認の診断未受信', right: '右：未取得', left: '左：未取得',
     limits: '機械的可動限界：未設定。0～30%は操作制限です。'
@@ -77,23 +77,28 @@ function legPositionPresentation(record) {
     const [ms, word, low, high, decoded, percent, min, max, inside, home, extended] = row;
     const range = `操作判定の整数上下限 ${min}～${max} tick（0～30%）`;
     if (!(acquired & (1 << index))) return `${name}：未取得 ／ ${range}`;
+    const a = acceptance;
+    const known = Array.isArray(a) && a.length === 8;
+    const accepted = known && !!a[1] && (inside || !!a[0] && decoded >= a[index ? 4 : 2] && decoded <= a[index ? 5 : 3]);
+    const initial = known ? `初回受付 ${a[index ? 4 : 2]}～${a[index ? 5 : 3]} tick：${accepted ? '範囲内' : '範囲外'}` : '初回受付情報：未受信';
     const pct = Number.isFinite(percent) ? percent.toFixed(6) : '不明';
     return `${name}：${current & (1 << index) ? '今回取得' : '前回取得・今回未取得'} @ ${ms} ms
 ` +
       `実位置 ${decoded} tick ／ 生データL,H=${hex(low)} ${hex(high)} ／ 結合word=${word}
 ` +
-      `換算 ${pct}%（制限前） ／ ${range} ／ ${inside ? '操作範囲内' : '操作範囲外・駆動拒否'}
+      `換算 ${pct}%（制限前） ／ ${range} ／ ${inside ? '通常操作範囲内' : '通常操作範囲外（初回受付は別判定）'} ／ ${initial}
 ` +
       `換算係数 HOME=${home}、100%=${extended}（機械的限界ではありません）`;
   };
   return {
     attempt: `確認開始 ${attempt} ms ／ ${readOnly ? '読取り専用診断' : '操作開始時の実位置同期'}（指令値ではありません）`,
     right: side(right, 0, '右'), left: side(left, 1, '左'),
-    limits: '機械的可動限界：未設定・未確認。初回同期にも操作範囲を適用する現行の拒否条件を維持。' +
+    limits: '初回受付・保持範囲と通常操作0～30%は別です。受付範囲内なら現在位置を保持し、解放・再押下から戻し方向だけ許可。' +
+      '読取り専用測定は受付判定をせず、値を許可範囲へ自動反映しません。機械的限界は未設定です。' +
       '整数への既存換算で境界の%値に端数が出ます。表示値を0～30%へ丸めません。'
   };
 }
-function renderLegReply(groups, record, fresh, positions) {
+function renderLegReply(groups, record, fresh, positions, acceptance) {
   const nodes = groups.rx;
   const view = legReplyPresentation(record);
   for (const [key, node] of Object.entries(nodes)) {
@@ -101,7 +106,7 @@ function renderLegReply(groups, record, fresh, positions) {
     if (key === 'record' && !fresh) text += ' ／ 通信停止・最終受信時の情報';
     if (node.textContent !== text) node.textContent = text;
   }
-  const position = legPositionPresentation(positions);
+  const position = legPositionPresentation(positions, acceptance);
   if (!fresh) position.attempt += ' ／ 通信停止・最終受信時の情報';
   for (const [key, node] of Object.entries(groups.position)) {
     if (node.textContent !== position[key]) node.textContent = position[key];

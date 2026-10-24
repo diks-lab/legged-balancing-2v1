@@ -148,6 +148,7 @@ window.startLogger = function () {
             leg_state: s.leg_state,
             leg_accept: s.leg_accept,
             leg_config: s.leg_config,
+            leg_measure: s.leg_measure,
             leg_age_ms: s.leg_age_ms,
             leg_rx: s.leg_rx,
             leg_position: s.leg_position,

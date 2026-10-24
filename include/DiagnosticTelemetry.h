@@ -179,6 +179,17 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   j.add("]");
  }
  j.add("]");
+ const auto&m=l.measurement;
+ j.add(",\"leg_measure\":[%lu,%lu,%lu,%lu,%u,%u,%u,%u,%u,%u",
+  (unsigned long)m.started_ms,(unsigned long)m.finished_ms,(unsigned long)m.rejected_ms,(unsigned long)m.revision,
+  unsigned(m.status),unsigned(m.acquired),unsigned(m.valid),unsigned(m.side),unsigned(m.error),unsigned(m.reject_reason));
+ for(unsigned side=0;side<2;++side){
+  j.add(",[%lu,%lu,",(unsigned long)m.sample_ms[side],(unsigned long)m.count[side]);
+  if(m.acquired&(1u<<side))j.add("%d,%d,%d",int(m.latest[side]),int(m.minimum[side]),int(m.maximum[side]));
+  else j.add("null,null,null");
+  j.add("]");
+ }
+ j.add("]");
  const auto&r=l.rx_failure;
  j.add(",\"leg_rx\":");
  if(!r.issues)j.add("null");

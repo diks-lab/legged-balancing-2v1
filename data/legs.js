@@ -4,7 +4,7 @@ const LEG_BLOCKERS = {
   4: '走行・減速中。停止後に解放・再操作',
   5: '停止中。支持試験は全解放→Share',
   6: 'IMU左右姿勢が無効',
-  7: '操作範囲外。取得値・判定範囲を確認',
+  7: '初回受付範囲外。左右の取得値・受付上下限を確認',
   8: '実位置の応答なし。接続確認後に解放・再操作',
   9: '位置応答不正。ID・通信を確認',
   10: 'UART送信失敗。解放して再操作',
@@ -22,7 +22,9 @@ const LEG_BLOCKERS = {
   22: '現在位置保持。十字キーを解放して再操作',
   23: '片脚が端。両脚を保持し、片側だけは動かさない',
   24: 'サーボ設定を読取り中／再操作前に解放',
-  25: '読取り拒否。車輪・脚・他の通信を停止して再要求'
+  25: '読取り拒否。車輪・脚・他の通信を停止して再要求',
+  26: '脚位置の読取り専用測定中',
+  27: '測定拒否。×で全停止・脚トルクOFF後に支持して再要求'
 };
 const LEG_LABELS = {
   mode: '試験モード', available: '操作可否', correction: '左右姿勢補正',
@@ -91,14 +93,15 @@ function createLegPanel(view) {
     '左右：方向確認設定が有効な場合のみ←左傾斜・→右傾斜。解放で目標0°へ戻す。',
     '停止：×は車輪全停止・脚トルクOFF。走行と脚操作の同時使用は対象外。',
     '支持試験：外部電源のまま機体を支持。×→全解放→Share→Share解放。倒立は開始しません。',
-    '初回：実位置を非同期確認。範囲外・応答失敗では動作拒否。HOMEへ自動移動しません。',
+    '初回：実位置を非同期確認。初回受付範囲外・応答失敗は拒否。受付内なら現在位置を保持し、HOMEへ自動移動しません。',
     '方向確認：初期設定は上下のみ。AngleXの符号と伸縮方向を実測してから左右補正を有効化。',
     '再接続・転倒後：解放・再操作から位置を再確認。未確認の古い目標へ戻しません。'
   ]) make('li', text, list);
   const reply = createLegReplyPanel(section);
   const state = createLegStatePanel(section);
   const config = createLegConfigPanel(section);
-  return { nodes, detail, note, reply, state, config, cache: {} };
+  const measure = createLegMeasurementPanel(section);
+  return { nodes, detail, note, reply, state, config, measure, cache: {} };
 }
 function renderLegDiagnostics(view, current) {
   const ui = view.legUI || (view.legUI = createLegPanel(view));
@@ -111,7 +114,8 @@ function renderLegDiagnostics(view, current) {
   update(ui.note, state.note);
   renderLegState(ui.state, view.legPacket);
   renderLegConfig(ui.config, view.legPacket, state.fresh);
-  renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh, view.legPacket?.leg_position);
+  renderLegMeasurement(ui.measure, view.legPacket, state.fresh);
+  renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh, view.legPacket?.leg_position, view.legPacket?.leg_accept);
   for (const [key, text] of Object.entries(state.values)) update(ui.nodes[key], text);
   for (const [key, text] of Object.entries(state.detail)) update(ui.detail[key], text);
   const blocked = String(state.fresh && state.values.blocker !== 'なし');

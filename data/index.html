@@ -122,7 +122,7 @@
           style.textContent = await asset(target);
           document.head.appendChild(style);
         }
-        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/diagnosis.js', '/leg-reply.js', '/leg-state.js', '/leg-config.js', '/legs.js', '/status.js', '/dashboard.js', '/app.js']) {
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/diagnosis.js', '/leg-reply.js', '/leg-state.js', '/leg-config.js', '/leg-measure.js', '/legs.js', '/status.js', '/dashboard.js', '/app.js']) {
           const script = document.createElement('script');
           script.textContent = await asset(target);
           document.head.appendChild(script);
@@ -132,7 +132,7 @@
         window.startLogger();
       } catch (error) {
         message.textContent = `取得・準備失敗: ${target}: ${error.message}。` +
-          '自動再試行はしません。ページを再読み込みしてください。';
+          '自動再試行なし。再読み込みしてください。';
       }
     }, { once: true });
   </script>

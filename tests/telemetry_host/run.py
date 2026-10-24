@@ -105,9 +105,15 @@ int main(){
   cfg.minimum[0]=cfg.minimum[1]=cfg.maximum[0]=cfg.maximum[1]=65535;
   cfg.mode[0]=cfg.mode[1]=255;cfg.acquired=cfg.current=15;cfg.status=3;cfg.error=cfg.reject_reason=25;cfg.step=4;
   all.legs.acceptance={-32767,32767,-32767,32767,true};all.legs.recovery=2;all.legs.return_directions=3;
+  auto&measure=all.legs.measurement;
+  measure.started_ms=measure.finished_ms=measure.rejected_ms=measure.revision=UINT32_MAX;
+  for(unsigned i=0;i<2;++i){measure.sample_ms[i]=measure.count[i]=UINT32_MAX;
+   measure.latest[i]=measure.minimum[i]=-32767;measure.maximum[i]=32767;}
+  measure.status=3;measure.acquired=measure.valid=3;measure.side=1;measure.error=12;measure.reject_reason=27;
   char wheel[2048];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef",UINT32_MAX));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   assert(strstr(wheel,"\"legs\":["));
+  assert(strstr(wheel,"\"leg_measure\":[4294967295"));
   assert(strstr(wheel,"\"leg_rx\":[4294967295"));
   printf("MAX_DIAGNOSTIC_JSON=%zu bytes (existing TX capacity 2048)\n",strlen(wheel));
   assert(strstr(wheel,"\"leg_mode\":0")&&strstr(wheel,"\"leg_roll_confirmed\":false"));

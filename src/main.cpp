@@ -828,6 +828,9 @@ void recordLegInput(uint32_t now);
 void captureLegSerial(uint32_t now);
 void serviceLegSerial();
 bool readLegConfiguration();
+bool legMeasurementStopped();
+bool startLegMeasurement();
+void stopLegMeasurement();
 bool prepareLegacyLegAction();
 void pingLegServos();
 void ensureLegServoTorqueEnabled();
@@ -4632,6 +4635,8 @@ void serviceHttpRequests() {
       case 'g': executeOperatorCommand(OperatorCommand::CycleMode); break;
       case 'i': cycleLqrSpeedSource(); break;
       case 'L': readLegConfiguration(); break;
+      case 'B': startLegMeasurement(); break;
+      case 'E': stopLegMeasurement(); break;
     }
   }
   static uint32_t last_status_ms = 0;
@@ -5011,11 +5016,22 @@ void startWifiHttpServer() {
     wifi_log_server.on("/diagnosis.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/diagnosis.js", "application/javascript"); });
     wifi_log_server.on("/leg-reply.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-reply.js", "application/javascript"); });
     wifi_log_server.on("/leg-state.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-state.js", "application/javascript"); });
+    wifi_log_server.on("/leg-measure.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-measure.js", "application/javascript"); });
     wifi_log_server.on("/leg-config.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-config.js", "application/javascript"); });
     wifi_log_server.on("/legs/read-config", HTTP_POST, [](){
       HttpMemoryRequest observed{4};
       if(!http_command_queue){sendSmallHttpResponse(503,"Control queue unavailable\n");return;}
       enqueueHttpCommand('L');
+    });
+    wifi_log_server.on("/legs/measure/start", HTTP_POST, [](){
+      HttpMemoryRequest observed{4};
+      if(!http_command_queue){sendSmallHttpResponse(503,"Control queue unavailable\n");return;}
+      enqueueHttpCommand('B');
+    });
+    wifi_log_server.on("/legs/measure/stop", HTTP_POST, [](){
+      HttpMemoryRequest observed{4};
+      if(!http_command_queue){sendSmallHttpResponse(503,"Control queue unavailable\n");return;}
+      enqueueHttpCommand('E');
     });
     wifi_log_server.on("/legs.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/legs.js", "application/javascript"); });
     wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
@@ -5357,6 +5373,7 @@ void printLqrStartupDiagnostic(uint32_t elapsed_ms, float right_output,
 void printHelp() {
   Serial.println();
   Serial.println("SimpleFOC two-wheel + MPU6050 integration test");
+  Serial.println("  ( / ) : supported, stopped legs READ-ONLY measurement start / stop; no torque ON or goals");
   Serial.println("Default FULL; g selects FULL / ATTITUDE+SPEED / ATTITUDE+DISTANCE / ATTITUDE ONLY.");
   Serial.println("t starts stationary balance; >/< explicitly request short drive; . soft-stops; e cancels drive; d disarms.");
   Serial.println("  1 : right +0.50 V, left 0 V");
@@ -6220,6 +6237,7 @@ void serviceLegControl() {
   leg_control.state.mode=eligible&&!moving&&imu&&!wheel_comm_suspended?(bench?1:2):0;
   const bool hard_stop=!test_system_ready||emergency_stop_active||calibration_active.load()||
       polarity_test_active||!imu;
+  if(leg_bus.measuring()&&!legMeasurementStopped())leg_bus.stopMeasurement(leg_control,now);
   const bool observing=leg_bus.observing();
   // A brief wheel retry freezes the leg target; do not release load-bearing legs.
   if(observing){
@@ -6262,6 +6280,20 @@ bool prepareLegacyLegAction(){
   leg_bus.cancel();leg_control.observe(leg::Source::Legacy,millis(),leg_bus.stage(leg_control));
   leg_control.commit(millis(),false,leg::Reason::Stopped,leg_bus.stage(leg_control));return true;
 }
+
+bool legMeasurementStopped(){
+  return emergency_stop_active&&!lqr_direction_test_armed&&!balance_wait_active&&!polarity_test_active&&
+      !boot_auto_start.pending()&&!fall_auto_recovery.pending&&!lqr_auto_drive_active&&
+      !lqr_drive_start_pending&&!lqr_soft_stop_active&&!calibration_active.load();
+}
+bool startLegMeasurement(){
+  if(!legMeasurementStopped()){
+    leg_control.state.measurement.rejected_ms=millis();
+    leg_control.state.measurement.reject_reason=uint8_t(leg::Reason::MeasureStopRequired);return false;
+  }
+  return leg_bus.startMeasurement(leg_control,millis());
+}
+void stopLegMeasurement(){leg_bus.stopMeasurement(leg_control,millis());}
 
 bool readLegConfiguration(){
   if(lqr_direction_test_armed||balance_wait_active||polarity_test_active||
@@ -6475,6 +6507,10 @@ void handleSerialCommand() {
         printSpeedDiagnostic();
       }
       break;
+    case '(':
+      startLegMeasurement();break;
+    case ')':
+      stopLegMeasurement();break;
     case 'l':
     case 'L':
       pingLegServos();

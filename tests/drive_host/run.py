@@ -174,6 +174,7 @@ struct {
   bool begin(){++begins;return ok;} // No pairing-argument overload is allowed here.
 } PS4;
 struct {
+ int16_t measuredRight=1977,measuredLeft=2082;
  uint8_t rx[16]{},last[24]{};unsigned head=0,tail=0,mode=0;int capacity=128;
  size_t writes=0,last_size=0,reads=0,goals=0,ons=0;
  int available(){return int(tail-head);}int read(){return head<tail?rx[head++]:-1;}
@@ -185,7 +186,7 @@ struct {
   if(n==8){
    ++reads;
    if(mode){
-    const uint16_t pos=mode==4?(p[2]==1?1977:2082):(p[2]==1?(mode==2?2009:2036):2053);
+    const uint16_t pos=mode==5?(p[2]==1?measuredRight:measuredLeft):mode==4?(p[2]==1?1977:2082):(p[2]==1?(mode==2?2009:2036):2053);
     const uint8_t data[]={255,255,p[2],uint8_t(p[6]+2),0,uint8_t(pos),uint8_t(pos>>8),0,0,0};
     memcpy(rx,data,sizeof(data));
     if(p[5]==9){rx[5]=rx[6]=0;rx[7]=255;rx[8]=15;}
@@ -251,7 +252,7 @@ prefix += source[source.index('struct HttpResponseTransport {'):source.index('vo
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = [
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','recordLegInput','captureLegSerial','readLegConfiguration','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','recordLegInput','captureLegSerial','readLegConfiguration','legMeasurementStopped','startLegMeasurement','stopLegMeasurement','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -1087,6 +1088,31 @@ int main(){
   lqr_direction_test_armed=true;assert(!readLegConfiguration());
   assert(leg_control.state.configuration.reject_reason==uint8_t(leg::Reason::ConfigBusy));
   lqr_direction_test_armed=false;
+
+  // Read-only measurement via HTTP/main command queue. It cannot arm wheels or legs.
+  bootFixture();serviceBootAutoStart();step();
+  const auto beforeMeasureWrites=Serial2.writes;
+  assert(!startLegMeasurement()&&Serial2.writes==beforeMeasureWrites);
+  assert(executeOperatorCommand(OperatorCommand::FullStop));
+  const auto measureGoals=Serial2.goals,measureOns=Serial2.ons;
+  Serial2.mode=5;Serial2.measuredRight=1977;Serial2.measuredLeft=2082;
+  http_command_queue->full=false;const char measureStart='B';assert(xQueueSend(http_command_queue,&measureStart,0)==pdTRUE);
+  serviceHttpRequests();assert(leg_bus.measuring());
+  for(unsigned i=0;i<400;++i){++nowMs;noteImuMeasurement();serviceLegControl();}
+  Serial2.measuredRight=1800;Serial2.measuredLeft=2300;
+  for(unsigned i=0;i<400;++i){++nowMs;noteImuMeasurement();serviceLegControl();}
+  assert(leg_control.state.measurement.minimum[0]==1800&&leg_control.state.measurement.maximum[1]==2300);
+  assert(!lqr_direction_test_armed&&!balance_wait_active&&!leg_control.state.active&&!leg_control.state.synced);
+  assert(Serial2.goals==measureGoals&&Serial2.ons==measureOns);
+  http_command_queue->full=false;const char measureStop='E';assert(xQueueSend(http_command_queue,&measureStop,0)==pdTRUE);
+  serviceHttpRequests();assert(!leg_bus.measuring()&&leg_control.state.measurement.status==2);
+  const auto measureReads=Serial2.reads;
+  for(unsigned i=0;i<100;++i){++nowMs;noteImuMeasurement();serviceLegControl();}
+  assert(Serial2.reads==measureReads&&leg_control.state.measurement.minimum[0]==1800);
+  assert(startLegMeasurement());assert(leg_control.state.measurement.acquired==0);
+  assert(executeOperatorCommand(OperatorCommand::EnableDrivers)); // Share-equivalent exit of explicit stop ends measurement.
+  serviceLegControl();assert(!leg_bus.measuring()&&leg_control.state.measurement.status==2);
+  assert(!lqr_direction_test_armed&&!balance_wait_active&&!leg_control.want_sync&&Serial2.goals==measureGoals&&Serial2.ons==measureOns);
 
   // Actual leg integration uses cached IMU only, never stops wheel balance.
   bootFixture();serviceBootAutoStart();step();

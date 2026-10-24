@@ -4,6 +4,7 @@
 #include "LegServoReply.h"
 #include "LegOperation.h"
 #include "LegAcceptance.h"
+#include "LegMeasurement.h"
 namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
 constexpr int RightHome=2061,RightExtended=1892,LeftHome=2026,LeftExtended=2208;
@@ -54,7 +55,7 @@ struct PositionObservation {
  }
 };
 enum class Reason:uint8_t { ReleaseRequired,Idle,Syncing,Accepted,Driving,Stopped,
- ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy };
+ ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy,Measuring,MeasureStopRequired };
 struct State {
  float height=0,requested_roll=0,applied_roll=0,measured_roll=NAN;
  float right_percent=0,left_percent=0;
@@ -69,6 +70,7 @@ struct State {
  OperationObservation operation;
  Acceptance acceptance=ConfiguredAcceptance;
  ServoConfiguration configuration;
+ Measurement measurement;
  uint8_t recovery=0,return_directions=0; // normal, holding until release, manual inward return
 };
 class Control {
@@ -153,7 +155,7 @@ class Control {
   o.blocker=255;
   if(phase==7){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::Stopped);return;}
   if(o.tx_wait){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::TxBusy);return;}
-  if(phase>=9){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(Reason::ConfigReadOnly);return;}
+  if(phase>=9){o.operation=uint8_t(Operation::Stopped);o.blocker=uint8_t(phase>=11?Reason::Measuring:Reason::ConfigReadOnly);return;}
   if(want_sync||(phase>=1&&phase<=6)){o.operation=uint8_t(Operation::Sync);return;}
   if(!input_gate){o.operation=uint8_t(Operation::Release);o.blocker=uint8_t(Reason::ReleaseRequired);return;}
   if(!state.active&&!armed_){
@@ -191,7 +193,7 @@ class Control {
     case Reason::ReleaseRequired: case Reason::Stopped: case Reason::ExplicitStop:
     case Reason::Initializing: case Reason::StartWaiting: case Reason::Calibrating:
     case Reason::PolarityTest: case Reason::Driving: case Reason::ImuInvalid:
-    case Reason::WheelRetry: case Reason::ConfigReadOnly:
+    case Reason::WheelRetry: case Reason::ConfigReadOnly: case Reason::Measuring:
      state.reason=armed_?Reason::Idle:Reason::ReleaseRequired;break;
     default:break; // preserve position/UART failures until another explicit operation
    }

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 const readyFile = process.env.DRIVE_LEG_READY_OUTPUT;
 const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.stringify({
   leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
@@ -14,7 +14,7 @@ const legRxJson = process.env.LEG_RX_JSON_OUTPUT ? fs.readFileSync(process.env.L
 const legPositionJson = process.env.LEG_POSITION_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_POSITION_JSON_OUTPUT, 'utf8') : null;
 const legFlowJson = process.env.DRIVE_LEG_FLOW_OUTPUT ? fs.readFileSync(process.env.DRIVE_LEG_FLOW_OUTPUT, 'utf8') : null;
 const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson, legFlowJson });
-for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'legs.js', 'status.js', 'dashboard.js']) {
+for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -100,7 +100,7 @@ vm.runInContext(`
     const position = legPositionPresentation(JSON.parse(legPositionJson).leg_position);
     if (!position.right.includes('2009 tick') || !position.right.includes('D9 07') ||
         !position.right.includes('30.769230%') || !position.right.includes('2010～2061') ||
-        !position.right.includes('操作範囲外・駆動拒否') || !position.left.includes('操作範囲内')) {
+        !position.right.includes('通常操作範囲外（初回受付は別判定）') || !position.left.includes('操作範囲内')) {
       throw Error('real position response -> snapshot -> JSON -> UI');
     }
   }
@@ -112,6 +112,24 @@ vm.runInContext(`
       !positionView.left.includes('前回取得・今回未取得')) throw Error('zero/old position distinct');
   positionData[2] = 0;
   if (!legPositionPresentation(positionData).right.includes('未取得')) throw Error('not acquired position');
+  const acceptedPosition = [100, 0, 3, 3,
+    [101, 1977, 185, 7, 1977, 49.704, 2010, 2061, false, 2061, 1892],
+    [102, 2082, 34, 8, 2082, 30.769, 2026, 2081, false, 2026, 2208]];
+  const acceptedView = legPositionPresentation(acceptedPosition, [1, 1, 1977, 2061, 2026, 2082, 1, 0]);
+  if (!acceptedView.right.includes('初回受付 1977～2061 tick：範囲内') ||
+      acceptedView.right.includes('駆動拒否') || acceptedView.limits.includes('初回同期にも操作範囲')) throw Error('separate initial acceptance');
+  acceptedPosition[4][4] = 1976;
+  if (!legPositionPresentation(acceptedPosition, [1, 1, 1977, 2061, 2026, 2082, 0, 0]).right.includes('tick：範囲外')) throw Error('initial outside');
+  const measure = { leg_measure: [100, 0, 0, 3, 1, 3, 3, 0, 0, 0,
+    [200, 2, 1900, 1890, 1977], [250, 2, 2200, 2082, 2200]] };
+  let measurement = legMeasurementLines(measure, true).join(' / ');
+  if (!measurement.includes('最小 1890・最大 1977') || !measurement.includes('現在（最終取得） 2200') ||
+      !measurement.includes('自動反映しません')) throw Error('read only extrema');
+  measure.leg_measure[4] = 3;measure.leg_measure[6] = 1;measure.leg_measure[8] = 8;
+  measurement = legMeasurementLines(measure, false).join(' / ');
+  if (!measurement.includes('通信失敗・最後の正常取得値') || !measurement.includes('最終受信情報')) throw Error('measurement failure/stale');
+  measure.leg_measure[5] = 0;
+  if (!legMeasurementLines(measure, true)[1].includes('未取得（0 tickではありません）')) throw Error('measurement unread');
   const cfgPacket = {
     leg_accept: [0, 1, 2010, 2061, 2026, 2081, 0, 0],
     leg_config: [1000, 1151, 0, 2, 0, 4, 15, 15, 0,
