@@ -144,7 +144,7 @@ int main(){
 with tempfile.TemporaryDirectory() as td:
  p=Path(td);(p/'test.cpp').write_text(code)
  flags=['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('TELEMETRY_SANITIZERS') else []
- subprocess.run(['g++','-std=c++17','-Wall','-Wextra','-Werror','-I'+os.environ.get('TELEMETRY_HEADER_DIR','include'),'-Iinclude',str(p/'test.cpp'),'-o',str(p/'test'),'-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc']+flags,check=True)
+ subprocess.run(['g++','-include','tests/leg_host/fixture.h','-std=c++17','-Wall','-Wextra','-Werror','-I'+os.environ.get('TELEMETRY_HEADER_DIR','include'),'-Iinclude',str(p/'test.cpp'),'-o',str(p/'test'),'-Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc']+flags,check=True)
  result=subprocess.run([str(p/'test')],capture_output=True,text=True)
  if result.returncode:print(result.stderr);result.check_returncode()
  samples=[]

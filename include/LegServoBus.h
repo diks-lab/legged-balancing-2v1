@@ -8,7 +8,15 @@ template<class IO> class ServoBus {
  uint8_t stage(const Control&c)const{return off_pending_?7:phase_==Idle&&c.state.active?8:uint8_t(phase_);}
  bool busy()const{return phase_!=Idle||off_pending_;}
  bool inspecting()const{return config_active_;}
- bool observing()const{return observe_only_||config_active_||measure_active_;}
+ bool observing()const{return observe_only_||config_active_||measure_active_||capture_active_;}
+ bool captureCalibration(Control&c,unsigned point,uint32_t now){
+  if(busy()||c.state.active||c.want_sync||c.state.torque!=2){c.state.calibration.event(CalResult::Busy,now);return false;}
+  if(!c.state.calibration.capture(point,now))return false;
+  capture_active_=true;phase_=CaptureSend;first_ms_=now;reply_.clearFrame();return true;
+ }
+ void cancelCalibration(Control&c,uint32_t now){
+  if(capture_active_){c.state.calibration.received(0,false,now);capture_active_=false;phase_=Idle;reply_.clearFrame();}
+ }
  int16_t readPosition(bool right)const{return positions_[right?0:1];}
  bool observe(Control&c){
   if(busy())return false;
@@ -34,18 +42,20 @@ template<class IO> class ServoBus {
   measure_active_=false;phase_=Idle;reply_.clearFrame();c.stop(Reason::ConfigReadOnly);
  }
  void off(Control& c,uint32_t now=0){
+  cancelCalibration(c,now);
   stopMeasurement(c,now);
   if(config_active_){c.state.configuration.status=3;c.state.configuration.error=uint8_t(Reason::Stopped);c.state.configuration.finished_ms=now;}
   c.stop(Reason::Stopped);phase_=Idle;reply_.clearFrame();observe_only_=false;config_active_=false;
   if(off_pending_||c.state.torque==2)return;
   off_pending_=true;c.state.torque=1;next_send_=0;
  }
- void cancel(){phase_=Idle;reply_.clearFrame();observe_only_=false;config_active_=false;measure_active_=false;}
+ void cancel(){capture_active_=false;phase_=Idle;reply_.clearFrame();observe_only_=false;config_active_=false;measure_active_=false;}
  void service(IO& io,Control& c,uint32_t now){
   serviceOnce(io,c,now);c.observe(Source::Bus,now,stage(c));
  }
  private:
  void serviceOnce(IO& io,Control& c,uint32_t now){
+  if(capture_active_&&uint32_t(now-first_ms_)>1000){fail(c,Reason::TxBusy,now);return;}
   if(measure_active_&&phase_==MeasureSend&&uint32_t(now-first_ms_)>MeasurementTxWaitMs){fail(c,Reason::TxBusy,now);return;}
   if(config_active_&&uint32_t(now-c.state.configuration.started_ms)>1000){fail(c,c.state.operation.tx_wait?Reason::TxBusy:Reason::ReplyTimeout,now);return;}
   // The original whole-request deadline is not extended by bytes or echoes.
@@ -58,6 +68,7 @@ template<class IO> class ServoBus {
    const auto result=reply_.feed(uint8_t(byte));
    if(result==ServoReply::Bad){failReceive(c,now);break;}
    if(result!=ServoReply::Good)continue;
+   if(phase_==CaptureWait){c.state.calibration.received(reply_.position(),true,now);capture_active_=false;phase_=Idle;reply_.clearFrame();continue;}
    if(phase_==MeasureWait){
     auto&m=c.state.measurement;m.capture(m.side,reply_.position(),now);m.side^=1;
     reply_.clearFrame();first_ms_=now;phase_=MeasureSend;continue;
@@ -82,13 +93,17 @@ template<class IO> class ServoBus {
    else {
     positions_[1]=pos;
     if(uint32_t(now-first_ms_)>SyncMaxAgeMs){fail(c,Reason::ReplyTimeout,now);break;}
-    if(!c.seed(positions_[0],positions_[1],now)){phase_=Idle;observe_only_=false;break;}
-    if(observe_only_){observe_only_=false;c.stop(Reason::Idle);phase_=Idle;}
+    if(observe_only_){observe_only_=false;c.stop(validGeometry(activeGeometry())?Reason::Idle:Reason::CalibrationRequired);phase_=Idle;}
+    else if(!c.seed(positions_[0],positions_[1],now)){phase_=Idle;break;}
     else phase_=Seed;
    }
   }
   if(int32_t(now-next_send_)<0)return;
   if(off_pending_){if(torque(io,c,false,now))off_pending_=false;return;}
+  if(phase_==CaptureSend){
+   uint8_t p[]={255,255,uint8_t(c.state.calibration.point<2?RightId:LeftId),4,2,56,2,0};checksum(p,8);
+   if(send(io,c,p,8,now)){reply_.begin(p[2],now);phase_=CaptureWait;}return;
+  }
   if(phase_==MeasureSend){
    uint8_t p[]={255,255,uint8_t(c.state.measurement.side?LeftId:RightId),4,2,56,2,0};checksum(p,8);
    if(send(io,c,p,8,now)){reply_.begin(p[2],now);phase_=MeasureWait;}return;
@@ -122,18 +137,19 @@ template<class IO> class ServoBus {
   }
  }
  private:
- enum Phase:uint8_t { Idle,ReadRight,WaitRight,ReadLeft,WaitLeft,Seed,Enable,ConfigSend=9,ConfigWait,MeasureSend,MeasureWait } phase_=Idle;
+ enum Phase:uint8_t { Idle,ReadRight,WaitRight,ReadLeft,WaitLeft,Seed,Enable,ConfigSend=9,ConfigWait,MeasureSend,MeasureWait,CaptureSend,CaptureWait } phase_=Idle;
  ServoReply reply_;
  int16_t positions_[2]{};
  uint32_t first_ms_=0,next_send_=0;
- bool off_pending_=false,observe_only_=false,config_active_=false,measure_active_=false;
- bool waiting()const{return phase_==WaitRight||phase_==WaitLeft||phase_==ConfigWait||phase_==MeasureWait;}
+ bool off_pending_=false,observe_only_=false,config_active_=false,measure_active_=false,capture_active_=false;
+ bool waiting()const{return phase_==WaitRight||phase_==WaitLeft||phase_==ConfigWait||phase_==MeasureWait||phase_==CaptureWait;}
  void failReceive(Control&c,uint32_t now){
   c.state.rx_failure=reply_.failure(now);
   fail(c,(c.state.rx_failure.issues&RxTimeout)?Reason::ReplyTimeout:Reason::ReplyInvalid,now);
  }
  static void checksum(uint8_t*p,unsigned n){uint8_t sum=0;for(unsigned i=2;i+1<n;++i)sum+=p[i];p[n-1]=~sum;}
  void fail(Control&c,Reason reason,uint32_t now){
+  if(capture_active_){c.state.calibration.received(0,false,now);capture_active_=false;}
   if(measure_active_){auto&m=c.state.measurement;m.status=3;m.error=uint8_t(reason);
    m.valid&=uint8_t(~(1u<<m.side));m.finished_ms=now;++m.revision;measure_active_=false;}
   if(config_active_){c.state.configuration.status=3;c.state.configuration.error=uint8_t(reason);c.state.configuration.finished_ms=now;}
@@ -142,7 +158,7 @@ template<class IO> class ServoBus {
   next_send_=now+SendIntervalMs;
   if(io.availableForWrite()<int(n)){c.state.operation.tx_wait=true;++c.state.tx_busy;c.state.reason=Reason::TxBusy;return false;}
   if(io.write(p,n)!=n){
-   const bool read_only=config_active_||measure_active_;fail(c,Reason::TxFailed,now);
+   const bool read_only=config_active_||measure_active_||capture_active_;fail(c,Reason::TxFailed,now);
    if(!read_only){off_pending_=true;c.state.torque=1;}return false;
   }
   c.state.operation.tx_wait=false;

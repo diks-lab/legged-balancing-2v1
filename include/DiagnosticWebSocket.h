@@ -11,6 +11,7 @@ struct WsObservation { WsEvent event;WsReason reason;uint32_t ms,generation,seq,
 // One transport/one slot. IO exposes nonblocking raw socket read/write, close,
 // millis, handshake SHA1/base64, and a coherent latest snapshot; no heap here.
 template<class IO> class WebSocket {
+ bool legCalibrationTurn_=false;
  char rx_[1025]{},tx_[2052]{};size_t rxSize_=0,txSize_=0,txOffset_=0;
  uint32_t connectedAt_=0,rxProgress_=0,frameAt_=0,txAt_=0,txProgress_=0,nextTry_=0;
  uint32_t due_=0,statusDue_=0,mask_=0,generation_=0,seq_=0,dropped_=0;
@@ -116,10 +117,10 @@ template<class IO> class WebSocket {
   }else if(n==0||(n!=-EAGAIN&&n!=-EWOULDBLOCK&&n!=-EINTR)){lastError_=n<0?-n:0;end(io,n==0?WsReason::PeerClosed:WsReason::ReadError);return;}
   if(handshakeSent_&&rxSize_&&(uint32_t(now-frameAt_)>=1000||uint32_t(now-rxProgress_)>=200)){end(io,uint32_t(now-frameAt_)>=1000?WsReason::RxDeadline:WsReason::RxIdle);return;}
   if(handshakeSent_&&!txSize_&&!rxSize_&&int32_t(now-wheelDiagDue_)>=0){
-   wheelDiagDue_=now+1000;Snapshot s;io.snapshot(s);
+   wheelDiagDue_=now+500;Snapshot s;io.snapshot(s);
    { // Latest leg status shares the bounded low-rate device diagnostics frame.
-    if(!wheelReadMessage(tx_,2048,s,boot_,uint32_t(io.now()-(s.legs.operation.committed?s.legs.operation.confirmed_ms:s.sample_ms)))){end(io,WsReason::JsonError);return;}
-    frame(io,1,strlen(tx_));return;
+    if(!(legCalibrationTurn_?legCalibrationMessage(tx_,2048,s,boot_):wheelReadMessage(tx_,2048,s,boot_,uint32_t(io.now()-(s.legs.operation.committed?s.legs.operation.confirmed_ms:s.sample_ms))))){end(io,WsReason::JsonError);return;}
+    legCalibrationTurn_=!legCalibrationTurn_;frame(io,1,strlen(tx_));return;
    }
   }
   if(handshakeSent_&&!mask_&&!rxSize_&&int32_t(now-statusDue_)>=0){Snapshot s;io.snapshot(s);if(!sample(tx_,2048,s,boot_,generation_,seq_,dropped_,0,io.now())){end(io,WsReason::JsonError);return;}frame(io,1,strlen(tx_));statusDue_=now+1000;}

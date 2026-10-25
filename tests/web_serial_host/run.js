@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = name => fs.readFileSync(`data/${name}`, 'utf8');
-const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js', 'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'leg-calibration.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 const readyFile = process.env.DRIVE_LEG_READY_OUTPUT;
 const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.stringify({
   leg_ms: 100, leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
@@ -15,7 +15,7 @@ const legPositionJson = process.env.LEG_POSITION_JSON_OUTPUT ? fs.readFileSync(p
 const legFlowJson = process.env.DRIVE_LEG_FLOW_OUTPUT ? fs.readFileSync(process.env.DRIVE_LEG_FLOW_OUTPUT, 'utf8') : null;
 const legGeometryJson = process.env.LEG_GEOMETRY_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_GEOMETRY_JSON_OUTPUT, 'utf8') : null;
 const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson, legFlowJson, legGeometryJson });
-for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'legs.js', 'status.js', 'dashboard.js']) {
+for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'leg-calibration.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
 vm.runInContext(`
@@ -241,3 +241,8 @@ assert(!/購読開始|購読適用/.test(assets.map(source).join('')));
 const cpp = fs.readFileSync('src/main.cpp', 'utf8');
 for (const file of assets.slice(1)) assert(cpp.includes(`"/${file}"`), `route ${file}`);
 console.log('PASS: 60s/1200 history, wrap, seq/drop/invalid/generation/reconnect gaps, CSV, presets, 32 stable colors, LF/CRLF size caps and routes');
+
+const { legCalGeometry } = require('../../data/leg-calibration.js');
+assert(legCalGeometry([2044,1697,2084,2408]).includes('1940～2034'));
+assert(legCalGeometry([2044,1697,2084,2408]).includes('2094～2181'));
+assert.equal(legCalGeometry([0,0,0,0]), '方向・範囲未成立');

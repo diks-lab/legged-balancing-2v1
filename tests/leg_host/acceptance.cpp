@@ -38,7 +38,7 @@ void begin(Control&c,ServoBus<IO>&b,IO&io,uint32_t start){
 }
 unsigned goals(const IO&io){unsigned n=0;for(unsigned i=0;i<io.writes;++i)n+=io.sizes[i]==24;return n;}
 int main(){
- {Control c;ServoBus<IO>b;IO io;begin(c,b,io,1000);
+ {Control c(false,Acceptance{});ServoBus<IO>b;IO io;begin(c,b,io,1000);
   assert(!c.state.active&&c.state.reason==Reason::PositionRange&&io.writes==2);}
  {Control c(false,verified);ServoBus<IO>b;IO io;begin(c,b,io,1000);
   assert(c.state.active&&c.state.recovery==1&&goals(io)==1);

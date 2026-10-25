@@ -5,6 +5,7 @@
 #include "LegOperation.h"
 #include "LegAcceptance.h"
 #include "LegMeasurement.h"
+#include "LegCalibration.h"
 #include "Ps4ControlMapping.h"
 namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
@@ -61,7 +62,7 @@ struct PositionObservation {
  }
 };
 enum class Reason:uint8_t { ReleaseRequired,Idle,Syncing,Accepted,Driving,Stopped,
- ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy,Measuring,MeasureStopRequired,ReturnConflict };
+ ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy,Measuring,MeasureStopRequired,ReturnConflict,CalibrationRequired };
 struct State {
  float height=0,requested_roll=0,applied_roll=0,measured_roll=NAN;
  float right_percent=0,left_percent=0;
@@ -74,7 +75,9 @@ struct State {
  RxFailure rx_failure;
  PositionObservation positions;
  OperationObservation operation;
- Acceptance acceptance=ConfiguredAcceptance;
+ Acceptance acceptance=configuredAcceptance();
+ Geometry geometry=activeGeometry();
+ LegCalibration calibration;
  ServoConfiguration configuration;
  Measurement measurement;
  ps4_control::StickObservation stick;
@@ -82,7 +85,7 @@ struct State {
 };
 class Control {
  public:
- explicit Control(bool roll_confirmed=RollDirectionConfirmed,Acceptance acceptance=ConfiguredAcceptance):roll_confirmed_(roll_confirmed){state.acceptance=acceptance;}
+ explicit Control(bool roll_confirmed=RollDirectionConfirmed,Acceptance acceptance=configuredAcceptance()):roll_confirmed_(roll_confirmed){state.acceptance=acceptance;}
  State state;
  uint8_t keys=0; // up/down/left/right
  bool input_gate=false,want_sync=false;
@@ -121,8 +124,7 @@ class Control {
  }
  int16_t target(bool right)const{
   const float pct=right?state.right_percent:state.left_percent;
-  return int16_t(lroundf((right?RightHome:LeftHome)+
-    ((right?RightExtended:LeftExtended)-(right?RightHome:LeftHome))*pct/100));
+  return int16_t(lroundf(zeroTick(right)+(fullTick(right)-zeroTick(right))*pct/100));
  }
  bool commandAllowed(int16_t right,int16_t left)const{
   return state.recovery?accepted(true,right)&&accepted(false,left):inRange(true,right)&&inRange(false,left);
@@ -208,6 +210,7 @@ class Control {
   state.measured_roll=imu_valid?roll:NAN;
   const uint32_t elapsed=last_?uint32_t(now-last_):0;last_=now;
   if(!eligible){stop(Reason::Stopped);return;}
+  if(!validGeometry(activeGeometry())){stop(Reason::CalibrationRequired);return;}
   if(moving){stop(Reason::Driving);return;}
   if(!imu_valid){stop(Reason::ImuInvalid);return;}
   if(centered_&&input_gate)armed_=true;

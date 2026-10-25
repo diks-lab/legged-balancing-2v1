@@ -3,17 +3,21 @@ const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.js',
-  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
+  'plot.js', 'subscribe.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'leg-calibration.js', 'legs.js', 'status.js', 'dashboard.js', 'app.js'];
 (async () => {
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: ['--no-sandbox'] });
   try {
     for (const size of [{ width: 1366, height: 768 }, { width: 1920, height: 1080 }]) {
       const page = await browser.newPage({ viewport: size, deviceScaleFactor: 1 });
-      const requests = [], errors = [], calibrationRequests = [], legReadRequests = [], legMeasureRequests = [];
+      const requests = [], errors = [], calibrationRequests = [], legReadRequests = [], legMeasureRequests = [], legCalRequests = [];
       page.on('pageerror', e => errors.push(e.message));
       await page.route('http://127.0.0.1:8765/**', async route => {
         const file = new URL(route.request().url()).pathname.slice(1) || 'index.html';
+        if (file.startsWith('legs/calibration/')) {
+          legCalRequests.push([file.split('/').at(-1), route.request().method()]);
+          await route.fulfill({ status: 202, body: 'queued four-point calibration' });return;
+        }
         if (file.startsWith('legs/measure/')) {
           legMeasureRequests.push([file, route.request().method()]);
           await route.fulfill({ status: 202, body: 'queued read-only measurement' }); return;
@@ -461,6 +465,60 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.screenshot({ path: `work/instruments-browser/${size.width}.png` });
       // Real canvas pixels: an out-of-range posture is visible on the edge,
       // including its first isolated sample and the full stroke below the frame.
+      // Four-point UI through the real WebSocket dispatch and POST routes.
+      await page.evaluate(() => { document.getElementById('leg-range-calibration').open = true; });
+      await page.click('#leg-cal-button-start');
+      assert.equal(legCalRequests.length, 0); // Support confirmation is explicit.
+      await page.locator('#leg-range-calibration input').check();
+      for (const action of ['start', 'candidate', 'right-zero', 'right-full', 'left-zero', 'left-full', 'save', 'abort']) {
+        await page.click(`#leg-cal-button-${action}`);
+        await page.waitForFunction(() => !document.getElementById('leg-cal-button-start').disabled);
+      }
+      assert.deepEqual(legCalRequests.map(x => x[0]), ['start', 'candidate', 'right-zero', 'right-full', 'left-zero', 'left-full', 'save', 'abort']);
+      assert(legCalRequests.every(x => x[1] === 'POST'));
+      await page.evaluate(() => {
+        window.calPacket = { type: 'leg_calibration', boot_id: 'boot-test', phase: 1, mask: 0, point: 255,
+          source: 0, generation: 0, slots: 0, result: 'OK', nvs_result: 'NOT_SAVED', save: 'FOUR_POINTS_REQUIRED',
+          event_ms: 100, active: false, values: [0, 0, 0, 0], candidate: [0, 0, 0, 0],
+          acquired_ms: [0, 0, 0, 0], torque: 2 };
+        window.calReceive = () => window.peer.onmessage({ data: JSON.stringify(window.calPacket) });
+        window.calReceive();
+      });
+      assert((await page.locator('#leg-cal-active').textContent()).includes('有効値なし'));
+      assert((await page.locator('#leg-cal-right-zero').textContent()).includes('未取得（0ではありません）'));
+      assert((await page.locator('#leg-cal-save').textContent()).includes('4点の取得が必要'));
+      await page.evaluate(() => {
+        Object.assign(window.calPacket, { active: true, source: 1, values: [2007, 1675, 2071, 2412],
+          mask: 15, imported: 15, candidate: [2044, 1697, 2084, 2408], acquired_ms: [101, 102, 103, 104], save: 'OK' });
+        window.calReceive();
+      });
+      assert((await page.locator('#leg-cal-active').textContent()).includes('2007 / 1675 / 2071 / 2412'));
+      assert((await page.locator('#leg-cal-candidate').textContent()).includes('1940～2034'));
+      assert((await page.locator('#leg-cal-candidate').textContent()).includes('2094～2181'));
+      assert((await page.locator('#leg-cal-right-zero').textContent()).includes('確定候補読込'));
+      await page.evaluate(() => { window.calPacket.result = 'NVS_WRITE_FAILED';window.calReceive(); });
+      assert((await page.locator('#leg-cal-result').textContent()).includes('書込み失敗'));
+      assert((await page.locator('#leg-cal-active').textContent()).includes('2007 / 1675'));
+      const productionCal = process.env.LEG_CALIBRATION_JSON_OUTPUT
+        ? JSON.parse(fs.readFileSync(process.env.LEG_CALIBRATION_JSON_OUTPUT, 'utf8'))
+        : { phase: 4, source: 1, generation: 1, slots: 1, result: 'OK', nvs_result: 'OK', save: 'NOT_EDITING',
+          active: true, values: [2044, 1697, 2084, 2408] };
+      await page.evaluate(packet => {
+        Object.assign(window.calPacket, packet, { boot_id: 'boot-test' });window.calReceive();
+      }, productionCal);
+      assert((await page.locator('#leg-cal-state').textContent()).includes('保存完了・停止／再同期待ち'));
+      assert((await page.locator('#leg-cal-active').textContent()).includes('2044 / 1697 / 2084 / 2408'));
+      const calMutations = await page.evaluate(async () => {
+        const target = document.getElementById('leg-cal-result');let mutations = 0;
+        const observer = new MutationObserver(events => { mutations += events.length; });
+        observer.observe(target, { childList: true, characterData: true, subtree: true });
+        for (let i = 0; i < 100; i++) window.calReceive();
+        await Promise.resolve();observer.disconnect();return mutations;
+      });
+      assert.equal(calMutations, 0);
+      await page.evaluate(() => window.peer.close());
+      await page.waitForFunction(() => document.getElementById('leg-cal-fresh').textContent.includes('通信停止・最終受信時の情報'));
+      await page.evaluate(() => { document.getElementById('leg-range-calibration').open = false; });
       const edgePixels = await page.evaluate(() => {
         const canvas = document.createElement('canvas');
         canvas.style.cssText = 'position:fixed;left:0;top:0;width:800px;height:300px';

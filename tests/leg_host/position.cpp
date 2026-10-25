@@ -40,7 +40,7 @@ int main(){
   {0xf407,2122,-29703,2122,false}
  };
  for(const auto&test:cases){
-  Control c;ServoBus<IO>bus;IO io;io.words[0]=test.right;io.words[1]=test.left;run(c,bus,io,1000);
+  Control c(false,Acceptance{});ServoBus<IO>bus;IO io;io.words[0]=test.right;io.words[1]=test.left;run(c,bus,io,1000);
   const auto&seen=c.state.positions;
   assert(seen.acquired==3&&seen.current==3);
   assert(seen.word[0]==test.right&&seen.word[1]==test.left);
@@ -70,13 +70,13 @@ int main(){
  // Inward quantization keeps the integer endpoint at or below 30%.
  assert(percent(true,1908)<30&&inRange(true,1908)&&!inRange(true,1907));
  for(uint8_t corrupt:{uint8_t(1),uint8_t(2)}){
-  Control c;ServoBus<IO>b;IO io;io.corrupt=corrupt;run(c,b,io,1000);
+  Control c(false,Acceptance{});ServoBus<IO>b;IO io;io.corrupt=corrupt;run(c,b,io,1000);
   assert(!c.state.active&&!c.state.synced);
   assert(c.state.positions.acquired==(corrupt==1?0:1));
   for(unsigned i=0;i<io.writes;++i)assert(io.sizes[i]==8);
  }
  // A later invalid reply never overwrites an earlier valid observation or mixes attempts.
- {Control c;ServoBus<IO>b;IO io;run(c,b,io,1000);assert(c.state.active);
+ {Control c(false,Acceptance{});ServoBus<IO>b;IO io;run(c,b,io,1000);assert(c.state.active);
   const auto saved=c.state.positions;b.off(c);b.service(io,c,1300);
   const unsigned before=io.writes;io.words[0]=2040;io.words[1]=2080;io.corrupt=2;
   run(c,b,io,1400);assert(!c.state.active&&!c.state.synced);

@@ -157,12 +157,10 @@ void wheelAlignTimeout(void*) {
 }
 constexpr uint8_t kRightLegServoId = 1;
 constexpr uint8_t kLeftLegServoId = 2;
-constexpr int16_t kRightLegHomePosition = leg::position(true,0);
-constexpr int16_t kRightLegTestExtend10PercentPosition = leg::position(true,10);
+
 constexpr uint16_t kRightLegTestSpeed = 150;
 constexpr uint8_t kRightLegTestAcceleration = 15;
-constexpr int16_t kLeftLegHomePosition = leg::position(false,0);
-constexpr int16_t kLeftLegTestExtend10PercentPosition = leg::position(false,10);
+
 constexpr uint16_t kLeftLegTestSpeed = 150;
 constexpr uint8_t kLeftLegTestAcceleration = 15;
 constexpr uint16_t kBothLegsTestSpeed = 150;
@@ -772,6 +770,16 @@ void reportStartupFailure(const char* stage);
 void printHttpStartupMemory(const char* stage);
 void printStartupMemoryResult(const char* result);
 void updateWifiLogServer();
+struct LegSaveHandoff {
+ portMUX_TYPE lock=portMUX_INITIALIZER_UNLOCKED;
+ leg::Geometry candidate;
+ leg::StoredLegs result;
+ uint8_t state=0; // idle/requested/working/result. Protected, not volatile.
+} leg_save;
+void serviceLegSaveWorker();
+void serviceLegCalibrationResult();
+void legCalibrationCommand(char action);
+void loadLegCalibration();
 void serviceHttpRequests();
 void handleWifiStatusPage();
 void handleVelocityTraceDownload();
@@ -886,6 +894,7 @@ void setup() {
   sms_sts.pSerial = &Serial2;
   delay(1000);
   initializeUartAllocationDiagnostics();
+  loadLegCalibration();
   Serial.println("\n--- SimpleFOC two-wheel + MPU6050 integration test ---");
   Serial.println("BOOT AUTO: UPRIGHT WAIT; first valid pose within +/-2 deg starts balance; fixed reference=0 deg.");
   prepareI2cResources(); // Buffers and bus drivers only; wheel EN remains LOW.
@@ -2118,6 +2127,7 @@ void printLqrStopTrace(const char* reason) {
 }
 
 bool requestLqrDrive(float target_speed, char command) {
+  if(leg_control.state.calibration.active())return false;
   if (lqr_test_mode == LqrTestMode::AttitudeOnly) {
     Serial.println("IGNORED: select a drive-capable LQR mode before requesting motion.");
     return false;
@@ -3735,6 +3745,7 @@ bool saveWheelCalibration(){
   calibration_loaded=true;return true;
 }
 void requestWheelCalibration(){
+  if(leg_control.state.calibration.active()){calibration_status="REJECTED_LEG_CALIBRATION";return;}
   if(calibration_abort.load()){calibration_status="ABORTED";return;}
   if(calibration_active.load()||lqr_direction_test_armed||balance_wait_active||polarity_test_active||
       right_target_voltage!=0||left_target_voltage!=0){calibration_status="REJECTED_ACTIVE";return;}
@@ -4024,6 +4035,7 @@ void updateBalanceWait() {
 }
 
 bool motionCommandAllowed() {
+  if(leg_control.state.calibration.active())return false;
   if (!test_system_ready) {
     Serial.println("IGNORED: both motors are not initialized.");
     return false;
@@ -4110,6 +4122,7 @@ bool cycleLqrSpeedSource() {
 }
 
 bool startBalanceTest(bool boot_immediate) {
+  if(leg_control.state.calibration.active())return false;
   if (!test_system_ready) {
     Serial.println("IGNORED: system initialization is not complete.");
     return false;
@@ -4620,6 +4633,7 @@ void captureHttpStatus();
 void formatHttpResources(char* text, size_t capacity);
 
 void serviceHttpRequests() {
+  serviceLegCalibrationResult();
   publishDiagnosticSnapshot(false);
   if (!http_status_queue) return;
   char command = 0;
@@ -4636,6 +4650,7 @@ void serviceHttpRequests() {
       case 'L': readLegConfiguration(); break;
       case 'B': startLegMeasurement(); break;
       case 'E': stopLegMeasurement(); break;
+      default: if(command>='1'&&command<='8')legCalibrationCommand(char('a'+command-'1'));break;
     }
   }
   static uint32_t last_status_ms = 0;
@@ -4975,6 +4990,15 @@ void serviceReleaseMemoryObservation() {
 
 void serviceDiagnosticWebSocket();
 
+void serviceLegSaveWorker(){
+ leg::Geometry candidate;bool requested=false;
+ portENTER_CRITICAL(&leg_save.lock);
+ if(leg_save.state==1){candidate=leg_save.candidate;leg_save.state=2;requested=true;}
+ portEXIT_CRITICAL(&leg_save.lock);
+ if(!requested)return;
+ Preferences prefs;const auto result=leg::saveLegs(prefs,candidate);
+ portENTER_CRITICAL(&leg_save.lock);leg_save.result=result;leg_save.state=3;portEXIT_CRITICAL(&leg_save.lock);
+}
 void httpTask(void*) {
   // Creation may schedule us immediately, before filesystem/Wi-Fi setup ends.
   while (!http_task_ready.load()) vTaskDelay(pdMS_TO_TICKS(2));
@@ -4989,6 +5013,7 @@ void httpTask(void*) {
       if(deferred)reportStartupFailure(deferred);
       if(foc_deferred_http_started){Serial.println("WiFi trace HTTP server started.");foc_deferred_http_started=false;}
     }
+    serviceLegSaveWorker();
     serviceLegSerial();
     if(leg_serial_output.idle())serviceHttpPs4DiagnosticSerial();
     serviceHttpFileResponse();
@@ -5017,6 +5042,15 @@ void startWifiHttpServer() {
     wifi_log_server.on("/leg-state.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-state.js", "application/javascript"); });
     wifi_log_server.on("/leg-measure.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-measure.js", "application/javascript"); });
     wifi_log_server.on("/leg-config.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/leg-config.js", "application/javascript"); });
+    wifi_log_server.on("/leg-calibration.js", HTTP_GET, [](){HttpMemoryRequest observed{3};serveWebFile("/leg-calibration.js","application/javascript");});
+    wifi_log_server.on("/legs/calibration/start",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('1');});
+    wifi_log_server.on("/legs/calibration/candidate",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('2');});
+    wifi_log_server.on("/legs/calibration/right-zero",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('3');});
+    wifi_log_server.on("/legs/calibration/right-full",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('4');});
+    wifi_log_server.on("/legs/calibration/left-zero",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('5');});
+    wifi_log_server.on("/legs/calibration/left-full",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('6');});
+    wifi_log_server.on("/legs/calibration/save",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('7');});
+    wifi_log_server.on("/legs/calibration/abort",HTTP_POST,[](){HttpMemoryRequest observed{4};enqueueHttpCommand('8');});
     wifi_log_server.on("/legs/read-config", HTTP_POST, [](){
       HttpMemoryRequest observed{4};
       if(!http_command_queue){sendSmallHttpResponse(503,"Control queue unavailable\n");return;}
@@ -5391,10 +5425,12 @@ void printHelp() {
   Serial.println("  q : print distance-control diagnostics without motor output");
   Serial.println("  v : print speed-control diagnostics without motor output");
   Serial.println("  l : async read-only right/left servo positions (stopped only)");
-  Serial.printf("  m : right 10%% servo travel target %d\n",kRightLegTestExtend10PercentPosition);
-  Serial.printf("  n : right inner retracted limit %d (not measured 0%% stop)\n",kRightLegHomePosition);
-  Serial.printf("  o : left 10%% servo travel target %d\n",kLeftLegTestExtend10PercentPosition);
-  Serial.printf("  y : left inner retracted limit %d (not measured 0%% stop)\n",kLeftLegHomePosition);
+  if(!leg::validGeometry(leg::activeGeometry()))Serial.println("  LEG: no active calibration; displayed target -1 means unavailable, all leg motion rejected.");
+  Serial.printf("  m : right 10%% servo travel target %d\n",leg::position(true,10));
+  Serial.println("  :leg begin / candidate / r0 / r100 / l0 / l100 / save / abort + ENTER: read-only four-point leg calibration; supported STOP/OFF required.");
+  Serial.printf("  n : right inner retracted limit %d (not measured 0%% stop)\n",leg::position(true,0));
+  Serial.printf("  o : left 10%% servo travel target %d\n",leg::position(false,10));
+  Serial.printf("  y : left inner retracted limit %d (not measured 0%% stop)\n",leg::position(false,0));
   Serial.println("  w : move both legs to 10% extension");
   Serial.println("  ! : move both legs to 20% extension");
   Serial.println("  @ : move both legs to 30% extension");
@@ -5856,6 +5892,7 @@ void resetPs4MotionInput() {
 }
 
 bool executeOperatorCommand(OperatorCommand command) {
+  if(leg_control.state.calibration.active()&&command!=OperatorCommand::FullStop&&command!=OperatorCommand::EndTest)return false;
   switch (command) {
     case OperatorCommand::Start:
       if (!startBalanceTest(false)) return false;
@@ -6231,7 +6268,7 @@ void serviceLegControl() {
   const bool bench=!lqr_direction_test_armed&&!balance_wait_active&&
       boot_auto_start.phase==BootAutoStart::Phase::Cancelled;
   const bool eligible=test_system_ready&&(lqr_direction_test_armed||bench)&&!emergency_stop_active&&
-      !polarity_test_active&&!calibration_active.load();
+      !polarity_test_active&&!calibration_active.load()&&!leg_control.state.calibration.active()&&leg::validGeometry(leg::activeGeometry());
   const bool imu=(fallRecoveryChecks()&2u)&&isfinite(mpu6050.getAngleX());
   const float roll=imu?leg::ImuRollSign*mpu6050.getAngleX():NAN;
   leg_control.state.operation.gates=(test_system_ready?leg::Ready:0)|(lqr_direction_test_armed?leg::Balancing:0)|
@@ -6248,6 +6285,8 @@ void serviceLegControl() {
   // A brief wheel retry freezes the leg target; do not release load-bearing legs.
   if(observing){
     // Explicit stopped read-only query: no target or torque change.
+  } else if(leg_control.state.calibration.active()){
+    leg_control.stop(leg::Reason::Calibrating);
   } else if(wheel_comm_suspended&&eligible){
     leg_control.stop(leg::Reason::WheelRetry);
     leg_bus.cancel();
@@ -6258,7 +6297,7 @@ void serviceLegControl() {
     leg_control.tick(now,eligible,moving,imu,roll);
     if(!eligible){
       leg_control.state.reason=!test_system_ready?leg::Reason::Initializing:
-          calibration_active.load()?leg::Reason::Calibrating:
+          (calibration_active.load()||leg_control.state.calibration.active())?leg::Reason::Calibrating:
           polarity_test_active?leg::Reason::PolarityTest:
           emergency_stop_active?leg::Reason::ExplicitStop:leg::Reason::StartWaiting;
     }
@@ -6268,8 +6307,8 @@ void serviceLegControl() {
   leg_bus.service(leg_uart,leg_control,now);
   const bool healthy=eligible&&!moving&&imu&&!wheel_comm_suspended;
   const leg::Reason gate=!test_system_ready?leg::Reason::Initializing:
-      calibration_active.load()?leg::Reason::Calibrating:polarity_test_active?leg::Reason::PolarityTest:
-      emergency_stop_active?leg::Reason::ExplicitStop:!eligible?leg::Reason::StartWaiting:
+      (calibration_active.load()||leg_control.state.calibration.active())?leg::Reason::Calibrating:polarity_test_active?leg::Reason::PolarityTest:
+      emergency_stop_active?leg::Reason::ExplicitStop:!leg::validGeometry(leg::activeGeometry())?leg::Reason::CalibrationRequired:!eligible?leg::Reason::StartWaiting:
       !imu?leg::Reason::ImuInvalid:wheel_comm_suspended?leg::Reason::WheelRetry:leg::Reason::Driving;
   leg_control.commit(now,healthy,gate,leg_bus.stage(leg_control));
   auto&stick=leg_control.state.stick;
@@ -6287,7 +6326,7 @@ void serviceLegControl() {
 }
 
 bool prepareLegacyLegAction(){
-  if(lqr_direction_test_armed||balance_wait_active||polarity_test_active||leg_bus.busy()){
+  if(!leg::validGeometry(leg::activeGeometry())||leg_control.state.calibration.active()||lqr_direction_test_armed||balance_wait_active||polarity_test_active||leg_bus.busy()){
     Serial.println("LEG SERIAL: stop balance and pending leg communication first.");return false;
   }
   leg_control.stop(leg::Reason::Stopped);leg_control.state.command_valid=false;
@@ -6300,8 +6339,58 @@ bool legMeasurementStopped(){
       !boot_auto_start.pending()&&!fall_auto_recovery.pending&&!lqr_auto_drive_active&&
       !lqr_drive_start_pending&&!lqr_soft_stop_active&&!calibration_active.load();
 }
+void loadLegCalibration(){
+ Preferences prefs;const auto stored=leg::loadLegs(prefs);
+ auto&c=leg_control.state.calibration;c.result=stored.result;c.source=stored.result==leg::CalResult::Ok;
+ c.generation=stored.generation;c.valid_slots=stored.valid_slots;c.storage=stored.result;
+ leg::activeGeometry()=c.source?stored.geometry:leg::Geometry{};
+ leg_control.state.geometry=leg::activeGeometry();leg_control.state.acceptance=leg::configuredAcceptance();
+ Serial.printf("LEG CALIBRATION BOOT: source=%s result=%s generation=%lu valid_slots=%u; no leg movement\n",c.source?"NVS":"NONE",leg::calResult(c.result),(unsigned long)c.generation,c.valid_slots);
+ if(!c.source)Serial.println("LEG CALIBRATION REQUIRED: confirmed candidate R0=2044 R100=1697 L0=2084 L100=2408; explicit load and save required. Wheels unchanged.");
+}
+void serviceLegCalibrationResult(){
+ leg::StoredLegs result;bool ready=false;
+ portENTER_CRITICAL(&leg_save.lock);
+ if(leg_save.state==3){result=leg_save.result;leg_save.state=0;ready=true;}
+ portEXIT_CRITICAL(&leg_save.lock);
+ if(!ready)return;
+ auto&c=leg_control.state.calibration;
+ if(result.result==leg::CalResult::Ok){
+  // One control owner, one complete geometry adoption; no actuator command.
+  leg::activeGeometry()=result.geometry;leg_control.state.geometry=result.geometry;
+  leg_control.state.acceptance=leg::configuredAcceptance();
+  leg_control.stop(leg::Reason::Stopped);leg_control.disconnect();
+  leg_control.state.command_valid=false;leg_control.state.positions.current=0;
+  c.source=1;c.generation=result.generation;c.valid_slots=result.valid_slots;c.phase=4;
+  ps4_controls_released=false;
+ }else c.phase=1;
+ c.storage=result.result;c.event(result.result,millis());
+}
+void legCalibrationCommand(char action){
+ auto&c=leg_control.state.calibration;const uint32_t now=millis();
+ const bool safe=legMeasurementStopped()&&leg_control.state.torque==2&&!leg_control.state.active&&!leg_bus.busy();
+ if(action=='a'){
+  if(c.begin(safe,now)){leg_control.stop(leg::Reason::Calibrating);leg_control.disconnect();ps4_controls_released=false;}
+ }else if(action=='h'){
+  if(!c.active()){c.event(leg::CalResult::NotEditing,now);return;}
+  if(c.phase==3){c.event(leg::CalResult::Busy,now);return;}
+  leg_bus.cancelCalibration(leg_control,now);c.abort(now);leg_control.stop(leg::Reason::Stopped);
+  leg_control.disconnect();ps4_controls_released=false;
+ }else if(!safe&&!(c.phase==2&&action>='c'&&action<='f'))c.event(leg::CalResult::StopRequired,now);
+ else if(action=='b')c.confirmed(now);
+ else if(action>='c'&&action<='f')leg_bus.captureCalibration(leg_control,unsigned(action-'c'),now);
+ else if(action=='g'){
+  if(!http_task_ready.load()){c.event(leg::CalResult::WorkerUnavailable,now);return;}
+  const auto result=c.canSave();if(result!=leg::CalResult::Ok){c.event(result,now);return;}
+  portENTER_CRITICAL(&leg_save.lock);
+  const bool idle=leg_save.state==0;
+  if(idle){leg_save.candidate=c.candidate;leg_save.state=1;}
+  portEXIT_CRITICAL(&leg_save.lock);
+  if(idle){c.phase=3;c.event(leg::CalResult::Ok,now);}else c.event(leg::CalResult::Busy,now);
+ }else c.event(leg::CalResult::NotEditing,now);
+}
 bool startLegMeasurement(){
-  if(!legMeasurementStopped()){
+  if(leg_control.state.calibration.active()||!legMeasurementStopped()){
     leg_control.state.measurement.rejected_ms=millis();
     leg_control.state.measurement.reject_reason=uint8_t(leg::Reason::MeasureStopRequired);return false;
   }
@@ -6310,6 +6399,7 @@ bool startLegMeasurement(){
 void stopLegMeasurement(){leg_bus.stopMeasurement(leg_control,millis());}
 
 bool readLegConfiguration(){
+  if(leg_control.state.calibration.active())return false;
   if(lqr_direction_test_armed||balance_wait_active||polarity_test_active||
       boot_auto_start.pending()||fall_auto_recovery.pending||lqr_auto_drive_active||lqr_drive_start_pending||lqr_soft_stop_active||calibration_active.load()){
     leg_control.state.configuration.rejected_ms=millis();
@@ -6415,7 +6505,15 @@ void handleSerialCommand() {
   }
 
   const char command = Serial.read();
+  static leg::LegCalSerialParser leg_parser;char leg_action=0;
+  if(leg_parser.feed(command,leg_action)){
+   if(leg_action)legCalibrationCommand(leg_action);
+   return;
+  }
 
+  if(leg_control.state.calibration.active()&&command!='d'&&command!='D'&&command!='h'&&command!='H'&&command!='?'&&command!='\r'&&command!='\n'){
+    leg_control.state.calibration.event(leg::CalResult::Busy,millis());return;
+  }
   if (command == '\r' || command == '\n' ||
       command == ' ' || command == '\t') {
     return;
@@ -6518,20 +6616,20 @@ void handleSerialCommand() {
       break;
     case 'm':
     case 'M':
-      moveRightLegForTest(kRightLegTestExtend10PercentPosition);
+      moveRightLegForTest(leg::position(true,10));
       break;
     case 'n':
     case 'N':
-      moveRightLegForTest(kRightLegHomePosition);
+      moveRightLegForTest(leg::position(true,0));
       break;
     case 'o':
     case 'O':
-      moveLeftLegForTest(kLeftLegTestExtend10PercentPosition,
+      moveLeftLegForTest(leg::position(false,10),
                          "EXTEND_10_PERCENT");
       break;
     case 'y':
     case 'Y':
-      moveLeftLegForTest(kLeftLegHomePosition, "HOME");
+      moveLeftLegForTest(leg::position(false,0), "HOME");
       break;
     case 'w':
     case 'W':

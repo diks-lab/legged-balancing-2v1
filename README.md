@@ -211,8 +211,8 @@ Commands are newline-terminated:
 | `ping3` | Send one standard STS-style Ping to ESP32C3 ID3. A matching, zero-error, length-2 status packet is required; a transmitted-packet echo is logged and ignored. |
 | `pingall` | Run one standard Ping each for ID1, ID2, and ID3. |
 | `pos1`, `pos2` | Read the current raw position at STS address 56 from ID1 or ID2. |
-| `rhome`, `rext` | Move only right ID1 to the inner retracted limit 1997 or 10% servo travel 1974. |
-| `lhome`, `lext` | Move only left ID2 to the inner retracted limit 2081 or 10% servo travel 2105. |
+| `rhome`, `rext` | Move only right ID1 using validated leg NVS geometry (new confirmed candidate after saving: inner retracted 2034 / 10% travel 2009 tick). |
+| `lhome`, `lext` | Move only left ID2 using validated leg NVS geometry (new confirmed candidate after saving: inner retracted 2094 / 10% travel 2116 tick). |
 | `c3ping` | Send the ID3 `0xA0` ASCII command `PING` (expected payload: `OK PONG`). |
 | `c3help` | Send the ID3 `0xA0` ASCII command `HELP` and display its ASCII response. |
 | `c3status` | Send the ID3 `0xA0` ASCII command `STATUS` and display its ASCII response. |
@@ -378,3 +378,4 @@ Web診断は[WebSocket・JSON・ブラウザー60秒履歴](docs/websocket-diagn
 - 参照元：https://github.com/fuwei007/Navbot-EN01
 - 主な参照対象：Src/wl_pro_robot/wl_pro_robot.ino
 - 由来・差分・変更時の方針：[docs/upstream-origin.md](docs/upstream-origin.md)
+Leg stroke has independent [four-point NVS calibration](docs/leg-range-calibration.md). No saved valid leg geometry means no leg motion; wheel initialization/control remains independent.

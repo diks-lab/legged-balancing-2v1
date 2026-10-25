@@ -17,6 +17,7 @@ window.startLogger = function () {
   el('calibrate-abort').onclick = () => calibrationAction('/calibration/abort');
   const history = new DiagnosticHistory();
   const dashboard = new Dashboard(el, history);
+  const legCalibrationPanel = new LegCalibrationPanel();
   const plot = dashboard.aux;
   let socket = null, generation = null;
   let boot = null, lastSeq = null, lastDrop = 0, lost = 0;
@@ -140,6 +141,9 @@ window.startLogger = function () {
         ws.close();
         return;
       }
+      if (s.type === 'leg_calibration') {
+        legCalibrationPanel.receive(s, boot);return;
+      }
       if (s.type === 'wheel_diagnostics') {
         if (s.boot_id === boot) {
           dashboard.wheelReads = { wheel0: s.wheel0, wheel1: s.wheel1 };
@@ -205,6 +209,7 @@ window.startLogger = function () {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   setInterval(() => {
+    legCalibrationPanel.update(socket?.readyState === 1, boot);
     if (socket && socket.readyState === 1 && Date.now() - lastMessage > 6000) {
       el('connection').textContent = '更新停止（6秒）。再接続してください';
       socket.close();

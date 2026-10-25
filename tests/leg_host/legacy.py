@@ -30,11 +30,11 @@ float constrain(float p,float lo,float hi){return fmaxf(lo,fminf(hi,p));}
     body='\n'.join(function(n) for n in ('moveRightLegForTest','moveLeftLegForTest','rightLegPositionFromPercent','leftLegPositionFromPercent','moveBothLegsToPercent'))
     tests=r'''
 int main(){
- static_assert(kRightLegHomePosition==1997&&kLeftLegHomePosition==2081,"HOME commands inside measured ends");
- static_assert(kRightLegTestExtend10PercentPosition==1974&&kLeftLegTestExtend10PercentPosition==2105,"10% conversion");
+ assert(leg::position(true,0)==1997&&leg::position(false,0)==2081);
+ assert(leg::position(true,10)==1974&&leg::position(false,10)==2105);
  for(float p:{-10.f,0.f,10.f,20.f,30.f,100.f}){assert(leg::inRange(true,rightLegPositionFromPercent(p)));
   assert(leg::inRange(false,leftLegPositionFromPercent(p)));moveBothLegsToPercent(p);}
- moveRightLegForTest(kRightLegHomePosition);moveLeftLegForTest(kLeftLegHomePosition,"INNER_HOME");
+ moveRightLegForTest(leg::position(true,0));moveLeftLegForTest(leg::position(false,0),"INNER_HOME");
  const auto before=writes,torque=ons;
  moveRightLegForTest(2007);moveRightLegForTest(1675);moveLeftLegForTest(2071,"MEASURED_END");moveLeftLegForTest(2412,"MEASURED_END");
  assert(writes==before&&ons==torque);
@@ -45,9 +45,9 @@ int main(){
 '''
     source=Path(tmp)/'legacy.cpp';binary=Path(tmp)/'legacy'
     source.write_text(stubs+constants+body+tests)
-    subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',str(source),'-o',str(binary),*flags],check=True)
+    subprocess.run(['c++','-include','tests/leg_host/fixture.h','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',str(source),'-o',str(binary),*flags],check=True)
     subprocess.run([str(binary)],check=True)
     for path in ('src/main.cpp','src/bus_diagnostic.cpp','include/LegAcceptance.h','include/LegControl.h','include/LegSerialDiagnostics.h'):
         text=Path(path).read_text()
-        for number in (2061,1892,2026,2208,2010,2044):
+        for number in (2061,1892,2026,2208,2010):
             assert not re.search(r'\b'+str(number)+r'\b',text),(path,number)

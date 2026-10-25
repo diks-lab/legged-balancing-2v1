@@ -1,38 +1,49 @@
 #pragma once
 #include <stdint.h>
 namespace leg {
-// User-measured servo-position stroke (265 valid samples/side), NOT linear leg length.
-constexpr int RightHome=2007,RightExtended=1675,LeftHome=2071,LeftExtended=2412;
+// Explicit four-point NVS adoption only. Percent is servo travel, NOT linear leg length.
+struct Geometry { int16_t right_zero=0,right_full=0,left_zero=0,left_full=0; };
+constexpr Geometry ConfirmedCandidate{2044,1697,2084,2408};
+// Main task owns adoption. HTTP uses the Geometry copied into its Snapshot.
+inline Geometry& activeGeometry(){
+ static Geometry value{}; // No implicit usable calibration.
+ return value;
+}
 constexpr int RightRetractedMarginTicks=10,RightExtendedMarginTicks=10;
 constexpr int LeftRetractedMarginTicks=10,LeftExtendedMarginTicks=10;
 constexpr float MinPercent=0,MaxPercent=30;
 constexpr int lower(int a,int b){return a<b?a:b;}
 constexpr int upper(int a,int b){return a>b?a:b;}
-constexpr int zeroTick(bool right){return right?RightHome:LeftHome;}
-constexpr int fullTick(bool right){return right?RightExtended:LeftExtended;}
-constexpr int measuredMinTick(bool right){return lower(zeroTick(right),fullTick(right));}
-constexpr int measuredMaxTick(bool right){return upper(zeroTick(right),fullTick(right));}
+inline int zeroTick(bool right,const Geometry&g=activeGeometry()){return right?g.right_zero:g.left_zero;}
+inline int fullTick(bool right,const Geometry&g=activeGeometry()){return right?g.right_full:g.left_full;}
+inline int measuredMinTick(bool right,const Geometry&g=activeGeometry()){return lower(zeroTick(right,g),fullTick(right,g));}
+inline int measuredMaxTick(bool right,const Geometry&g=activeGeometry()){return upper(zeroTick(right,g),fullTick(right,g));}
 constexpr int retractMargin(bool right){return right?RightRetractedMarginTicks:LeftRetractedMarginTicks;}
 constexpr int extendMargin(bool right){return right?RightExtendedMarginTicks:LeftExtendedMarginTicks;}
-constexpr int safeMinTick(bool right){return measuredMinTick(right)+(right?extendMargin(right):retractMargin(right));}
-constexpr int safeMaxTick(bool right){return measuredMaxTick(right)-(right?retractMargin(right):extendMargin(right));}
+inline int safeMinTick(bool right,const Geometry&g=activeGeometry()){return measuredMinTick(right,g)+(right?extendMargin(right):retractMargin(right));}
+inline int safeMaxTick(bool right,const Geometry&g=activeGeometry()){return measuredMaxTick(right,g)-(right?retractMargin(right):extendMargin(right));}
 // Integer division rounds the 30% endpoint inward (not beyond 30%).
-constexpr int normalEndTick(bool right){return zeroTick(right)+(fullTick(right)-zeroTick(right))*int(MaxPercent)/100;}
-constexpr int normalMinTick(bool right){return upper(safeMinTick(right),lower(zeroTick(right),normalEndTick(right)));}
-constexpr int normalMaxTick(bool right){return lower(safeMaxTick(right),upper(zeroTick(right),normalEndTick(right)));}
-constexpr float percent(bool right,int16_t tick){return 100.f*(tick-zeroTick(right))/(fullTick(right)-zeroTick(right));}
-constexpr float normalLow(bool right){return percent(right,int16_t(right?normalMaxTick(right):normalMinTick(right)));}
-constexpr float normalHigh(bool right){return percent(right,int16_t(right?normalMinTick(right):normalMaxTick(right)));}
-constexpr bool inRange(bool right,int16_t tick){return tick>=normalMinTick(right)&&tick<=normalMaxTick(right);}
-constexpr bool measured(bool right,int tick){return tick>=measuredMinTick(right)&&tick<=measuredMaxTick(right);}
+inline int normalEndTick(bool right,const Geometry&g=activeGeometry()){return zeroTick(right,g)+(fullTick(right,g)-zeroTick(right,g))*int(MaxPercent)/100;}
+inline int normalMinTick(bool right,const Geometry&g=activeGeometry()){return upper(safeMinTick(right,g),lower(zeroTick(right,g),normalEndTick(right,g)));}
+inline int normalMaxTick(bool right,const Geometry&g=activeGeometry()){return lower(safeMaxTick(right,g),upper(zeroTick(right,g),normalEndTick(right,g)));}
+inline float percent(bool right,int16_t tick,const Geometry&g=activeGeometry()){return fullTick(right,g)==zeroTick(right,g)?__builtin_nanf(""):100.f*(tick-zeroTick(right,g))/(fullTick(right,g)-zeroTick(right,g));}
+inline float normalLow(bool right,const Geometry&g=activeGeometry()){return percent(right,int16_t(right?normalMaxTick(right,g):normalMinTick(right,g)),g);}
+inline float normalHigh(bool right,const Geometry&g=activeGeometry()){return percent(right,int16_t(right?normalMinTick(right,g):normalMaxTick(right,g)),g);}
+inline bool inRange(bool right,int16_t tick,const Geometry&g=activeGeometry()){return tick>=normalMinTick(right,g)&&tick<=normalMaxTick(right,g);}
+inline bool measured(bool right,int tick,const Geometry&g=activeGeometry()){return tick>=measuredMinTick(right,g)&&tick<=measuredMaxTick(right,g);}
+inline bool validGeometry(const Geometry&g);
 // Ordinary commands are always inside the margin AND the 0..30% window.
-constexpr int16_t position(bool right,float pct){
+inline int16_t position(bool right,float pct,const Geometry&g=activeGeometry()){
+ if(!validGeometry(g))return -1; // No implicit target when calibration is absent.
  const float p=pct<MinPercent?MinPercent:pct>MaxPercent?MaxPercent:pct;
- const float value=zeroTick(right)+(fullTick(right)-zeroTick(right))*p/100.f;
+ const float value=zeroTick(right,g)+(fullTick(right,g)-zeroTick(right,g))*p/100.f;
  const int rounded=int(value+.5f); // All measured ticks are positive.
- return int16_t(rounded<normalMinTick(right)?normalMinTick(right):rounded>normalMaxTick(right)?normalMaxTick(right):rounded);
+ return int16_t(rounded<normalMinTick(right,g)?normalMinTick(right,g):rounded>normalMaxTick(right,g)?normalMaxTick(right,g):rounded);
 }
 static_assert(RightRetractedMarginTicks>0&&RightExtendedMarginTicks>0&&LeftRetractedMarginTicks>0&&LeftExtendedMarginTicks>0,"positive margins required");
-static_assert(normalMinTick(true)<normalMaxTick(true)&&normalMinTick(false)<normalMaxTick(false),"empty normal drive range");
-static_assert(normalLow(true)>0&&normalHigh(true)<=30&&normalLow(false)>0&&normalHigh(false)<=30,"inward quantization required");
+inline bool validGeometry(const Geometry&g){
+ return g.right_zero>=0&&g.right_zero<=4095&&g.right_full>=0&&g.right_full<g.right_zero&&
+  g.left_zero>=0&&g.left_zero<=4095&&g.left_full>g.left_zero&&g.left_full<=4095&&
+  normalMinTick(true,g)<normalMaxTick(true,g)&&normalMinTick(false,g)<normalMaxTick(false,g);
+}
 }

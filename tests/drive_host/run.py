@@ -75,6 +75,7 @@ std::atomic<bool> http_task_ready{false};
 struct Preferences {
  inline static std::map<std::string,std::vector<uint8_t>> data;
  inline static bool failOpen=false,failWrite=false,failRead=false;
+ void end(){}
  bool begin(const char*,bool){return !failOpen;}
  size_t getBytesLength(const char* k){return data[k].size();}
  size_t getBytes(const char*k,void*p,size_t n){if(failRead||data[k].size()!=n)return 0;memcpy(p,data[k].data(),n);return n;}
@@ -251,7 +252,7 @@ prefix = prefix.replace('void printHttpStartupMemory(const char* stage);', 'void
 prefix += source[source.index('struct HttpResponseTransport {'):source.index('void serviceHttpFileResponse()')]
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
-names = [
+names = ['loadLegCalibration','legCalibrationCommand','serviceLegCalibrationResult','serviceLegSaveWorker',
     'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','recordLegInput','captureLegSerial','readLegConfiguration','legMeasurementStopped','startLegMeasurement','stopLegMeasurement','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
@@ -992,6 +993,7 @@ int main(){
     assert(!emergency_stop_active&&!lqr_direction_test_armed&&!balance_wait_active);
     assert(leg_control.state.operation.allowed&&leg_control.state.operation.blocker==255);
     const auto oldReads=Serial2.reads,oldGoals=Serial2.goals,oldOns=Serial2.ons;
+    leg_control.state.acceptance=leg::Acceptance{}; // Retain historical normal-only rejection fixture.
     Serial2.mode=responseMode;sendLeg(up);
     for(unsigned tick=0;tick<400;++tick){
       cycleLeg();const auto&o=leg_control.state.operation;
@@ -1438,7 +1440,7 @@ int main(){
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
-checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
+checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
 with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     cpp=Path(directory)/'drive.cpp';binary=Path(directory)/'drive'
@@ -1449,7 +1451,7 @@ with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     prelude=prelude.replace('#define SERIAL_DIAGNOSTICS 1','#define SERIAL_DIAGNOSTICS '+os.environ.get('DRIVE_SERIAL_DIAGNOSTICS','1'))
     cpp.write_text(prelude+prefix+prototypes+stubs+'\n'.join(bodies)+'}\n'+checks)
     sanitizer_flags = ['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('CSV_TEST_SANITIZERS') else []
-    subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',
+    subprocess.run(['c++','-include','tests/leg_host/fixture.h','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',
                     '-pthread','-Iinclude','-Itests/wheel_host','-I'+str(foc),str(cpp),
                     str(foc/'common/pid.cpp'),str(foc/'common/lowpass_filter.cpp'),str(foc/'common/base_classes/Sensor.cpp'),'-o',str(binary)]+sanitizer_flags,check=True)
     subprocess.run([str(binary)],check=True)

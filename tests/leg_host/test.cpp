@@ -148,7 +148,7 @@ int main(){
  c.tick(1700,true,true,true,0);bus.cancel();assert(!c.state.active&&c.state.reason==Reason::Driving);
  c.tick(1750,true,false,false,NAN);assert(!c.state.active);
  for(unsigned failure=0;failure<4;++failure){
-  Control x(true);ServoBus<IO> b;IO uart;
+  Control x(true,Acceptance{});ServoBus<IO> b;IO uart;
   uart.auto_reply=failure!=0;uart.bad_sum=failure==1;if(failure==2)uart.right=1900;if(failure==3)uart.partial=true;
   x.input(0,true);x.tick(1000,true,false,true,0);x.input(1,true);
   for(uint32_t t=1001;t<1250;++t){x.tick(t,true,false,true,0);b.service(uart,x,t);}

@@ -27,8 +27,8 @@ void start(Control&c,ServoBus<IO>&b,IO&io){
  c.input(0,true,1002);for(unsigned t=1002;t<1250;++t)tick(c,b,io,t);
 }
 int main(){
- static_assert(position(true,0)==1997&&position(true,30)==1908&&position(false,0)==2081&&position(false,30)==2173,"explicit inward integer limits");
- static_assert(safeMinTick(true)==1685&&safeMaxTick(true)==1997&&safeMinTick(false)==2081&&safeMaxTick(false)==2402,"10 tick inner endpoints");
+ assert(position(true,0)==1997&&position(true,30)==1908&&position(false,0)==2081&&position(false,30)==2173);
+ assert(safeMinTick(true)==1685&&safeMaxTick(true)==1997&&safeMinTick(false)==2081&&safeMaxTick(false)==2402);
  assert(percent(true,2007)==0&&percent(true,1675)==100&&percent(false,2071)==0&&percent(false,2412)==100);
  assert(percent(true,1997)>3&&percent(false,2081)>2.9f&&normalHigh(true)<=30&&normalHigh(false)<=30);
  // Every accepted tick-pair round-trips exactly and never levels or moves without a request.

@@ -21,8 +21,8 @@ struct IO {
  }
 };
 int main(){
- static_assert(ConfiguredAcceptance.extra&&ConfiguredAcceptance.right_min==1675&&ConfiguredAcceptance.right_max==2007&&
- ConfiguredAcceptance.left_min==2071&&ConfiguredAcceptance.left_max==2412,"production confirmed minimum envelope");
+ assert(configuredAcceptance().extra&&configuredAcceptance().right_min==1675&&configuredAcceptance().right_max==2007&&
+ configuredAcceptance().left_min==2071&&configuredAcceptance().left_max==2412);
  Control c;assert(!c.accepted(true,1674)&&!c.accepted(false,2413));
  ServoBus<IO>b;IO io;SerialDiagnostics records;SerialOutput out;Sink sink;
  auto drain=[&](){if(out.idle()){SerialDiagnostics::Record r;uint32_t lost;const bool have=records.pop(r,lost);assert(!lost);if(have)out.begin(r,lost);}out.service(sink);};
@@ -51,7 +51,7 @@ int main(){
  assert(sink.text.find("LEG STATE: NORMAL_RANGE")!=std::string::npos);
  const auto text=sink.text;for(unsigned k=0;k<1000;++k)cycle(t++);assert(sink.text==text); // no periodic held/idle spam
  // A disconnected/full USB sink never waits or modifies actuator state. Overflow is explicit.
- SerialDiagnostics full;for(unsigned k=0;k<80;++k)full.input(k&1,true,k);
+ SerialDiagnostics full;State overflow;for(unsigned k=1;k<80;++k){overflow.rx_failure.issues=RxTimeout;overflow.rx_failure.ms=k;full.capture(overflow,0,k);}
  SerialDiagnostics::Record r;uint32_t lost;assert(full.pop(r,lost)&&lost>0);out.begin(r,lost);sink.room=0;
  const auto writes=sink.cycles;for(unsigned k=0;k<100;++k)out.service(sink);assert(sink.cycles==writes);
  sink.room=7;for(unsigned k=0;k<300;++k)out.service(sink);assert(sink.text.find("dropped=")!=std::string::npos);

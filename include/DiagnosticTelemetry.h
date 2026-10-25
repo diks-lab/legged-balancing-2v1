@@ -108,6 +108,17 @@ inline bool sample(char*dest,size_t capacity,const Snapshot&s,const char*boot,ui
  j.add("}}");return j.ok;
 }
 // Separate bounded diagnostic frame: never enlarge the 2048-byte sample budget.
+inline bool legCalibrationMessage(char*dest,size_t capacity,const Snapshot&s,const char*boot){
+ Json j(dest,capacity);const auto&c=s.legs.calibration;const auto&g=s.legs.geometry;
+ j.add("{\"type\":\"leg_calibration\",\"boot_id\":");j.string(boot);
+ j.add(",\"phase\":%u,\"mask\":%u,\"point\":%u,\"source\":%u,\"generation\":%lu,\"slots\":%u,\"result\":",c.phase,c.mask,c.point,c.source,(unsigned long)c.generation,c.valid_slots);
+ j.string(leg::calResult(c.result));j.add(",\"nvs_result\":");j.string(leg::calResult(c.storage));j.add(",\"save\":");j.string(leg::calResult(c.canSave()));
+ j.add(",\"event_ms\":%lu,\"active\":%s,\"values\":[%d,%d,%d,%d],\"candidate\":[%d,%d,%d,%d],\"acquired_ms\":[%lu,%lu,%lu,%lu],\"confirmed\":[2044,1697,2084,2408],\"margin\":10,\"normal_percent\":30,\"imported\":%u,\"torque\":%u}",
+  (unsigned long)c.event_ms,leg::validGeometry(g)?"true":"false",g.right_zero,g.right_full,g.left_zero,g.left_full,
+  c.candidate.right_zero,c.candidate.right_full,c.candidate.left_zero,c.candidate.left_full,
+  (unsigned long)c.acquired_ms[0],(unsigned long)c.acquired_ms[1],(unsigned long)c.acquired_ms[2],(unsigned long)c.acquired_ms[3],c.imported,s.legs.torque);
+ return j.ok;
+}
 inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const char*boot,uint32_t source_age_ms=0){
  Json j(dest,capacity);j.add("{\"type\":\"wheel_diagnostics\",\"boot_id\":\"%s\"",boot);
  for(unsigned side=0;side<2;++side){
@@ -124,9 +135,9 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   }
   j.add(",%lu,%lu]",(unsigned long)d.probes,(unsigned long)d.failures);
  }
- const auto&l=s.legs;
+ const auto&l=s.legs;const auto&geometry=l.geometry;
  j.add(",\"leg_ms\":%lu,\"legs\":[",(unsigned long)s.sample_ms);
- const float values[]={l.height,l.requested_roll,l.applied_roll,l.measured_roll,l.command_valid?leg::percent(true,l.right_command):NAN,l.command_valid?leg::percent(false,l.left_command):NAN};
+ const float values[]={l.height,l.requested_roll,l.applied_roll,l.measured_roll,l.command_valid?leg::percent(true,l.right_command,geometry):NAN,l.command_valid?leg::percent(false,l.left_command,geometry):NAN};
  bool first=true;for(float value:values){j.add("%s",first?"":",");if(isfinite(value))j.add("%.4g",double(value));else j.add("null");first=false;}
  j.add(",%d,%d,%lu,%lu,%u,%u,%u,%u,%u,%u,%lu,%lu,%lu]",int(l.right_command),int(l.left_command),
   (unsigned long)l.command_ms,(unsigned long)l.sync_ms,unsigned(l.reason),unsigned(l.torque),
@@ -140,14 +151,14 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
  for(unsigned side=0;side<2;++side){
   const bool right=side==0,valid=(p.acquired&(1u<<side))!=0;
   const int16_t decoded=leg::decodePosition(p.word[side]);
-  const int home=leg::position(right,0),end=leg::position(right,30);
+  const int home=leg::position(right,0,geometry),end=leg::position(right,30,geometry);
   j.add(",[" );
-  if(valid)j.add("%lu,%u,%u,%u,%d,%.8g",(unsigned long)p.received_ms[side],unsigned(p.word[side]),
-   unsigned(p.word[side]&255),unsigned(p.word[side]>>8),int(decoded),double(leg::percent(right,decoded)));
+  if(valid){j.add("%lu,%u,%u,%u,%d,",(unsigned long)p.received_ms[side],unsigned(p.word[side]),
+   unsigned(p.word[side]&255),unsigned(p.word[side]>>8),int(decoded));if(leg::validGeometry(geometry))j.add("%.8g",double(leg::percent(right,decoded,geometry)));else j.add("null");}
   else j.add("null,null,null,null,null,null");
-  j.add(",%d,%d,",int(fminf(home,end)),int(fmaxf(home,end)));
-  if(valid)j.add("%s",leg::inRange(right,decoded)?"true":"false");else j.add("null");
-  j.add(",%d,%d]",right?leg::RightHome:leg::LeftHome,right?leg::RightExtended:leg::LeftExtended);
+  if(leg::validGeometry(geometry))j.add(",%d,%d,",int(fminf(home,end)),int(fmaxf(home,end)));else j.add(",null,null,");
+  if(valid&&leg::validGeometry(geometry))j.add("%s",leg::inRange(right,decoded,geometry)?"true":"false");else j.add("null");
+  if(leg::validGeometry(geometry))j.add(",%d,%d]",leg::zeroTick(right,geometry),leg::fullTick(right,geometry));else j.add(",null,null]");
  }
  j.add("]");
  const auto&o=l.operation;const auto&c=o.confirmed;
@@ -168,8 +179,8 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
  }
  const auto&a=l.acceptance;const auto&cfg=l.configuration;
  j.add(",\"leg_accept\":[%u,%u,%d,%d,%d,%d,%u,%u],\"leg_config\":[%lu,%lu,%lu,%u,%u,%u,%u,%u,%u",
-  unsigned(a.extra),unsigned(a.valid()),int(a.right_min),int(a.right_max),int(a.left_min),int(a.left_max),
-  unsigned(l.recovery),unsigned(l.recovery?leg::returnDirections(l.right_percent,l.left_percent):0),(unsigned long)cfg.started_ms,(unsigned long)cfg.finished_ms,
+  unsigned(a.extra),unsigned(a.valid(geometry)),int(a.right_min),int(a.right_max),int(a.left_min),int(a.left_max),
+  unsigned(l.recovery),unsigned(l.return_directions),(unsigned long)cfg.started_ms,(unsigned long)cfg.finished_ms,
   (unsigned long)cfg.rejected_ms,unsigned(cfg.status),unsigned(cfg.error),unsigned(cfg.step),unsigned(cfg.acquired),unsigned(cfg.current),unsigned(cfg.reject_reason));
  for(unsigned side=0;side<2;++side){
   const unsigned limits=side*2,mode=limits+1;
@@ -179,13 +190,14 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   j.add("]");
  }
  j.add("]");
- j.add(",\"leg_geometry\":[");
+ j.add(",\"leg_geometry\":");
+ if(!leg::validGeometry(geometry))j.add("null");else {j.add("[");
  for(unsigned side=0;side<2;++side){const bool right=side==0;
-  j.add("%s[%d,%d,%d,%d,%d,%d,%d,%d]",side?",":"",leg::zeroTick(right),leg::fullTick(right),
-   leg::retractMargin(right),leg::extendMargin(right),leg::safeMinTick(right),leg::safeMaxTick(right),
-   leg::normalMinTick(right),leg::normalMaxTick(right));
+  j.add("%s[%d,%d,%d,%d,%d,%d,%d,%d]",side?",":"",leg::zeroTick(right,geometry),leg::fullTick(right,geometry),
+   leg::retractMargin(right),leg::extendMargin(right),leg::safeMinTick(right,geometry),leg::safeMaxTick(right,geometry),
+   leg::normalMinTick(right,geometry),leg::normalMaxTick(right,geometry));
  }
- j.add(",[%.0f,%.0f]]",double(leg::MinPercent),double(leg::MaxPercent));
+ j.add(",[%.0f,%.0f]]",double(leg::MinPercent),double(leg::MaxPercent));}
  const auto&stick=l.stick;
  j.add(",\"leg_stick\":[%lu,%d,%d,%d,%d,%.4g,%.4g,%.4g,%.4g,%.4g,%.4g,%u]",
   (unsigned long)stick.ms,int(stick.lx),int(stick.ly),int(stick.rx),int(stick.ry),
@@ -197,9 +209,11 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   unsigned(m.status),unsigned(m.acquired),unsigned(m.valid),unsigned(m.side),unsigned(m.error),unsigned(m.reject_reason));
  for(unsigned side=0;side<2;++side){
   j.add(",[%lu,%lu,",(unsigned long)m.sample_ms[side],(unsigned long)m.count[side]);
-  if(m.acquired&(1u<<side))j.add("%d,%d,%d,%.6g,%.6g,%.6g",int(m.latest[side]),int(m.minimum[side]),int(m.maximum[side]),
-   double(leg::percent(side==0,m.latest[side])),double(leg::percent(side==0,m.minimum[side])),double(leg::percent(side==0,m.maximum[side])));
-  else j.add("null,null,null,null,null,null");
+  if(m.acquired&(1u<<side)){
+   j.add("%d,%d,%d,",int(m.latest[side]),int(m.minimum[side]),int(m.maximum[side]));
+   if(leg::validGeometry(geometry))j.add("%.6g,%.6g,%.6g",double(leg::percent(side==0,m.latest[side],geometry)),double(leg::percent(side==0,m.minimum[side],geometry)),double(leg::percent(side==0,m.maximum[side],geometry)));
+   else j.add("null,null,null");
+  }else j.add("null,null,null,null,null,null");
   j.add("]");
  }
  j.add("]");
