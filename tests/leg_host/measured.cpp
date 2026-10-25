@@ -35,7 +35,7 @@ int main(){
  assert(sink.text.find("initial R=1675..2007 L=2071..2412")!=std::string::npos);
  assert(sink.text.find("UP=0 DOWN=1")!=std::string::npos);
  input(0,1600);cycle(1600);input(1,1601);cycle(1601);assert(c.state.reason==Reason::RecoveryDirection&&io.goals==1);
- input(4,1602);cycle(1602);assert(io.goals==1&&c.state.reason==Reason::RecoveryDirection);
+ input(4,1602);cycle(1602);assert(io.goals==1&&c.state.reason==Reason::RollUnconfirmed);
  input(0,1603);cycle(1603);input(2,1604);
  for(unsigned t=1604;t<2200;++t)cycle(t);
  assert(io.right>1675&&io.left<2412);

@@ -110,6 +110,8 @@ int main(){
   for(unsigned i=0;i<2;++i){measure.sample_ms[i]=measure.count[i]=UINT32_MAX;
    measure.latest[i]=measure.minimum[i]=-32767;measure.maximum[i]=32767;}
   measure.status=3;measure.acquired=measure.valid=3;measure.side=1;measure.error=12;measure.reject_reason=27;
+  auto&stick=all.legs.stick;stick.ms=UINT32_MAX;stick.lx=stick.ly=-128;stick.rx=stick.ry=127;
+  stick.height=stick.roll=stick.applied_height=stick.applied_roll=-1;stick.drive=-.05f;stick.yaw=-.1f;stick.flags=127;
   char wheel[2048];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef",UINT32_MAX));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   assert(strstr(wheel,"\"legs\":["));

@@ -7,12 +7,12 @@ namespace leg {
 // No formatting, Serial access, allocation or waits in capture/input/pop.
 class SerialDiagnostics {
  public:
- enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected };
+ enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected,Sticks };
  struct Sync { Acceptance accept;int16_t right,left;uint8_t acquired,recovery,directions; };
  struct Record {
   uint32_t ms=0;
   Type type=Input;uint8_t keys=0,allowed=0,reason=0;
-  union Payload { Sync sync;RxFailure rx;ServoConfiguration config;Measurement measurement;Payload():rx{}{} } data;
+  union Payload { Sync sync;RxFailure rx;ServoConfiguration config;Measurement measurement;ps4_control::StickObservation stick;Payload():rx{}{} } data;
  };
  static constexpr unsigned Capacity=8,Chunk=48;
  void input(uint8_t keys,bool gate,uint32_t now){
@@ -69,6 +69,17 @@ class SerialDiagnostics {
    Record r;r.type=MeasureRejected;r.ms=m.rejected_ms;r.reason=m.reject_reason;push(r);measure_rejected_ms_=m.rejected_ms;
   }
   if(!m.rejected_ms)measure_rejected_ms_=0;
+  const auto&stick=s.stick;
+  const uint32_t raw=uint32_t(uint8_t(stick.lx))|(uint32_t(uint8_t(stick.ly))<<8)|
+      (uint32_t(uint8_t(stick.rx))<<16)|(uint32_t(uint8_t(stick.ry))<<24);
+  if((stick.flags&32)||stick_seen_){
+   if(!stick_seen_||raw!=stick_raw_||stick.flags!=stick_flags_||stick.applied_height!=last_height_||
+      stick.applied_roll!=last_roll_||stick.drive!=last_drive_||stick.yaw!=last_yaw_){
+    Record r;r.type=Sticks;r.ms=now;r.data.stick=stick;push(r);stick_seen_=true;
+    stick_raw_=raw;stick_flags_=stick.flags;last_height_=stick.applied_height;last_roll_=stick.applied_roll;
+    last_drive_=stick.drive;last_yaw_=stick.yaw;
+   }
+  }
   synced_=s.synced;recovery_=s.recovery;directions_=s.return_directions;phase_=phase;
   allowed_=o.allowed;operation_=o.operation;blocker_=o.blocker;decision_keys_=o.raw_keys;
   config_ms_=c.finished_ms;config_status_=c.status;
@@ -83,17 +94,19 @@ class SerialDiagnostics {
  uint32_t attempt_=0,rx_ms_=0,config_ms_=0,lost_=0,measure_revision_=0,measure_log_ms_=0,measure_rejected_ms_=0;
  uint8_t head_=0,count_=0,raw_=0,allowed_=255,operation_=255,blocker_=255,
   recovery_=0,directions_=0,phase_=0,config_status_=0,decision_keys_=255,measure_status_=0;
- bool synced_=false;
+ bool synced_=false,stick_seen_=false;
+ uint32_t stick_raw_=0;uint8_t stick_flags_=0;
+ float last_height_=0,last_roll_=0,last_drive_=0,last_yaw_=0;
  void push(const Record&r){
   if(count_==Capacity){if(lost_!=UINT32_MAX)++lost_;return;}
   records_[(head_+count_)%Capacity]=r;++count_;
  }
 };
 inline const char* serialReason(uint8_t n){
- static const char*const names[]={"RELEASE_REQUIRED","IDLE","SYNCING","ACCEPTED","DRIVING","STOPPED",
+ static const char*const names[]={"LEFT_CENTER_REQUIRED","IDLE","SYNCING","ACCEPTED","RIGHT_INPUT_PRIORITY","STOPPED",
   "IMU_INVALID","POSITION_RANGE","REPLY_TIMEOUT","REPLY_INVALID","TX_FAILED","CLOCK_GAP","TX_BUSY",
   "WHEEL_RETRY","ROLL_UNCONFIRMED","INITIALIZING","START_WAITING","EXPLICIT_STOP","CALIBRATING",
-  "POLARITY_TEST","ACCEPTANCE_INVALID","INWARD_ONLY","RELEASE_THEN_PRESS","PAIR_LIMIT","READ_ONLY","CONFIG_BUSY","MEASURE_READ_ONLY","MEASURE_STOP_REQUIRED","RETURN_DIRECTIONS_CONFLICT"};
+  "POLARITY_TEST","ACCEPTANCE_INVALID","INWARD_ONLY","LEFT_CENTER_THEN_DEFLECT","PAIR_LIMIT","READ_ONLY","CONFIG_BUSY","MEASURE_READ_ONLY","MEASURE_STOP_REQUIRED","RETURN_DIRECTIONS_CONFLICT"};
  return n<sizeof(names)/sizeof(*names)?names[n]:"NONE";
 }
 // Consumer-only formatter. A maximum 48-byte write, and no call when TX is full.
@@ -132,8 +145,8 @@ class SerialOutput {
   const auto&r=record_;const auto&s=r.data.sync;const auto&c=r.data.config;const auto&x=r.data.rx;
   pending_=false;
   switch(r.type){
-   case D::Input:size_=snprintf(line_,sizeof(line_),"LEG INPUT: %s received; release_gate=%u ms=%lu\n",keys(),r.allowed,(unsigned long)r.ms);break;
-   case D::Decision:size_=snprintf(line_,sizeof(line_),"LEG INPUT: %s result=%s reason=%s operation=%u ms=%lu\n",keys(),s.recovery==uint8_t(Operation::Sync)?"PENDING_SYNC":r.allowed&&r.reason==255?"ACCEPTED":"REJECTED",serialReason(r.reason),s.recovery,(unsigned long)r.ms);break;
+   case D::Input:size_=snprintf(line_,sizeof(line_),"LEG INPUT: LEFT_STICK %s received; release_gate=%u ms=%lu\n",keys(),r.allowed,(unsigned long)r.ms);break;
+   case D::Decision:size_=snprintf(line_,sizeof(line_),"LEG INPUT: LEFT_STICK %s result=%s reason=%s operation=%u ms=%lu\n",keys(),s.recovery==uint8_t(Operation::Sync)?"PENDING_SYNC":r.allowed&&r.reason==255?"ACCEPTED":"REJECTED",serialReason(r.reason),s.recovery,(unsigned long)r.ms);break;
    case D::SyncStart:size_=snprintf(line_,sizeof(line_),"LEG %s: START ms=%lu\n",r.allowed?"READ_ONLY":"SYNC",(unsigned long)r.ms);break;
    case D::SyncFailed:size_=snprintf(line_,sizeof(line_),"LEG SYNC: FAILED reason=%s ms=%lu\n",serialReason(r.reason),(unsigned long)r.ms);break;
    case D::SyncDone:
@@ -142,7 +155,7 @@ class SerialOutput {
     else size_=snprintf(line_,sizeof(line_),"LEG GEOMETRY: measured 0/100%% R=%d/%d L=%d/%d; margins R=%d/%d L=%d/%d tick; not linear height\n",RightHome,RightExtended,LeftHome,LeftExtended,RightRetractedMarginTicks,RightExtendedMarginTicks,LeftRetractedMarginTicks,LeftExtendedMarginTicks);
     pending_=++part_<3;break;
    case D::Range:size_=snprintf(line_,sizeof(line_),s.recovery?
-     "LEG STATE: HOLD_OUTSIDE_RANGE; release keys, then NEW inward press; UP=%u DOWN=%u; awaiting_release=%u\n":r.allowed?"LEG STATE: NORMAL_RANGE\n":"LEG STATE: INACTIVE\n",
+     "LEG STATE: HOLD_OUTSIDE_RANGE; center LEFT XY, then NEW inward deflection; UP=%u DOWN=%u; awaiting_release=%u\n":r.allowed?"LEG STATE: NORMAL_RANGE\n":"LEG STATE: INACTIVE\n",
      unsigned(bool(s.directions&1)),unsigned(bool(s.directions&2)),unsigned(s.recovery==1));break;
    case D::Receive:
     if(!part_){size_=snprintf(line_,sizeof(line_),"LEG RX FAILED: %s ID=%u reg=%u requested=%u received=%u issues=%02X%s%s%s%s%s%s elapsed=%lu ms\n",
@@ -166,6 +179,14 @@ class SerialOutput {
      else size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s UNREAD (not zero)\n",side?"LEFT":"RIGHT");
     }
     pending_=++part_<3;break;
+   }
+   case D::Sticks:{
+    const auto&i=r.data.stick;
+    if(!part_)size_=snprintf(line_,sizeof(line_),"PS4 AXES: LX=%d LY=%d RX=%d RY=%d mapped_leg=%+.3f/%+.3f DZ=%d center=%d flags=%02X ms=%lu\n",
+     int(i.lx),int(i.ly),int(i.rx),int(i.ry),double(i.height),double(i.roll),ps4_control::LegDeadzone,ps4_control::LegCenter,unsigned(i.flags),(unsigned long)i.ms);
+    else size_=snprintf(line_,sizeof(line_),"PS4 APPLIED: leg_height=%+.3f leg_roll=%+.3f drive_request=%+.3f m/s yaw_request=%+.3f V (before profile/limits)\n",
+     double(i.applied_height),double(i.applied_roll),double(i.drive),double(i.yaw));
+    pending_=part_++==0;break;
    }
    case D::Configuration:
     if(!part_)size_=snprintf(line_,sizeof(line_),"LEG CONFIG: %s reason=%s current_mask=%u; mode 0=POSITION 1=WHEEL\n",c.status==2?"COMPLETE":"FAILED",c.status==2?"NONE":serialReason(c.error),c.current);

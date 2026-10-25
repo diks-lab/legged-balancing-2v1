@@ -1,5 +1,6 @@
 #pragma once
 #include "Ps4Diagnostics.h"
+#include "Ps4ControlMapping.h"
 #include <cstddef>
 
 // Lock supplies short task-context critical sections (portMUX on ESP32).
@@ -58,8 +59,7 @@ class Ps4EventInbox {
   }
   static bool driveNeutral(const Ps4InputState& value) {
     // Same used-axis deadzone as existing forward/yaw commands (not a new stop rule).
-    return value.left_stick_y>=-10 && value.left_stick_y<=10 &&
-           value.right_stick_x>=-10 && value.right_stick_x<=10;
+    return ps4_control::rightCentered(value.right_stick_x,value.right_stick_y);
   }
   void publish(Kind kind,const Ps4InputState& value,uint32_t now) {
     Guard guard(lock_);

@@ -1,14 +1,14 @@
 'use strict';
 const LEG_BLOCKERS = {
-  0: '十字キーを解放してから操作',
-  4: '走行・減速中。停止後に解放・再操作',
+  0: '左スティック両軸を中央±10へ戻して再操作',
+  4: '右操作優先／走行・減速中。右中央後、左も中央→再操作',
   5: '停止中。支持試験は全解放→Share',
   6: 'IMU左右姿勢が無効',
   7: '初回受付範囲外。左右の取得値・受付上下限を確認',
-  8: '実位置の応答なし。接続確認後に解放・再操作',
+  8: '実位置の応答なし。接続確認後に左中央・再操作',
   9: '位置応答不正。ID・通信を確認',
-  10: 'UART送信失敗。解放して再操作',
-  11: '更新間隔超過。解放して再操作',
+  10: 'UART送信失敗。左中央へ戻して再操作',
+  11: '更新間隔超過。左中央へ戻して再操作',
   12: 'UART送信領域待ち',
   13: '車輪通信の再試行中。脚指令は保持',
   14: '左右は方向未確認。上下のみ操作可能',
@@ -19,9 +19,9 @@ const LEG_BLOCKERS = {
   19: '車輪極性試験中',
   20: '初回受付設定が無効',
   21: '範囲へ戻る共通方向のみ許可。左右操作は無効',
-  22: '現在位置保持。十字キーを解放して再操作',
+  22: '現在位置保持。左XYを中央へ戻し新しく内向き操作',
   23: '片脚が端。両脚を保持し、片側だけは動かさない',
-  24: 'サーボ設定を読取り中／再操作前に解放',
+  24: 'サーボ設定を読取り中／再操作前に左中央',
   25: '読取り拒否。車輪・脚・他の通信を停止して再要求',
   26: '脚位置の読取り専用測定中',
   27: '測定拒否。×で全停止・脚トルクOFF後に支持して再要求',
@@ -90,13 +90,13 @@ function createLegPanel(view) {
   make('summary', '操作説明・支持試験の手順', guide);
   const list = make('ul', '', guide);
   for (const text of [
-    '上下：↑で伸長、↓で短縮。解放すると高さ保持。対向同時押しはその軸を保持。',
-    '左右：方向確認設定が有効な場合のみ←左傾斜・→右傾斜。解放で目標0°へ戻す。',
+    '左スティック上下：伸長／短縮。倒し量で速度変更、最大4ポイント/秒。中央で保持。',
+    '左スティック左右：方向確認後だけ傾斜操作。中央で目標0°へ戻す。未確認時は斜め入力の上下だけ受理。',
     '停止：×は車輪全停止・脚トルクOFF。走行と脚操作の同時使用は対象外。',
     '支持試験：外部電源のまま機体を支持。×→全解放→Share→Share解放。倒立は開始しません。',
     '初回：実位置を非同期確認。初回受付範囲外・応答失敗は拒否。受付内なら現在位置を保持し、HOMEへ自動移動しません。',
     '方向確認：初期設定は上下のみ。AngleXの符号と伸縮方向を実測してから左右補正を有効化。',
-    '再接続・転倒後：解放・再操作から位置を再確認。未確認の古い目標へ戻しません。'
+    '再接続・転倒後：左中央・再操作から位置を再確認。未確認の古い目標へ戻しません。'
   ]) make('li', text, list);
   const reply = createLegReplyPanel(section);
   const state = createLegStatePanel(section);
@@ -113,7 +113,7 @@ function renderLegDiagnostics(view, current) {
   const state = legPresentation(view.legPacket, view.live, performance.now() - (view.legReceivedAt || 0), ui.cache);
   const update = (node, text) => { if (node.textContent !== text) node.textContent = text; };
   update(ui.note, state.note);
-  renderLegState(ui.state, view.legPacket);
+  renderLegState(ui.state, view.legPacket, state.fresh);
   renderLegConfig(ui.config, view.legPacket, state.fresh);
   renderLegMeasurement(ui.measure, view.legPacket, state.fresh);
   renderLegReply(ui.reply, view.legPacket?.leg_rx, state.fresh, view.legPacket?.leg_position, view.legPacket?.leg_accept);

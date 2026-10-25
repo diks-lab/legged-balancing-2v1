@@ -2,7 +2,7 @@
 const LEG_SOURCES = ['未確定', 'PS4入力', '脚制御', 'UART処理', '安全判定', '停止処理', 'シリアル'];
 const LEG_PHASES = ['待機', '右要求', '右応答待ち', '左要求', '左応答待ち', '位置プリロード', 'トルクON待ち', 'OFF処理', '動作中', '設定要求', '設定応答待ち', '測定要求', '測定応答待ち'];
 const LEG_OPERATIONS = ['待機・高さ保持', '伸長指令', '短縮指令', '左傾斜指令', '右傾斜指令',
-  '位置確認・同期中', '停止・条件待ち', '操作失敗・解放して再操作', '十字キー解放待ち'];
+  '位置確認・同期中', '停止・条件待ち', '操作失敗・左を中央へ戻す', '左スティック中央待ち'];
 function legDecision(packet, live, elapsed) {
   const s = packet?.leg_state;
   const valid = Array.isArray(s) && s.length === 17;
@@ -37,15 +37,20 @@ function createLegStatePanel(section) {
   current.id = 'leg-state-current'; trace.id = 'leg-state-trace';
   trace.style.whiteSpace = 'pre-wrap';
   details.append(summary, current, trace);section.appendChild(details);
-  return { current, trace };
+  const stickNodes = [];
+  for (let i = 0; i < 4; i++) {
+    const node = document.createElement('p');node.id = `leg-stick-${i}`;
+    details.appendChild(node);stickNodes.push(node);
+  }
+  return { current, trace, stickNodes };
 }
-function renderLegState(nodes, packet) {
+function renderLegState(nodes, packet, fresh = true) {
   const s = packet?.leg_state;
-  const gateNames = ['必須初期化', '倒立', '支持試験', '明示停止', '走行', 'IMU正常', '車輪再試行', '校正', '極性試験', 'PS4接続'];
-  const keys = mask => ['↑', '↓', '←', '→'].filter((_, i) => mask & (1 << i)).join('') || '解放';
+  const gateNames = ['必須初期化', '倒立', '支持試験', '明示停止', '右操作優先', 'IMU正常', '車輪再試行', '校正', '極性試験', 'PS4接続'];
+  const keys = mask => ['↑', '↓', '←', '→'].filter((_, i) => mask & (1 << i)).join('') || '中央';
   let current = '確定状態未受信', trace = '遷移未受信';
   if (Array.isArray(s) && s.length === 17) {
-    current = `確定 #${s[0]} @ ${s[1]} ms ／ 受信 ${keys(s[6])}・適用 ${keys(s[7])} ／ ` +
+    current = `確定 #${s[0]} @ ${s[1]} ms ／ 左方向要求 ${keys(s[6])}・ゲート通過 ${keys(s[7])} ／ ` +
       `入力ゲート${s[8] & 1 ? '○' : '×'}・解放確認${s[8] & 2 ? '○' : '×'} ／ ` +
       `許可${s[3] ? '○' : '×'}・同期 ${LEG_PHASES[s[9]] || s[9]} ／ 条件bit=${s[10]} ／ ` +
       `送信待ち${s[8] & 32 ? '○' : '×'} ／ 更新元 ${LEG_SOURCES[s[15]] || s[15]}・古い遷移の上書き ${s[14]}件 ／ ` +
@@ -58,4 +63,24 @@ function renderLegState(nodes, packet) {
   }
   if (nodes.current.textContent !== current) nodes.current.textContent = current;
   if (nodes.trace.textContent !== trace) nodes.trace.textContent = trace;
+  if (nodes.stickNodes) {
+    const lines = legStickLines(packet, fresh);
+    nodes.stickNodes.forEach((node, i) => {
+      if (node.textContent !== lines[i]) node.textContent = lines[i];
+    });
+  }
+
+}
+function legStickLines(packet, fresh) {
+  const s = packet?.leg_stick;
+  if (!Array.isArray(s) || s.length !== 12) return ['スティック診断未受信', '', '', ''];
+  const [ms, lx, ly, rx, ry, h, r, ah, ar, drive, yaw, flags] = s;
+  const f = value => Number.isFinite(value) ? value.toFixed(3) : '不明';
+  const live = fresh && (flags & 32) && (flags & 64);
+  return [
+    `${live ? '生値' : '最終受信情報・現在不明'} @ ${ms} ms：LX=${lx} LY=${ly} RX=${rx} RY=${ry}`,
+    `左の正規化要求：上下 ${f(h)} ／ 左右 ${f(r)}。動作DZ±16、再操作中央は両軸±10。`,
+    `適用脚入力：上下 ${f(ah)} ／ 左右 ${f(ar)}。右の適用要求：速度 ${f(drive)} m/s ／ 旋回 ${f(yaw)} V（プロファイル・出力制限前）。`,
+    `入力ゲート${flags & 1 ? '○' : '×'} ／ 左中央${flags & 2 ? '○' : '×'} ／ 右優先${flags & 4 ? '○' : '×'} ／ 走行ゲート${flags & 8 ? '○' : '×'}。十字キーは予約・指令なし。`
+  ];
 }

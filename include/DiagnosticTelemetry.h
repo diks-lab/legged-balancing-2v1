@@ -186,6 +186,11 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
    leg::normalMinTick(right),leg::normalMaxTick(right));
  }
  j.add(",[%.0f,%.0f]]",double(leg::MinPercent),double(leg::MaxPercent));
+ const auto&stick=l.stick;
+ j.add(",\"leg_stick\":[%lu,%d,%d,%d,%d,%.4g,%.4g,%.4g,%.4g,%.4g,%.4g,%u]",
+  (unsigned long)stick.ms,int(stick.lx),int(stick.ly),int(stick.rx),int(stick.ry),
+  double(stick.height),double(stick.roll),double(stick.applied_height),double(stick.applied_roll),
+  double(stick.drive),double(stick.yaw),unsigned(stick.flags));
  const auto&m=l.measurement;
  j.add(",\"leg_measure\":[%lu,%lu,%lu,%lu,%u,%u,%u,%u,%u,%u",
   (unsigned long)m.started_ms,(unsigned long)m.finished_ms,(unsigned long)m.rejected_ms,(unsigned long)m.revision,

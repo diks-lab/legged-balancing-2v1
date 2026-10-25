@@ -266,7 +266,7 @@ names = [
     'captureHttpStatus','serviceHttpRequests','handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','enqueueHttpCommand',
     'serveWebFile','cycleLqrSpeedSource','resetPs4MotionInput','executeOperatorCommand',
     'applyPs4Steering','ps4ButtonsReleased','handlePs4Connection','processPs4Input',
-    'ps4InputStatesEqual','ps4DriveSpeedRequestFromLeftStickY',
+    'ps4InputStatesEqual','ps4DriveSpeedRequestFromRightStickY',
     'onPs4Connect','onPs4Disconnect','onPs4Input','raisePs4ControlBarrier',
     'observePs4InputOnly','rearmPs4AfterFoc','updatePs4Controller',
     'setupPs4Controller','servicePs4DiagnosticSerial','serviceHttpPs4DiagnosticSerial','drainPs4DiagnosticSerial','executePs4Command','ps4CommandName','ps4CommandRejectionReason',
@@ -553,7 +553,7 @@ int main(){
   // PS4 startup: connection and held buttons/sticks never start balancing.
   setupCase();stopBalanceTest();ps4_was_connected=false;
   Ps4InputState packet{};
-  handlePs4Connection(true);packet.options=true;packet.left_stick_y=-127;
+  handlePs4Connection(true);packet.options=true;packet.right_stick_y=-127;
   for(int i=0;i<5;++i)processPs4Input(packet,nowMs+=50);
   assert(!balance_wait_active && !lqr_direction_test_armed && !lqr_drive_start_pending);
   packet={};processPs4Input(packet,nowMs+=50);
@@ -563,12 +563,12 @@ int main(){
   for(int i=0;i<5;++i)processPs4Input(packet,nowMs+=50);
   assert(balance_prepare_start_ms==prepare); // held Options did not restart prepare
   // Stick held during prepare cannot become a request at AUTO START.
-  packet.options=false;packet.left_stick_y=-127;
+  packet.options=false;packet.right_stick_y=-127;
   processPs4Input(packet,nowMs+=50);
   lqr_direction_test_armed=true;balance_wait_active=false;
   processPs4Input(packet,nowMs+=50);assert(!lqr_drive_start_pending);
   packet={};processPs4Input(packet,nowMs+=50);
-  packet.left_stick_y=-127;processPs4Input(packet,nowMs+=50);
+  packet.right_stick_y=-127;processPs4Input(packet,nowMs+=50);
   assert(lqr_drive_start_pending && ps4_drive_state==Ps4DriveState::DriveRequested);
   // Neutral cancels pending requests, preserving balance.
   packet={};processPs4Input(packet,nowMs+=50);
@@ -576,12 +576,12 @@ int main(){
   processPs4Input(packet,nowMs+=50);
   // Neutral/deadzone and held buttons cannot initiate a drive.
   setupCase();handlePs4Connection(false);handlePs4Connection(true);
-  packet={};packet.left_stick_y=10;packet.right_stick_x=-10;
+  packet={};packet.right_stick_y=10;packet.right_stick_x=-10;
   processPs4Input(packet,nowMs+=50);assert(!lqr_drive_start_pending);
-  packet.circle=true;packet.left_stick_y=-127;
+  packet.circle=true;packet.right_stick_y=-127;
   processPs4Input(packet,nowMs+=50);assert(!lqr_drive_start_pending);
   packet={};processPs4Input(packet,nowMs+=50);
-  packet.left_stick_y=-127;processPs4Input(packet,nowMs+=50);
+  packet.right_stick_y=-127;processPs4Input(packet,nowMs+=50);
   assert(lqr_drive_start_pending);
   // A rejected repeated start must not change an active drive's state/ownership.
   startPendingLqrDrive();
@@ -597,7 +597,7 @@ int main(){
   for(int direction:{-127,127}){
     setupCase();handlePs4Connection(false);handlePs4Connection(true);
     packet={};processPs4Input(packet,nowMs+=50);
-    packet.left_stick_y=direction;processPs4Input(packet,nowMs+=50);
+    packet.right_stick_y=direction;processPs4Input(packet,nowMs+=50);
     assert(lqr_drive_start_pending&&lqr_test_mode==LqrTestMode::Full);
     startPendingLqrDrive();near(lqr_target_speed,direction<0?.05f:-.05f);
     lqr_speed_for_control=direction<0?.2f:-.2f;
@@ -647,9 +647,9 @@ int main(){
   packet.options=true;processPs4Input(packet,nowMs+=50);assert(balance_wait_active);
   // D-pad supplies held axes, gated by the same connection release handshake.
   setupCase();leg_control=leg::Control{};handlePs4Connection(false);handlePs4Connection(true);
-  packet={};packet.dpad_up=true;processPs4Input(packet,nowMs+=50);
+  packet={};packet.left_stick_y=-127;processPs4Input(packet,nowMs+=50);
   assert(leg_control.keys==0);
-  packet={};processPs4Input(packet,nowMs+=50);packet.dpad_up=true;packet.dpad_right=true;
+  packet={};processPs4Input(packet,nowMs+=50);packet.left_stick_y=-127;packet.left_stick_x=127;
   processPs4Input(packet,nowMs+=50);assert(leg_control.keys==9);
   processPs4Input(packet,nowMs+=50);assert(leg_control.keys==9); // identical held input remains active
   handlePs4Connection(false);assert(leg_control.keys==0&&!leg_control.input_gate);
@@ -752,7 +752,7 @@ int main(){
   assert(ps4_diagnostics.fifo_duplicates>=30);
   // Hold forward+yaw with no new callbacks: ramps continue, no implicit disconnect.
   setupCase();PS4.input={};PS4.input_cb();updatePs4Controller();
-  PS4.input.left_stick_y=-127;PS4.input.right_stick_x=127;PS4.input_cb();updatePs4Controller();
+  PS4.input.right_stick_y=-127;PS4.input.right_stick_x=127;PS4.input_cb();updatePs4Controller();
   assert(lqr_drive_start_pending);startPendingLqrDrive();lqr_target_speed=0;
   const auto held_revision=ps4_diagnostics.revision, held_sample=ps4_diagnostics.sample_ms;
   for(int i=0;i<15;++i){nowMs+=50;updatePs4Controller();}
@@ -771,7 +771,7 @@ int main(){
   assert(!lqr_soft_stop_active && ps4_drive_state==Ps4DriveState::Neutral);
   // Ordered disconnect+reconnect survives one drain; a held reconnect cannot drive.
   const auto old_connections=ps4_diagnostics.connects, old_disconnections=ps4_diagnostics.disconnects;
-  PS4.disconnect_cb();PS4.connect_cb();PS4.input.left_stick_y=-127;PS4.input_cb();
+  PS4.disconnect_cb();PS4.connect_cb();PS4.input.right_stick_y=-127;PS4.input_cb();
   updatePs4Controller();
   assert(ps4_diagnostics.connects==old_connections+1 && ps4_diagnostics.disconnects==old_disconnections+1);
   assert(ps4_was_connected && !lqr_drive_start_pending && !lqr_auto_drive_active);
@@ -807,7 +807,7 @@ int main(){
   assert(emergency_stop_active && !pins[27] && !pins[32]);
   // Overflow itself does not add a disconnect/full stop; actual neutral still stops.
   setupCase();PS4.input={};PS4.input_cb();updatePs4Controller();
-  PS4.input.left_stick_y=-127;PS4.input_cb();updatePs4Controller();
+  PS4.input.right_stick_y=-127;PS4.input_cb();updatePs4Controller();
   assert(lqr_drive_start_pending);startPendingLqrDrive();
   for(int i=0;i<80;++i){PS4.input.right_stick_x=(i%2)?40:50;PS4.input_cb();}
   updatePs4Controller();assert(lqr_auto_drive_active && !emergency_stop_active && ps4_was_connected);
@@ -942,7 +942,7 @@ int main(){
   bootFixture();serviceBootAutoStart();step();
   handlePs4Connection(false);handlePs4Connection(true);
   Ps4InputState legNeutral{},legStop{},legShare{},legUp{};
-  legStop.cross=true;legShare.share=true;legUp.dpad_up=true;
+  legStop.cross=true;legShare.share=true;legUp.left_stick_y=-127;
   processPs4Input(legNeutral,nowMs);serviceLegControl();
   processPs4Input(legStop,nowMs+=5);serviceLegControl();
   assert(emergency_stop_active&&leg_control.state.mode==0);
@@ -987,7 +987,7 @@ int main(){
     PS4.connect_cb();updatePs4Controller();
     auto cycleLeg=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();publishDiagnosticSnapshot(true);};
     auto sendLeg=[&](const Ps4InputState&input){PS4.input=input;PS4.input_cb();cycleLeg();};
-    Ps4InputState neutral{},cross{},share{},up{};cross.cross=true;share.share=true;up.dpad_up=true;
+    Ps4InputState neutral{},cross{},share{},up{};cross.cross=true;share.share=true;up.left_stick_y=-127;
     sendLeg(neutral);sendLeg(cross);sendLeg(neutral);sendLeg(share);sendLeg(neutral);
     assert(!emergency_stop_active&&!lqr_direction_test_armed&&!balance_wait_active);
     assert(leg_control.state.operation.allowed&&leg_control.state.operation.blocker==255);
@@ -1056,7 +1056,7 @@ int main(){
   ps4_was_connected=false;PS4.ok=true;setupPs4Controller();PS4.connect_cb();updatePs4Controller();
   auto measuredCycle=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();};
   auto measuredInput=[&](const Ps4InputState&v){PS4.input=v;PS4.input_cb();measuredCycle();};
-  Ps4InputState measuredDown{};measuredDown.dpad_down=true;
+  Ps4InputState measuredDown{};measuredDown.left_stick_y=127;
   measuredInput(legNeutral);measuredInput(legStop);measuredInput(legNeutral);measuredInput(legShare);measuredInput(legNeutral);
   Serial2.mode=4;const auto heldGoals=Serial2.goals;measuredInput(legUp);
   for(unsigned i=0;i<500;++i)measuredCycle();
@@ -1438,6 +1438,7 @@ int main(){
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
+checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
 with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     cpp=Path(directory)/'drive.cpp';binary=Path(directory)/'drive'

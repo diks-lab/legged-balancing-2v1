@@ -363,6 +363,7 @@ checksum, zero error byte, printable ASCII, and excluding a TX echo.
 
 Webの配置・LittleFS・通常ファームとdataの書き込み手順は
 [docs/web-files.md](docs/web-files.md) を参照。
+現在の割当は左スティック＝脚、右スティック＝前後進・旋回、十字キー＝予約（無出力）です。
 PS4の操作一覧・共通指令経路・実機未検証範囲は
 [docs/ps4-operation.md](docs/ps4-operation.md) を参照。
 

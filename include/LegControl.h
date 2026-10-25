@@ -5,6 +5,7 @@
 #include "LegOperation.h"
 #include "LegAcceptance.h"
 #include "LegMeasurement.h"
+#include "Ps4ControlMapping.h"
 namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
 constexpr uint16_t ServoSpeed=150;
@@ -76,6 +77,7 @@ struct State {
  Acceptance acceptance=ConfiguredAcceptance;
  ServoConfiguration configuration;
  Measurement measurement;
+ ps4_control::StickObservation stick;
  uint8_t recovery=0,return_directions=0; // normal, holding until release, manual inward return
 };
 class Control {
@@ -84,16 +86,33 @@ class Control {
  State state;
  uint8_t keys=0; // up/down/left/right
  bool input_gate=false,want_sync=false;
+ // Internal direction adapter retained for deterministic core/protocol tests.
+ // Runtime PS4 input enters through stickInput; D-pad never calls this adapter.
  void input(uint8_t value,bool released_gate,uint32_t now=0){
-  state.operation.raw_keys=value;
-  keys=released_gate?value:0;input_gate=released_gate;
-  if(released_gate&&!value)armed_=true; // preserve release events within a FIFO batch
-  observe(Source::Input,now,state.operation.phase);
+  setInput(float(bool(value&1))-float(bool(value&2)),float(bool(value&4))-float(bool(value&8)),!value,released_gate,now);
+  state.operation.raw_keys=value;keys=released_gate?value:0;observe(Source::Input,now,state.operation.phase);
+ }
+ void rawStick(int8_t lx,int8_t ly,int8_t rx,int8_t ry,uint32_t received){
+  auto&s=state.stick;s.lx=lx;s.ly=ly;s.rx=rx;s.ry=ry;s.ms=received;
+  s.height=-ps4_control::legAxis(ly);s.roll=-ps4_control::legAxis(lx);
+  state.operation.raw_keys=ps4_control::directions(s.height,s.roll);
+ }
+ void stickInput(int8_t lx,int8_t ly,int8_t rx,int8_t ry,bool gate,uint32_t now,uint32_t received){
+  rawStick(lx,ly,rx,ry,received);
+  setInput(state.stick.height,state.stick.roll,ps4_control::leftCentered(lx,ly),gate,now);
  }
  void received(uint8_t value,uint32_t now){state.operation.raw_keys=value;observe(Source::Input,now,state.operation.phase);}
- void disconnect(){keys=0;input_gate=false;} // active height holds, roll returns smoothly to zero
+ void disconnect(){
+  keys=0;input_gate=false;height_input_=roll_input_=0;
+  state.stick.applied_height=state.stick.applied_roll=0;
+  // Cancel an unsent ramp increment; hold the last position actually queued to UART.
+  if(state.active&&state.command_valid){
+   state.right_percent=percent(true,state.right_command);state.left_percent=percent(false,state.left_command);
+   state.height=(state.right_percent+state.left_percent)/2;difference_=(state.right_percent-state.left_percent)/2;
+  }
+ }
  void stop(Reason reason){
-  state.operation.tx_wait=false;state.recovery=state.return_directions=0;
+  state.operation.tx_wait=false;height_input_=roll_input_=0;state.stick.applied_height=state.stick.applied_roll=0;state.recovery=state.return_directions=0;
   state.active=state.synced=false;want_sync=false;armed_=false;state.reason=reason;
   state.requested_roll=state.applied_roll=0;state.limited=false;last_=0;
  }
@@ -174,7 +193,10 @@ class Control {
   if(state.recovery&&(state.reason==Reason::RecoveryDirection||state.reason==Reason::PairLimit||state.reason==Reason::ReturnConflict)){
    o.allowed=0;o.operation=uint8_t(Operation::Failed);o.blocker=uint8_t(state.reason);return;
   }
-  if(!roll_confirmed_&&(keys&12)){o.blocker=uint8_t(Reason::RollUnconfirmed);return;}
+  if(!roll_confirmed_&&(keys&12)){
+   o.blocker=uint8_t(Reason::RollUnconfirmed);
+   if(!(keys&3)){o.allowed=0;o.operation=uint8_t(Operation::Wait);return;}
+  }
   if(state.active){
    const int height=int(bool(keys&1))-int(bool(keys&2)),rollAxis=int(bool(keys&4))-int(bool(keys&8));
    o.operation=uint8_t(height>0?Operation::Extend:height<0?Operation::Retract:
@@ -188,8 +210,9 @@ class Control {
   if(!eligible){stop(Reason::Stopped);return;}
   if(moving){stop(Reason::Driving);return;}
   if(!imu_valid){stop(Reason::ImuInvalid);return;}
-  if(!keys&&input_gate)armed_=true;
+  if(centered_&&input_gate)armed_=true;
   if(!state.active){
+   state.stick.applied_height=state.stick.applied_roll=0;
    // These reasons describe current external gates, not a latched operation failure.
    // The guards above have now passed (e.g. Share cleared explicit STOP). Refresh
    // the diagnosis without synchronizing, enabling torque or changing a target.
@@ -206,13 +229,15 @@ class Control {
    return;
   }
   if(elapsed>200){stop(Reason::ClockGap);return;} // never catch up a stale long command
+  if(elapsed||state.recovery==1)state.stick.applied_height=state.stick.applied_roll=0;
+  if(!height_input_)state.stick.applied_height=0;
+  if(!roll_input_)state.stick.applied_roll=0;
   const float dt=elapsed*.001f;
-  const int height_axis=((keys&1)!=0)-((keys&2)!=0);
-  const int roll_axis=((keys&4)!=0)-((keys&8)!=0);
+  const float height_axis=height_input_,roll_axis=roll_input_;
   if(state.recovery){
    if(state.recovery==1){
     state.reason=Reason::RecoveryRelease;
-    if(!keys&&input_gate){
+    if(centered_&&input_gate){
      state.recovery=2;state.reason=conflictingReturn(state.right_percent,state.left_percent)?Reason::ReturnConflict:Reason::Accepted;float low,high;pairBounds(low,high,true);
      state.return_directions=(high>.00001f?1:0)|(low<-.00001f?2:0);
      if(!state.return_directions&&state.reason!=Reason::ReturnConflict)state.reason=Reason::PairLimit;
@@ -221,7 +246,7 @@ class Control {
    }
    float low,high;pairBounds(low,high,true);
    state.return_directions=(high>.00001f?1:0)|(low<-.00001f?2:0);
-   if(keys&12){state.reason=Reason::RecoveryDirection;return;}
+   if((keys&12)&&(roll_confirmed_||!(keys&3))){state.reason=roll_confirmed_?Reason::RecoveryDirection:Reason::RollUnconfirmed;return;}
    const float requested=height_axis*HeightRate*dt;
    const float delta=clamp(requested,low,high);
    state.limited=fabsf(delta-requested)>.00001f;
@@ -232,9 +257,10 @@ class Control {
     state.reason=above&&below?Reason::ReturnConflict:((height_axis<0&&above&&!below)||(height_axis>0&&below&&!above))?Reason::PairLimit:Reason::RecoveryDirection;
     return;
    }
+   if(fabsf(delta)>.000001f)state.stick.applied_height=height_axis;
    state.right_percent+=delta;state.left_percent+=delta;
    state.height=(state.right_percent+state.left_percent)/2;difference_=(state.right_percent-state.left_percent)/2;
-   state.reason=conflictingReturn(state.right_percent,state.left_percent)?Reason::ReturnConflict:!state.return_directions?Reason::PairLimit:state.operation.tx_wait?Reason::TxBusy:Reason::Accepted;
+   state.reason=conflictingReturn(state.right_percent,state.left_percent)?Reason::ReturnConflict:!state.return_directions?Reason::PairLimit:(!roll_confirmed_&&(keys&12))?Reason::RollUnconfirmed:state.operation.tx_wait?Reason::TxBusy:Reason::Accepted;
    if(inRange(true,target(true))&&inRange(false,target(false))){
     // Adopt exactly the emitted ticks; never re-level at the mode transition.
     state.right_percent=percent(true,target(true));state.left_percent=percent(false,target(false));
@@ -245,12 +271,15 @@ class Control {
   }
   float low,high;pairBounds(low,high,false);
   const float requested=height_axis*HeightRate*dt,delta=clamp(requested,low,high);
+  if(fabsf(delta)>.000001f)state.stick.applied_height=height_axis;
   state.right_percent+=delta;state.left_percent+=delta;
   state.height=(state.right_percent+state.left_percent)/2;
   const bool height_limited=height_axis&&fabsf(delta-requested)>.00001f;
+  const float prior_roll=state.requested_roll;
   if(roll_rearm_&&(keys&12)&&roll_confirmed_)roll_rearm_=false;
   if(roll_confirmed_&&!roll_rearm_&&roll_axis)state.requested_roll=clamp(state.requested_roll+roll_axis*RollRate*dt,-MaxRoll,MaxRoll);
   else if(roll_confirmed_&&!roll_rearm_&&!(keys&12))state.requested_roll=toward(state.requested_roll,0,RollRate*dt);
+  if(state.requested_roll!=prior_roll&&roll_axis)state.stick.applied_roll=roll_axis;
   const float diffLo=fmaxf(normalLow(true)-state.height,state.height-normalHigh(false)),
               diffHi=fminf(normalHigh(true)-state.height,state.height-normalLow(false));
   const float room=fminf(fabsf(diffLo),fabsf(diffHi));
@@ -266,7 +295,16 @@ class Control {
  private:
  uint32_t last_=0;
  float difference_=0;
- bool armed_=false,roll_confirmed_=false,roll_rearm_=false;
+ bool armed_=false,roll_confirmed_=false,roll_rearm_=false,centered_=true;
+ float height_input_=0,roll_input_=0;
+ void setInput(float height,float roll,bool centered,bool gate,uint32_t now){
+  state.stick.height=height;state.stick.roll=roll;centered_=centered;
+  state.operation.raw_keys=ps4_control::directions(height,roll);
+  keys=gate?state.operation.raw_keys:0;input_gate=gate;
+  height_input_=gate?height:0;roll_input_=gate?roll:0;
+  if(gate&&centered)armed_=true;
+  observe(Source::Input,now,state.operation.phase);
+ }
  void pairBounds(float&low,float&high,bool inward)const{
   movementBounds(state.right_percent,state.left_percent,low,high,inward);
  }

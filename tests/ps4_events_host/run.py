@@ -88,7 +88,7 @@ int main(){
   for(size_t i=1;i<batch.count;++i)assert(Inbox::after(batch.events[i].sequence,batch.events[i-1].sequence));
   for(int i=0;i<100;++i)fifo.input(p,5+i);
   fifo.drain(batch);assert(batch.count==0 && batch.duplicates==100);
-  for(int i=0;i<8;++i){p.left_stick_y=-127;p.r2=i;fifo.input(p,110+i);}
+  for(int i=0;i<8;++i){p.right_stick_y=-127;p.r2=i;fifo.input(p,110+i);}
   p.cross=true;fifo.input(p,120);p.cross=false;fifo.input(p,121);
   fifo.input({},122);fifo.disconnect(123);fifo.connect(124);fifo.input({},125);fifo.drain(batch);
   assert(batch.count==4 && batch.overflowed && batch.overflows>0 && batch.cross_pending && batch.disconnect_pending);
