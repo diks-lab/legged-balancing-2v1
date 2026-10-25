@@ -45,7 +45,7 @@ nav { flex: none; margin: 0; }
 
 .meter-note { grid-column: 1 / -1; margin: 0; text-align: center; font-size: 14px; }
 
-/* Leg rows reserve two text lines; state changes never move neighbouring rows. */
+/* Reserve room for short states, but never constrain wrapped diagnostic text. */
 #leg-diagnostics .leg-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -55,15 +55,17 @@ nav { flex: none; margin: 0; }
 .leg-field {
   display: grid;
   grid-template-columns: 9em minmax(0, 1fr);
-  align-items: center;
+  align-items: start;
   box-sizing: border-box;
-  height: 4.5em;
+  min-height: 4.5em;
+  padding: 8px 0;
+  min-width: 0;
   border-bottom: 1px solid #d4dce5;
 }
-.leg-field dt { font-weight: bold; }
-.leg-field dd { margin: 0; white-space: pre-line; line-height: 1.4; }
+.leg-field dt { font-weight: bold; min-width: 0; overflow-wrap: anywhere; }
+.leg-field dd { margin: 0; min-width: 0; white-space: pre-line; line-height: 1.5; overflow-wrap: anywhere; }
 .leg-blocker, .leg-failure { grid-column: 1 / -1; }
-#leg-freshness { height: 3em; margin: 4px 0; }
+#leg-freshness { min-height: 3em; margin: 4px 0; }
 #leg-blocker[data-blocked='true'] { color: #8c2634; font-weight: bold; }
 #leg-diagnostics details { margin: 6px 0; }
 #leg-diagnostics li { margin: 6px 0; }
@@ -72,3 +74,33 @@ nav { flex: none; margin: 0; }
 }
 
 #leg-position p { white-space: pre-line; }
+
+/* A single outer details scroller; nested diagnostics grow with their content. */
+#details details[open] { max-height: none; overflow: visible; }
+#leg-diagnostics, #leg-range-calibration { min-width: 0; max-width: 100%; line-height: 1.5; }
+#leg-diagnostics p, #leg-diagnostics li, #leg-diagnostics summary,
+#leg-range-calibration p, #leg-range-calibration label,
+#leg-range-calibration button { overflow-wrap: anywhere; }
+#leg-diagnostics pre, #leg-diagnostics code {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+@media (max-width: 1200px) {
+  #leg-diagnostics .leg-fields { grid-template-columns: 1fr; }
+}
+@media (max-width: 800px) {
+  .leg-field { grid-template-columns: 1fr; gap: 4px; }
+}
+
+/* Open diagnostics use document flow as well as the outer details scroller.
+   Do not squeeze the instrument grid below its children and paint over it. */
+main:has(> #details[open], > #leg-range-calibration[open]) {
+  height: auto;
+  min-height: 100dvh;
+}
+main:has(> #details[open], > #leg-range-calibration[open]) #workspace {
+  flex: none;
+  height: max(360px, 50dvh);
+}
