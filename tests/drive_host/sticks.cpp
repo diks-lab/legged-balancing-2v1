@@ -33,10 +33,10 @@
     // Actual callback near-half input (56/111) and no-notification hold retain time-based proportional speed.
     fixture(true);Ps4InputState half{};half.left_stick_y=72;send(half);wait(350);assert(leg_control.state.active);
     const float halfStart=leg_control.state.height;wait(1000);
-    assert(fabsf(leg_control.state.height-halfStart-(4.f*56.f/111.f))<.005f);
+    assert(fabsf(leg_control.state.height-halfStart-(12.f*56.f/111.f))<.005f);
     send(zero);wait(50);const float halfHold=leg_control.state.height;wait(200);near(leg_control.state.height,halfHold);
     Ps4InputState tiny{};tiny.left_stick_y=17;send(tiny);const float tinyStart=leg_control.state.height;wait(1000);
-    assert(fabsf(leg_control.state.height-tinyStart-4.f/111.f)<.002f);
+    assert(fabsf(leg_control.state.height-tinyStart-12.f/111.f)<.002f);
     // Right alone cannot start balance/drive in the bench, and it freezes legs.
     send(forward);wait(100);send(yaw);wait(50);assert(!lqr_direction_test_armed&&!balance_wait_active&&!lqr_drive_start_pending&&!leg_control.state.active);
     send(up);wait(300); // Right was centered but left never returned to center after priority.

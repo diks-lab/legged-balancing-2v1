@@ -6346,6 +6346,8 @@ void loadLegCalibration(){
  leg::activeGeometry()=c.source?stored.geometry:leg::Geometry{};
  leg_control.state.geometry=leg::activeGeometry();leg_control.state.acceptance=leg::configuredAcceptance();
  Serial.printf("LEG CALIBRATION BOOT: source=%s result=%s generation=%lu valid_slots=%u; no leg movement\n",c.source?"NVS":"NONE",leg::calResult(c.result),(unsigned long)c.generation,c.valid_slots);
+ if(c.source)Serial.printf("LEG PROFILE: max_height=%.0f pp/s normal_pct R=%.3f..%.3f L=%.3f..%.3f normal_tick R=%d..%d L=%d..%d\n",double(leg::HeightRate),double(leg::normalLow(true)),double(leg::normalHigh(true)),double(leg::normalLow(false)),double(leg::normalHigh(false)),leg::normalMinTick(true),leg::normalMaxTick(true),leg::normalMinTick(false),leg::normalMaxTick(false));
+ else Serial.printf("LEG PROFILE: max_height=%.0f pp/s normal range=UNAVAILABLE (leg calibration required)\n",double(leg::HeightRate));
  if(!c.source)Serial.println("LEG CALIBRATION REQUIRED: confirmed candidate R0=2044 R100=1697 L0=2084 L100=2408; explicit load and save required. Wheels unchanged.");
 }
 void serviceLegCalibrationResult(){

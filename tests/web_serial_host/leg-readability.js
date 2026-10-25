@@ -40,7 +40,7 @@ const fs = require('node:fs');
           const events = [1, 2, 3, 4].map(i => [4294967200 + i, 4294967200 + i,
             i, 17, 9, i, i + 1, 15, 15, 63, 1023, 2]);
           window.packet = {
-            type: 'wheel_diagnostics', boot_id: 'layout', leg_ms: 53588, leg_age_ms: 0,
+            type: 'wheel_diagnostics', boot_id: 'layout', leg_rate: 12, leg_hint: 1, leg_ms: 53588, leg_age_ms: 0,
             leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
             leg_state: [4294967295, 4294967295, 1, 0, 7, 9, 15, 15, 63, 4, 1023, 9, 53587, 3, 4294967295, 4, events],
             leg_accept: [1, 1, 1697, 2044, 2084, 2408, 1, 2],

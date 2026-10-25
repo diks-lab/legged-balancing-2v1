@@ -8,7 +8,7 @@ namespace leg {
 class SerialDiagnostics {
  public:
  enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected,Sticks,Calibration,Motion };
- struct Sync { Geometry geometry;Acceptance accept;int16_t right,left;uint8_t acquired,recovery,directions; };
+ struct Sync { Geometry geometry;Acceptance accept;int16_t right,left;uint8_t acquired,recovery,directions,hint; };
  struct MotionState {
   TxDiagnostics tx;
   float height=0,roll=0;
@@ -35,7 +35,7 @@ class SerialDiagnostics {
   if((s.stick.flags&32)?bool(s.stick.flags&2):!o.raw_keys)seen_refusals_=0;
   if(o.committed&&(o.allowed!=allowed_||o.operation!=operation_||o.blocker!=blocker_||o.raw_keys!=decision_keys_)){
    Record r;r.type=Decision;r.ms=now;r.keys=o.raw_keys;r.allowed=o.allowed;
-   r.reason=o.blocker;r.data.sync.recovery=o.operation;
+   r.reason=o.blocker;r.data.sync.recovery=o.operation;r.data.sync.hint=recoveryHint(s);
    const bool changed=o.allowed!=allowed_||o.operation!=operation_||o.blocker!=blocker_;
    const bool important=changed&&o.blocker!=255&&o.blocker!=uint8_t(Reason::Idle)&&o.blocker!=uint8_t(Reason::ReleaseRequired);
    const uint32_t bit=o.blocker<32?1u<<o.blocker:0;
@@ -55,7 +55,7 @@ class SerialDiagnostics {
   }
   if(s.recovery!=recovery_||s.return_directions!=directions_){
    Record r;r.type=Range;r.ms=now;r.data.sync.recovery=s.recovery;
-   r.data.sync.directions=s.return_directions;r.allowed=s.active||s.synced;
+   r.data.sync.directions=s.return_directions;r.data.sync.hint=recoveryHint(s);r.allowed=s.active||s.synced;
    if(s.recovery==1)r.data.sync.directions=returnDirections(s.right_percent,s.left_percent);
    push(r);
   }
@@ -211,7 +211,10 @@ class SerialOutput {
   pending_=false;
   switch(r.type){
    case D::Input:size_=snprintf(line_,sizeof(line_),"LEG INPUT: LEFT_STICK %s received; release_gate=%u ms=%lu\n",keys(),r.allowed,(unsigned long)r.ms);break;
-   case D::Decision:size_=snprintf(line_,sizeof(line_),"LEG INPUT: LEFT_STICK %s result=%s reason=%s operation=%u ms=%lu\n",keys(),s.recovery==uint8_t(Operation::Sync)?"PENDING_SYNC":r.allowed&&r.reason==255?"ACCEPTED":"REJECTED",serialReason(r.reason),s.recovery,(unsigned long)r.ms);break;
+   case D::Decision:
+    if(!part_)size_=snprintf(line_,sizeof(line_),"LEG INPUT: LEFT_STICK %s result=%s reason=%s operation=%u ms=%lu\n",keys(),s.recovery==uint8_t(Operation::Sync)?"PENDING_SYNC":r.allowed&&r.reason==255?"ACCEPTED":"REJECTED",serialReason(r.reason),s.recovery,(unsigned long)r.ms);
+    else size_=snprintf(line_,sizeof(line_),"LEG RETURN: %s; center LEFT XY, then NEW %s; paired limits remain active\n",s.hint==1?"短縮して通常範囲へ戻す必要あり":"伸長して通常範囲へ戻す必要あり",s.hint==1?"DOWN":"UP");
+    pending_=(r.reason==uint8_t(Reason::RecoveryDirection)||r.reason==uint8_t(Reason::RecoveryRelease))&&s.hint>0&&s.hint<3&&part_++==0;break;
    case D::SyncStart:size_=snprintf(line_,sizeof(line_),"LEG %s: START ms=%lu\n",r.allowed?"READ_ONLY":"SYNC",(unsigned long)r.ms);break;
    case D::SyncFailed:size_=snprintf(line_,sizeof(line_),"LEG SYNC: FAILED reason=%s ms=%lu\n",serialReason(r.reason),(unsigned long)r.ms);break;
    case D::SyncDone:
@@ -219,8 +222,10 @@ class SerialOutput {
     else if(!part_)size_=snprintf(line_,sizeof(line_),"LEG READ_ONLY: right=%d left=%d tick; percent/ranges unavailable (leg calibration required); no motion\n",s.right,s.left);
     else if(part_==1&&!validGeometry(s.geometry))size_=snprintf(line_,sizeof(line_),"LEG LIMITS: UNAVAILABLE; explicit leg calibration required (not outside a measured range)\n");
     else if(part_==1)size_=snprintf(line_,sizeof(line_),"LEG LIMITS: initial R=%d..%d L=%d..%d; normal R=%d..%d L=%d..%d (servo travel 0..30%% intersect margins)\n",s.accept.right_min,s.accept.right_max,s.accept.left_min,s.accept.left_max,normalMinTick(true,s.geometry),normalMaxTick(true,s.geometry),normalMinTick(false,s.geometry),normalMaxTick(false,s.geometry));
-    else size_=snprintf(line_,sizeof(line_),"LEG GEOMETRY: measured 0/100%% R=%d/%d L=%d/%d; margins R=%d/%d L=%d/%d tick; not linear height\n",zeroTick(true,s.geometry),fullTick(true,s.geometry),zeroTick(false,s.geometry),fullTick(false,s.geometry),RightRetractedMarginTicks,RightExtendedMarginTicks,LeftRetractedMarginTicks,LeftExtendedMarginTicks);
-    pending_=++part_<3;break;
+    else if(part_==2)size_=snprintf(line_,sizeof(line_),"LEG GEOMETRY: measured 0/100%% R=%d/%d L=%d/%d; margins R=%d/%d L=%d/%d tick; not linear height\n",zeroTick(true,s.geometry),fullTick(true,s.geometry),zeroTick(false,s.geometry),fullTick(false,s.geometry),RightRetractedMarginTicks,RightExtendedMarginTicks,LeftRetractedMarginTicks,LeftExtendedMarginTicks);
+    else if(validGeometry(s.geometry))size_=snprintf(line_,sizeof(line_),"LEG PROFILE: max_height=%.0f pp/s; normal_pct R=%.3f..%.3f L=%.3f..%.3f; UART=50 ms speed=150 acc=15\n",double(HeightRate),double(normalLow(true,s.geometry)),double(normalHigh(true,s.geometry)),double(normalLow(false,s.geometry)),double(normalHigh(false,s.geometry)));
+    else size_=snprintf(line_,sizeof(line_),"LEG PROFILE: max_height=%.0f pp/s; normal range UNAVAILABLE (calibration required)\n",double(HeightRate));
+    pending_=++part_<4;break;
    case D::Range:size_=snprintf(line_,sizeof(line_),s.recovery?
      "LEG STATE: HOLD_OUTSIDE_RANGE; center LEFT XY, then NEW inward deflection; UP=%u DOWN=%u; awaiting_release=%u\n":r.allowed?"LEG STATE: NORMAL_RANGE\n":"LEG STATE: INACTIVE\n",
      unsigned(bool(s.directions&1)),unsigned(bool(s.directions&2)),unsigned(s.recovery==1));break;

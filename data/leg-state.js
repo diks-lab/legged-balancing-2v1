@@ -11,7 +11,11 @@ function legDecision(packet, live, elapsed) {
   const recovery = packet?.leg_accept?.[6] || 0;
   const reason = n => n === 255 ? 'なし' : LEG_BLOCKERS[n] || `理由${n}`;
   const rx = legReplyPresentation(packet?.leg_rx);
-  const blocker = valid && s[5] === 9 && rx && rx.ms === s[12] ? rx.summary : valid ? reason(s[5]) : '未受信';
+  let blocker = valid && s[5] === 9 && rx && rx.ms === s[12] ? rx.summary : valid ? reason(s[5]) : '未受信';
+  if (valid && [21, 22].includes(s[5])) {
+    if (packet.leg_hint === 1) blocker = '短縮して通常範囲へ戻す必要あり。左XYを中央へ戻し、新しい下操作。';
+    if (packet.leg_hint === 2) blocker = '伸長して通常範囲へ戻す必要あり。左XYを中央へ戻し、新しい上操作。';
+  }
   return {
     fresh,
     mode: valid ? ['操作不可', '支持試験（倒立OFF）', '静止倒立'][s[2]] || '未確定' : '未取得',

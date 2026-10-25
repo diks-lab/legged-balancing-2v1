@@ -91,7 +91,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert((await page.locator('#gyro-window').textContent()).includes('CONFIG=0x03'));
       assert((await page.locator('#gyro-window').textContent()).includes('RMS 1.250'));
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
-        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
+        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 0, leg_ms: window.sequence * 50,
         leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
         leg_age_ms: 0, leg_state: window.legState(3),
         legs: [15, 2, 1, 0, 16, 14, 2034, 2055, 40, 30, 3, 3, 1, 1, 1, 1, 4, 0, 27]
@@ -101,7 +101,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert((await page.locator('#leg-diagnostics').textContent()).includes('可動制限：あり'));
       assert.equal(await page.locator('#leg-mode').textContent(), '支持試験（倒立OFF）');
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
-        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50 + 1,
+        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 0, leg_ms: window.sequence * 50 + 1,
         leg_age_ms: 0, leg_state: window.legState(1), leg_mode: 1,
         leg_roll_confirmed: false, leg_roll_sign: 1,
         legs: [15, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
@@ -120,7 +120,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         const sendLeg = (reason, height = 15, mode = 1, rx = null, position = null) => {
           window.sample();
           window.peer.onmessage({ data: JSON.stringify({
-            type: 'wheel_diagnostics', boot_id: 'boot-test', leg_ms: window.sequence * 50,
+            type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 0, leg_ms: window.sequence * 50,
             leg_mode: mode, leg_roll_confirmed: false, leg_roll_sign: 1, leg_rx: rx, leg_position: position,
             leg_age_ms: 0, leg_state: window.legState(reason, mode, rx),
             legs: [height, 0, 0, -48.9, 16, 14, 2034, 2055, 40, 30, reason, 3,
@@ -198,7 +198,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
 
 
       await page.evaluate(() => {
-        window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
+        window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 0,
           leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
           leg_roll_confirmed: false, leg_roll_sign: 1,
           leg_accept: [0, 1, 1908, 1997, 2081, 2173, 0, 0],
@@ -210,7 +210,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         document.getElementById('details').open = true;
         document.getElementById('leg-config').open = true;
       });
-      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
+      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 0,
         leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
         leg_stick: [100, -128, 72, 0, 0, 56/111, 1, 56/111, 0, 0, 0, 97],
         leg_accept: [0, 1, 1908, 1997, 2081, 2173, 0, 0],
@@ -226,6 +226,18 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       const configText = await page.locator('#leg-config-values').textContent();
       assert(configText.includes('初回受付：通常範囲のみ') && configText.includes('0～4095'));
       assert(configText.includes('0（位置モード）') && configText.includes('1（車輪モード）'));
+      assert((await page.locator('#leg-profile').textContent()).includes('上下最大 12 ポイント/秒'));
+      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
+        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 1,
+        leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(21),
+        leg_accept: [1,1,1697,2044,2084,2408,2,2],
+        leg_geometry: [[2044,1697,10,10,1707,2034,1940,2034],[2084,2408,10,10,2094,2398,2094,2181],[0,30]],
+        legs: [100,0,0,0,100,100,1697,2408,100,100,21,3,1,1,1,1,2,0,0]
+      }) }));
+      assert((await page.locator('#leg-profile').textContent()).includes('2.88～29.97%'));
+      assert((await page.locator('#leg-profile').textContent()).includes('3.09～29.94%'));
+      assert((await page.locator('#leg-blocker').textContent()).includes('短縮して通常範囲へ戻す必要あり'));
+
       await page.evaluate(() => {
         document.getElementById('leg-config').open = false;
         document.getElementById('details').open = false;
@@ -240,7 +252,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert((await page.locator('#leg-measure-action').textContent()).includes('開始しません'));
       await page.check('#leg-measure-supported');await page.click('#leg-measure-start');
       await page.waitForFunction(() => document.getElementById('leg-measure-action').textContent.includes('開始要求を送信'));
-      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
+      await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 0,
         leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
         leg_measure: [100, 0, 0, 3, 1, 3, 3, 0, 0, 0,
           [200, 2, 1900, 1890, 1977, 32.2289, 35.24096, 9.03614], [250, 2, 2200, 2082, 2200, 37.8299, 3.2258, 37.8299]],
@@ -291,7 +303,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       for (const key of ['imu', 'foc']) assert.equal(await page.locator(`#condition-${key}`).getAttribute('data-ok'), 'true');
       assert((await page.locator('#health-diagnosis').textContent()).includes('右車輪センサー 実行して失敗：I2C_ADDRESS/NACK'));
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({
-        type: 'wheel_diagnostics', boot_id: 'boot-test',
+        type: 'wheel_diagnostics', boot_id: 'boot-test', leg_rate: 12, leg_hint: 0,
         wheel0: [53587, 5100, 53000, 0, 0, 0, -1, -1, 12, 2, 69, 3,
           100, 100, 53000, 0, 2, 2, 1, 2, 12, 2, 4, 1, 1, 1]
       }) }));

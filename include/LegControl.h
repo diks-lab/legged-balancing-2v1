@@ -11,7 +11,7 @@ namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
 constexpr uint16_t ServoSpeed=150;
 constexpr uint8_t ServoAcceleration=15;
-constexpr float HeightRate=4;             // percentage points/s, deliberately slow
+constexpr float HeightRate=12;            // maximum servo-travel percentage points/s
 constexpr float RollRate=2,MaxRoll=3;     // deg/s, deg
 constexpr float RollGain=1;              // differential extension pp/deg
 constexpr float DifferentialRate=4;      // pp/s, limits feedback-induced movement
@@ -92,6 +92,13 @@ struct State {
  ps4_control::StickObservation stick;
  uint8_t recovery=0,return_directions=0; // normal, holding until release, manual inward return
 };
+// Presentation-only hint: never used to relax a movement gate.
+inline uint8_t recoveryHint(const State&s){
+ if(!s.recovery||!validGeometry(s.geometry))return 0;
+ const bool above=s.right_percent>normalHigh(true,s.geometry)||s.left_percent>normalHigh(false,s.geometry);
+ const bool below=s.right_percent<normalLow(true,s.geometry)||s.left_percent<normalLow(false,s.geometry);
+ return above?(below?3:1):below?2:0; // shorten, extend, conflict
+}
 class Control {
  public:
  explicit Control(bool roll_confirmed=RollDirectionConfirmed,Acceptance acceptance=configuredAcceptance()):roll_confirmed_(roll_confirmed){state.acceptance=acceptance;}

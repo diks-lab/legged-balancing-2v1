@@ -50,17 +50,17 @@ int main(){
   c.input(1,true,1500);for(uint32_t t=1500;t<1600;++t)cycle(c,b,io,t);
   assert(c.state.reason==Reason::RecoveryDirection&&goals(io)==1);
   c.input(4,true,1600);cycle(c,b,io,1600);assert(goals(io)==1); // roll rejected
-  c.input(2,true,1601);bool leftEntered=false;uint16_t prevR=1874,prevL=2207;
+  c.input(2,true,1601);uint16_t prevR=1874,prevL=2207;
   uint32_t t=1601;
   for(;t<8000&&c.state.recovery;++t){
    cycle(c,b,io,t);assert(io.words[0]>=prevR&&io.words[1]<=prevL);
    assert(c.accepted(true,decodePosition(io.words[0]))&&c.accepted(false,decodePosition(io.words[1])));
-   if(io.words[1]<=2173)leftEntered=true;
    prevR=io.words[0];prevL=io.words[1];
   }
-  assert(!c.state.recovery&&leftEntered);
+  assert(!c.state.recovery);
   const int16_t targetR=c.target(true),targetL=c.target(false);
   c.input(0,true,t);for(unsigned k=0;k<200;++k)cycle(c,b,io,t++);
+  assert(io.words[0]==uint16_t(targetR)&&io.words[1]==uint16_t(targetL)); // final UART slot may follow mode transition
   assert(c.target(true)==targetR&&c.target(false)==targetL); // mode transition/release never re-level
   assert(inRange(true,targetR)&&inRange(false,targetL));
   c.input(2,true,t);

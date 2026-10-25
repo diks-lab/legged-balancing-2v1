@@ -29,7 +29,7 @@ const LEG_BLOCKERS = {
   29: '脚可動範囲の保存校正が必要。下部の校正欄で明示保存'
 };
 const LEG_LABELS = {
-  mode: '試験モード', available: '操作可否', correction: '左右姿勢補正',
+  profile: '上下最大速度・通常範囲', mode: '試験モード', available: '操作可否', correction: '左右姿勢補正',
   operation: '現在の操作', blocker: '動作を妨げる理由', sync: '位置同期',
   height: '高さ指令（サーボ可動量%）', roll: '左右傾斜', failure: '直近の操作失敗'
 };
@@ -42,6 +42,7 @@ function legPresentation(packet, live, elapsed, cache) {
   const confirmed = packet?.leg_roll_confirmed === true;
   const raw = valid && Math.abs(packet.leg_roll_sign) === 1 ? l[3] / packet.leg_roll_sign : null;
   const values = {
+    profile: legMotionProfile(packet),
     mode: decision.mode,
     available: decision.available,
     correction: confirmed ? '有効・確認済設定' : '無効・方向未確認',
@@ -91,7 +92,7 @@ function createLegPanel(view) {
   make('summary', '操作説明・支持試験の手順', guide);
   const list = make('ul', '', guide);
   for (const text of [
-    '左スティック上下：上（LY正）で伸長、下（LY負）で短縮。倒し量で速度変更、最大4ポイント/秒。中央で保持。',
+    '左スティック上下：上（LY正）で伸長、下（LY負）で短縮。倒し量で速度変更、最大12ポイント/秒。中央で保持。',
     '左スティック左右：方向確認後だけ傾斜操作。中央で目標0°へ戻す。未確認時は斜め入力の上下だけ受理。',
     '停止：×は車輪全停止・脚トルクOFF。走行と脚操作の同時使用は対象外。',
     '支持試験：外部電源のまま機体を支持。×→全解放→Share→Share解放。倒立は開始しません。',

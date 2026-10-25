@@ -70,3 +70,19 @@ function renderLegConfig(nodes, packet, fresh) {
     if (node.textContent !== text) node.textContent = text;
   });
 }
+
+// Configuration display only; no control value or received sample is changed.
+function legMotionProfile(packet) {
+  const rate = Number.isFinite(packet?.leg_rate) ? packet.leg_rate : '未取得';
+  const g = packet?.leg_geometry;
+  let range = '通常範囲未取得';
+  if (Array.isArray(g) && g.length === 3) {
+    const side = (values, right) => {
+      const percent = tick => 100 * (tick - values[0]) / (values[1] - values[0]);
+      const low = percent(values[right ? 7 : 6]), high = percent(values[right ? 6 : 7]);
+      return `${low.toFixed(2)}～${high.toFixed(2)}%（${values[6]}～${values[7]} tick）`;
+    };
+    range = `通常範囲：右 ${side(g[0], true)} ／ 左 ${side(g[1], false)}`;
+  }
+  return `上下最大 ${rate} ポイント/秒 ／ ${range}。サーボ可動量の割合。`;
+}

@@ -136,6 +136,7 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   j.add(",%lu,%lu]",(unsigned long)d.probes,(unsigned long)d.failures);
  }
  const auto&l=s.legs;const auto&geometry=l.geometry;
+ j.add(",\"leg_rate\":%.0f,\"leg_hint\":%u",double(leg::HeightRate),unsigned(leg::recoveryHint(l)));
  j.add(",\"leg_ms\":%lu,\"legs\":[",(unsigned long)s.sample_ms);
  const float values[]={l.height,l.requested_roll,l.applied_roll,l.measured_roll,l.command_valid?leg::percent(true,l.right_command,geometry):NAN,l.command_valid?leg::percent(false,l.left_command,geometry):NAN};
  bool first=true;for(float value:values){j.add("%s",first?"":",");if(isfinite(value))j.add("%.4g",double(value));else j.add("null");first=false;}

@@ -1442,7 +1442,7 @@ int main(){
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
-checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
+checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-rate.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
 with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     cpp=Path(directory)/'drive.cpp';binary=Path(directory)/'drive'

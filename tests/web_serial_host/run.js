@@ -246,3 +246,20 @@ const { legCalGeometry } = require('../../data/leg-calibration.js');
 assert(legCalGeometry([2044,1697,2084,2408]).includes('1940～2034'));
 assert(legCalGeometry([2044,1697,2084,2408]).includes('2094～2181'));
 assert.equal(legCalGeometry([0,0,0,0]), '方向・範囲未成立');
+
+vm.runInContext(`
+  const rateProfilePacket = {
+    leg_rate: 12, leg_hint: 1,
+    leg_geometry: [[2044,1697,10,10,1707,2034,1940,2034],[2084,2408,10,10,2094,2398,2094,2181],[0,30]],
+    leg_accept: [1,1,1697,2044,2084,2408,2,2],
+    leg_state: [1,100,1,0,7,21,1,1,31,8,0,21,100,4,0,2,[]]
+  };
+  const rateProfileText = legMotionProfile(rateProfilePacket);
+  if (!rateProfileText.includes('最大 12') || !rateProfileText.includes('2.88～29.97%') ||
+      !rateProfileText.includes('3.09～29.94%') || !rateProfileText.includes('1940～2034 tick')) throw Error('rate/normal config display');
+  if (!legDecision(rateProfilePacket,true,0).blocker.includes('短縮して通常範囲へ戻す必要あり')) throw Error('shorten reason');
+  rateProfilePacket.leg_hint = 2;
+  if (!legDecision(rateProfilePacket,true,0).blocker.includes('伸長して通常範囲へ戻す必要あり')) throw Error('extend reason');
+  rateProfilePacket.leg_state[5] = 23;
+  if (!legDecision(rateProfilePacket,true,0).blocker.includes('両脚を保持')) throw Error('pair stop preserved');
+`, context);

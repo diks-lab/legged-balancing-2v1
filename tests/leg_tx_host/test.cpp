@@ -54,7 +54,7 @@ int main(){
  // All production UART frames are byte-for-byte compared with the actual old driver.
  Control c;ServoBus<IO>bus;IO io;setup(c,bus,io);c.input(2,true);
  for(unsigned t=401;t<=3400;++t){c.tick(t,true,false,true,0);bus.service(io,c,t);}
- assert(c.target(true)==1739&&c.target(false)==2369&&io.goals>30&&io.ons==1);
+ assert(c.target(true)==1822&&c.target(false)==2291&&io.goals>30&&io.ons==1);
  assert(c.state.tx.goals==io.goals&&c.state.tx.on_sent==io.ons);
  // Position TX capacity wait and partial write are distinct from a full UART send.
  io.room=0;const auto sent=c.state.tx.goals;const auto r=c.state.right_command,l=c.state.left_command;

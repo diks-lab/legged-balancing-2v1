@@ -1,5 +1,7 @@
 # PS4左Yの実測符号の反映
 
+左Y符号を修正した時点の記録（上下4ポイント/秒）。現行速度は[脚上下速度](ps4-leg-rate.md)を参照。
+
 基準 `129ee91`。利用者の実測では、物理的な上入力がLY=+127。
 従来の `height = -legAxis(LY)` が逆方向を指示していたため、
 `LegControl::rawStick()`だけを `height = legAxis(LY)` へ変更した。
