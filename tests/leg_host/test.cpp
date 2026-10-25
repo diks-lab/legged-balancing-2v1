@@ -10,7 +10,7 @@ void*operator new(size_t n){assert(!forbid);if(auto*p=malloc(n))return p;throw s
 void operator delete(void*p)noexcept{free(p);}void operator delete(void*p,size_t)noexcept{free(p);}
 struct IO {
  uint8_t rx[1024]{},packets[256][24]{};unsigned head=0,tail=0,length[256]{},writes=0,reads=0;
- int read_budget=1024;int capacity=128;bool auto_reply=true,partial=false,bad_sum=false;int16_t right=2036,left=2053;
+ int read_budget=1024;int capacity=128;bool auto_reply=true,partial=false,bad_sum=false;int16_t right=1957,left=2122;
  int available(){return read_budget>0?tail-head:0;}int read(){++reads;--read_budget;return head<tail?rx[head++]:-1;}
  int availableForWrite(){return capacity;}
  void reply(uint8_t id,int16_t pos){
@@ -33,8 +33,8 @@ void check(const leg::Control&c){
 }
 int main(){
  using namespace leg;
- assert(position(true,0)==2061&&position(false,0)==2026);
- assert(position(true,30)==2010&&position(false,30)==2081);
+ assert(position(true,0)==1997&&position(false,0)==2081);
+ assert(position(true,30)==1908&&position(false,30)==2173);
  for(unsigned dt:{1u,5u,20u,50u}){
   Control c(true);c.input(0,true);c.tick(1000,true,false,true,0);c.input(1,true);c.tick(1001,true,false,true,0);
   assert(c.want_sync);assert(c.seed(position(true,15),position(false,15),1001));c.activate(1001);

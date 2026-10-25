@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "LegGeometry.h"
 namespace leg {
 #ifndef LEG_ACCEPT_EXTRA_CONFIRMED
 #define LEG_ACCEPT_EXTRA_CONFIRMED 0
@@ -9,15 +10,16 @@ static_assert(LEG_ACCEPT_EXTRA_CONFIRMED==0||LEG_ACCEPT_EXTRA_CONFIRMED==1,"acce
 #if !defined(LEG_ACCEPT_RIGHT_MIN) || !defined(LEG_ACCEPT_RIGHT_MAX) || !defined(LEG_ACCEPT_LEFT_MIN) || !defined(LEG_ACCEPT_LEFT_MAX)
 #error "Confirmed acceptance requires all four mechanically verified tick limits"
 #endif
-static_assert(LEG_ACCEPT_RIGHT_MIN>=-32767&&LEG_ACCEPT_RIGHT_MAX<=32767&&
- LEG_ACCEPT_LEFT_MIN>=-32767&&LEG_ACCEPT_LEFT_MAX<=32767,"acceptance exceeds STS signed position representation");
-static_assert(LEG_ACCEPT_RIGHT_MIN<=2010&&LEG_ACCEPT_RIGHT_MAX>=2061&&
- LEG_ACCEPT_LEFT_MIN<=2026&&LEG_ACCEPT_LEFT_MAX>=2081,"acceptance must include unchanged operating tick limits");
+static_assert(LEG_ACCEPT_RIGHT_MIN>=measuredMinTick(true)&&LEG_ACCEPT_RIGHT_MAX<=measuredMaxTick(true)&&
+ LEG_ACCEPT_LEFT_MIN>=measuredMinTick(false)&&LEG_ACCEPT_LEFT_MAX<=measuredMaxTick(false),"acceptance exceeds measured stroke");
+static_assert(LEG_ACCEPT_RIGHT_MIN<=normalMinTick(true)&&LEG_ACCEPT_RIGHT_MAX>=normalMaxTick(true)&&
+ LEG_ACCEPT_LEFT_MIN<=normalMinTick(false)&&LEG_ACCEPT_LEFT_MAX>=normalMaxTick(false),"acceptance must include normal operating tick limits");
 #endif
 struct Acceptance {
- int16_t right_min=2010,right_max=2061,left_min=2026,left_max=2081;
+ int16_t right_min=normalMinTick(true),right_max=normalMaxTick(true),left_min=normalMinTick(false),left_max=normalMaxTick(false);
  bool extra=false;
- bool valid()const{return right_min>=-32767&&left_min>=-32767&&right_min<=2010&&right_max>=2061&&left_min<=2026&&left_max>=2081;}
+ bool valid()const{return measured(true,right_min)&&measured(true,right_max)&&measured(false,left_min)&&measured(false,left_max)&&
+  right_min<=normalMinTick(true)&&right_max>=normalMaxTick(true)&&left_min<=normalMinTick(false)&&left_max>=normalMaxTick(false);}
  bool contains(bool right,int16_t tick)const{
   if(!valid())return false;
   return tick>=(right?right_min:left_min)&&tick<=(right?right_max:left_max);

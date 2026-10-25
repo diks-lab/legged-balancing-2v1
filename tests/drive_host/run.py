@@ -186,7 +186,7 @@ struct {
   if(n==8){
    ++reads;
    if(mode){
-    const uint16_t pos=mode==5?(p[2]==1?measuredRight:measuredLeft):mode==4?(p[2]==1?1977:2082):(p[2]==1?(mode==2?2009:2036):2053);
+    const uint16_t pos=mode==5?(p[2]==1?measuredRight:measuredLeft):mode==4?(p[2]==1?1675:2412):(p[2]==1?(mode==2?1907:1957):2122);
     const uint8_t data[]={255,255,p[2],uint8_t(p[6]+2),0,uint8_t(pos),uint8_t(pos>>8),0,0,0};
     memcpy(rx,data,sizeof(data));
     if(p[5]==9){rx[5]=rx[6]=0;rx[7]=255;rx[8]=15;}
@@ -1052,7 +1052,7 @@ int main(){
 
   // Confirmed minimum envelope through actual callbacks/FIFO/STOP/Share path.
   bootFixture();serviceBootAutoStart();step();
-  leg_control=leg::Control(false,leg::Acceptance{1977,2061,2026,2082,true});
+  leg_control=leg::Control(false,leg::Acceptance{1675,2007,2071,2412,true});
   ps4_was_connected=false;PS4.ok=true;setupPs4Controller();PS4.connect_cb();updatePs4Controller();
   auto measuredCycle=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();};
   auto measuredInput=[&](const Ps4InputState&v){PS4.input=v;PS4.input_cb();measuredCycle();};
@@ -1061,15 +1061,15 @@ int main(){
   Serial2.mode=4;const auto heldGoals=Serial2.goals;measuredInput(legUp);
   for(unsigned i=0;i<500;++i)measuredCycle();
   assert(leg_control.state.active&&leg_control.state.recovery==1&&Serial2.goals==heldGoals+1);
-  assert(leg_control.state.right_command==1977&&leg_control.state.left_command==2082);
+  assert(leg_control.state.right_command==1675&&leg_control.state.left_command==2412);
   measuredInput(legNeutral);measuredInput(measuredDown);
   for(unsigned i=0;i<500;++i)measuredCycle();
-  assert(leg_control.state.right_command>1977&&leg_control.state.left_command<2082);
+  assert(leg_control.state.right_command>1675&&leg_control.state.left_command<2412);
   measuredInput(legNeutral);for(unsigned i=0;i<200;++i)measuredCycle();
   const auto pauseR=leg_control.state.right_command,pauseL=leg_control.state.left_command;
   for(unsigned i=0;i<200;++i)measuredCycle();
   assert(leg_control.state.right_command==pauseR&&leg_control.state.left_command==pauseL);
-  measuredInput(measuredDown);for(unsigned i=0;i<7000&&leg_control.state.recovery;++i)measuredCycle();
+  measuredInput(measuredDown);for(unsigned i=0;i<22000&&leg_control.state.recovery;++i)measuredCycle();
   assert(!leg_control.state.recovery&&leg::inRange(true,leg_control.target(true))&&leg::inRange(false,leg_control.target(false)));
   assert(!lqr_direction_test_armed&&!balance_wait_active);
 

@@ -16,9 +16,11 @@ function legMeasurementLines(packet, fresh) {
       lines.push(`${name}：未取得（0 tickではありません）`);
       continue;
     }
-    const [ms, count, current, minimum, maximum] = data;
+    const [ms, count, current, minimum, maximum, currentPct, minTickPct, maxTickPct] = data;
+    const pct = v => Number.isFinite(v) ? `${v.toFixed(2)}%` : '換算未受信';
     const validity = valid & (1 << i) ? '正常応答の取得値' : '通信失敗・最後の正常取得値';
     lines.push(`${name}：現在（最終取得） ${current} tick ／ 最小 ${minimum}・最大 ${maximum} tick
+換算：現在 ${pct(currentPct)} ／ 最小tick ${pct(minTickPct)} ／ 最大tick ${pct(maxTickPct)}
 取得 ${ms} ms ／ ${count} 回 ／ ${validity}${status === 1 && fresh ? '' : '・測定更新停止'}`);
   }
   lines.push(`測定失敗：${reason(error)} ／ 最近の開始拒否：${rejected ? `${reason(rejection)} @ ${rejected} ms` : 'なし'}`);

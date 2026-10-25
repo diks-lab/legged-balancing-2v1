@@ -82,6 +82,6 @@ int main(){
  observed.state.positions.current=3;observed.state.positions.word[0]=encodePosition(1900);observed.state.positions.word[1]=encodePosition(2200);
  log.capture(observed.state,4,1600);observed.state.reason=Reason::PositionRange;log.capture(observed.state,0,1601);emit();
  assert(sink.text.find("LEG ACCEPTANCE: 初回受付範囲外 (OUTSIDE_INITIAL_RANGE) right=1900")!=std::string::npos);
- assert(sink.text.find("left=2200 limits=")!=std::string::npos&&sink.text.find("no preload/ON")!=std::string::npos);
+ assert(sink.text.find("left=2200 (")!=std::string::npos&&sink.text.find("no preload/ON")!=std::string::npos);
  printf("PASS: explicit measurement pure READ both sides/outside acceptance, extrema/reset/end, split echo, failures/timeouts/partial/capacity, no seed/goal/ON or limit changes; measurement=%zu state=%zu bus=%zu records=%zu\n",sizeof(Measurement),sizeof(State),sizeof(bus),sizeof(log));
 }

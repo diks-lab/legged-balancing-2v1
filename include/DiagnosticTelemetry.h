@@ -169,7 +169,7 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
  const auto&a=l.acceptance;const auto&cfg=l.configuration;
  j.add(",\"leg_accept\":[%u,%u,%d,%d,%d,%d,%u,%u],\"leg_config\":[%lu,%lu,%lu,%u,%u,%u,%u,%u,%u",
   unsigned(a.extra),unsigned(a.valid()),int(a.right_min),int(a.right_max),int(a.left_min),int(a.left_max),
-  unsigned(l.recovery),unsigned(l.return_directions),(unsigned long)cfg.started_ms,(unsigned long)cfg.finished_ms,
+  unsigned(l.recovery),unsigned(l.recovery?leg::returnDirections(l.right_percent,l.left_percent):0),(unsigned long)cfg.started_ms,(unsigned long)cfg.finished_ms,
   (unsigned long)cfg.rejected_ms,unsigned(cfg.status),unsigned(cfg.error),unsigned(cfg.step),unsigned(cfg.acquired),unsigned(cfg.current),unsigned(cfg.reject_reason));
  for(unsigned side=0;side<2;++side){
   const unsigned limits=side*2,mode=limits+1;
@@ -179,14 +179,22 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   j.add("]");
  }
  j.add("]");
+ j.add(",\"leg_geometry\":[");
+ for(unsigned side=0;side<2;++side){const bool right=side==0;
+  j.add("%s[%d,%d,%d,%d,%d,%d,%d,%d]",side?",":"",leg::zeroTick(right),leg::fullTick(right),
+   leg::retractMargin(right),leg::extendMargin(right),leg::safeMinTick(right),leg::safeMaxTick(right),
+   leg::normalMinTick(right),leg::normalMaxTick(right));
+ }
+ j.add(",[%.0f,%.0f]]",double(leg::MinPercent),double(leg::MaxPercent));
  const auto&m=l.measurement;
  j.add(",\"leg_measure\":[%lu,%lu,%lu,%lu,%u,%u,%u,%u,%u,%u",
   (unsigned long)m.started_ms,(unsigned long)m.finished_ms,(unsigned long)m.rejected_ms,(unsigned long)m.revision,
   unsigned(m.status),unsigned(m.acquired),unsigned(m.valid),unsigned(m.side),unsigned(m.error),unsigned(m.reject_reason));
  for(unsigned side=0;side<2;++side){
   j.add(",[%lu,%lu,",(unsigned long)m.sample_ms[side],(unsigned long)m.count[side]);
-  if(m.acquired&(1u<<side))j.add("%d,%d,%d",int(m.latest[side]),int(m.minimum[side]),int(m.maximum[side]));
-  else j.add("null,null,null");
+  if(m.acquired&(1u<<side))j.add("%d,%d,%d,%.6g,%.6g,%.6g",int(m.latest[side]),int(m.minimum[side]),int(m.maximum[side]),
+   double(leg::percent(side==0,m.latest[side])),double(leg::percent(side==0,m.minimum[side])),double(leg::percent(side==0,m.maximum[side])));
+  else j.add("null,null,null,null,null,null");
   j.add("]");
  }
  j.add("]");

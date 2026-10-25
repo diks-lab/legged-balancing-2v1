@@ -179,8 +179,8 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       assert(legResult.positionText[0].includes('30.769230%') && legResult.positionText[0].includes('2010～2061'));
       assert(legResult.positionText[0].includes('通常操作範囲外（初回受付は別判定）'));
       assert(legResult.positionText[1].includes('操作範囲内'));
-      assert(legResult.positionText[2].includes('初回受付・保持範囲と通常操作0～30%は別'));
-      assert(legResult.positionText[2].includes('機械的限界は未設定'));
+      assert(legResult.positionText[2].includes('初回受付・保持範囲と通常駆動'));
+      assert(legResult.positionText[2].includes('実測端と余裕を別に設定'));
       assert(legResult.rxBlocker.includes('左：ID・状態・チェックサム'));
       assert(legResult.rx[1].includes('期待 0x02 ／ 取得 0x01'));
       assert(legResult.rx[3].includes('期待 0x00 ／ 取得 0x20'));
@@ -195,7 +195,8 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
         window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
           leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
           leg_roll_confirmed: false, leg_roll_sign: 1,
-          leg_accept: [0, 1, 2010, 2061, 2026, 2081, 0, 0],
+          leg_accept: [0, 1, 1908, 1997, 2081, 2173, 0, 0],
+          leg_geometry: [[2007, 1675, 10, 10, 1685, 1997, 1908, 1997], [2071, 2412, 10, 10, 2081, 2402, 2081, 2173], [0, 30]],
           leg_config: [1000, 1151, 0, 2, 0, 4, 15, 15, 0,
             [1001, 1051, 0, 4095, 0], [1101, 1151, 0, 4095, 1]],
           legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
@@ -207,7 +208,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.waitForFunction(() => document.getElementById('leg-config-request').textContent.includes('読取要求を送信'));
       assert.deepEqual(legReadRequests, ['POST']);
       const configText = await page.locator('#leg-config-values').textContent();
-      assert(configText.includes('追加受付：無効（既定）') && configText.includes('0～4095'));
+      assert(configText.includes('初回受付：通常範囲のみ') && configText.includes('0～4095'));
       assert(configText.includes('0（位置モード）') && configText.includes('1（車輪モード）'));
       await page.evaluate(() => {
         document.getElementById('leg-config').open = false;
@@ -226,10 +227,11 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
         leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
         leg_measure: [100, 0, 0, 3, 1, 3, 3, 0, 0, 0,
-          [200, 2, 1900, 1890, 1977], [250, 2, 2200, 2082, 2200]],
+          [200, 2, 1900, 1890, 1977, 32.2289, 35.24096, 9.03614], [250, 2, 2200, 2082, 2200, 37.8299, 3.2258, 37.8299]],
         legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
       }) }));
       await page.waitForFunction(() => document.getElementById('leg-measure-values').textContent.includes('最小 1890・最大 1977'));
+      assert((await page.locator('#leg-measure-values').textContent()).includes('換算：現在 32.23%'));
       await page.click('#leg-measure-stop');
       await page.waitForFunction(() => document.getElementById('leg-measure-action').textContent.includes('終了要求を送信'));
       assert.deepEqual(legMeasureRequests, [['legs/measure/start', 'POST'], ['legs/measure/stop', 'POST']]);

@@ -7,10 +7,8 @@
 #include "LegMeasurement.h"
 namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
-constexpr int RightHome=2061,RightExtended=1892,LeftHome=2026,LeftExtended=2208;
 constexpr uint16_t ServoSpeed=150;
 constexpr uint8_t ServoAcceleration=15;
-constexpr float MinPercent=0,MaxPercent=30;
 constexpr float HeightRate=4;             // percentage points/s, deliberately slow
 constexpr float RollRate=2,MaxRoll=3;     // deg/s, deg
 constexpr float RollGain=1;              // differential extension pp/deg
@@ -31,17 +29,24 @@ constexpr float ImuRollSign=LEG_IMU_ROLL_SIGN; // ignored for actuation until co
 constexpr uint32_t SendIntervalMs=50,ReplyTimeoutMs=10,SyncMaxAgeMs=250;
 inline float clamp(float x,float lo,float hi){return fmaxf(lo,fminf(hi,x));}
 inline float toward(float x,float target,float step){return x+clamp(target-x,-step,step);}
-inline int16_t position(bool right,float percent){
- return int16_t(lroundf((right?RightHome:LeftHome)+
-   ((right?RightExtended:LeftExtended)-(right?RightHome:LeftHome))*clamp(percent,0,30)/100));
+// Common displacement preserves both legs' existing difference. Every interval contains zero.
+inline void movementBounds(float rightPct,float leftPct,float&low,float&high,bool inward){
+ low=-100000;high=100000;const float values[]={rightPct,leftPct};
+ for(unsigned side=0;side<2;++side){
+  const bool right=side==0;const float p=values[side],lo=normalLow(right),hi=normalHigh(right);
+  float loDelta=lo-p,hiDelta=hi-p;
+  if(inward&&p>hi)hiDelta=0;
+  if(inward&&p<lo)loDelta=0;
+  low=fmaxf(low,loDelta);high=fminf(high,hiDelta);
+ }
 }
-inline float percent(bool right,int16_t pos){
- return 100.f*(pos-(right?RightHome:LeftHome))/
-   ((right?RightExtended:LeftExtended)-(right?RightHome:LeftHome));
+inline uint8_t returnDirections(float rightPct,float leftPct){
+ float lo,hi;movementBounds(rightPct,leftPct,lo,hi,true);
+ return uint8_t((hi>.00001f?1:0)|(lo<-.00001f?2:0));
 }
-inline bool inRange(bool right,int16_t pos){
- const int home=position(right,0),end=position(right,30);
- return pos>=fminf(home,end)&&pos<=fmaxf(home,end);
+inline bool conflictingReturn(float rightPct,float leftPct){
+ return (rightPct>normalHigh(true)||leftPct>normalHigh(false))&&
+        (rightPct<normalLow(true)||leftPct<normalLow(false));
 }
 // Latest valid protocol observation per side, not a position command/history.
 struct PositionObservation {
@@ -55,7 +60,7 @@ struct PositionObservation {
  }
 };
 enum class Reason:uint8_t { ReleaseRequired,Idle,Syncing,Accepted,Driving,Stopped,
- ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy,Measuring,MeasureStopRequired };
+ ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy,Measuring,MeasureStopRequired,ReturnConflict };
 struct State {
  float height=0,requested_roll=0,applied_roll=0,measured_roll=NAN;
  float right_percent=0,left_percent=0;
@@ -106,8 +111,7 @@ class Control {
  bool seed(int16_t right,int16_t left,uint32_t now){
   if(!accepted(true,right)||!accepted(false,left)){stop(Reason::PositionRange);return false;}
   const bool outside=!inRange(true,right)||!inRange(false,left);
-  const float r=outside?percent(true,right):clamp(percent(true,right),0,30);
-  const float l=outside?percent(false,left):clamp(percent(false,left),0,30);
+  const float r=percent(true,right),l=percent(false,left);
   state.height=(r+l)/2;difference_=(r-l)/2;
   state.right_percent=r;state.left_percent=l;state.requested_roll=state.applied_roll=0;
   state.recovery=outside?1:0;
@@ -127,7 +131,7 @@ class Control {
      previous->reason==uint8_t(state.reason)&&previous->phase==phase&&previous->flags==flags&&previous->mode==state.mode)return;
   const uint8_t prior=previous?previous->reason:255;
   if((state.reason==Reason::PositionRange||state.reason==Reason::ReplyTimeout||state.reason==Reason::ReplyInvalid||
-      state.reason==Reason::TxFailed||state.reason==Reason::ClockGap||state.reason==Reason::RollUnconfirmed||state.reason==Reason::RecoveryDirection||state.reason==Reason::PairLimit)&&prior!=uint8_t(state.reason)){
+      state.reason==Reason::TxFailed||state.reason==Reason::ClockGap||state.reason==Reason::RollUnconfirmed||state.reason==Reason::RecoveryDirection||state.reason==Reason::PairLimit||state.reason==Reason::ReturnConflict)&&prior!=uint8_t(state.reason)){
    o.failure=uint8_t(state.reason);o.failure_ms=now;o.failure_source=uint8_t(source);
   }
   Transition event;event.ms=now;event.sequence=++o.revision;event.gates=o.gates;
@@ -167,7 +171,7 @@ class Control {
   }
   if(state.recovery==1){o.operation=uint8_t(Operation::Release);o.blocker=uint8_t(Reason::RecoveryRelease);return;}
   o.allowed=1;o.operation=uint8_t(Operation::Wait);
-  if(state.recovery&&(state.reason==Reason::RecoveryDirection||state.reason==Reason::PairLimit)){
+  if(state.recovery&&(state.reason==Reason::RecoveryDirection||state.reason==Reason::PairLimit||state.reason==Reason::ReturnConflict)){
    o.allowed=0;o.operation=uint8_t(Operation::Failed);o.blocker=uint8_t(state.reason);return;
   }
   if(!roll_confirmed_&&(keys&12)){o.blocker=uint8_t(Reason::RollUnconfirmed);return;}
@@ -209,8 +213,9 @@ class Control {
    if(state.recovery==1){
     state.reason=Reason::RecoveryRelease;
     if(!keys&&input_gate){
-     state.recovery=2;state.reason=Reason::Accepted;float low,high;pairBounds(low,high,true);
+     state.recovery=2;state.reason=conflictingReturn(state.right_percent,state.left_percent)?Reason::ReturnConflict:Reason::Accepted;float low,high;pairBounds(low,high,true);
      state.return_directions=(high>.00001f?1:0)|(low<-.00001f?2:0);
+     if(!state.return_directions&&state.reason!=Reason::ReturnConflict)state.reason=Reason::PairLimit;
     }
     return;
    }
@@ -221,18 +226,18 @@ class Control {
    const float delta=clamp(requested,low,high);
    state.limited=fabsf(delta-requested)>.00001f;
    if(height_axis&&fabsf(delta)<.000001f){
-    const float rh=percent(true,position(true,30)),lh=percent(false,position(false,30));
+    const float rh=normalHigh(true),lh=normalHigh(false);
     const bool above=state.right_percent>rh||state.left_percent>lh;
-    const bool below=state.right_percent<0||state.left_percent<0;
-    state.reason=((height_axis<0&&above&&!below)||(height_axis>0&&below&&!above))?Reason::PairLimit:Reason::RecoveryDirection;
+    const bool below=state.right_percent<normalLow(true)||state.left_percent<normalLow(false);
+    state.reason=above&&below?Reason::ReturnConflict:((height_axis<0&&above&&!below)||(height_axis>0&&below&&!above))?Reason::PairLimit:Reason::RecoveryDirection;
     return;
    }
    state.right_percent+=delta;state.left_percent+=delta;
    state.height=(state.right_percent+state.left_percent)/2;difference_=(state.right_percent-state.left_percent)/2;
-   state.reason=state.operation.tx_wait?Reason::TxBusy:Reason::Accepted;
+   state.reason=conflictingReturn(state.right_percent,state.left_percent)?Reason::ReturnConflict:!state.return_directions?Reason::PairLimit:state.operation.tx_wait?Reason::TxBusy:Reason::Accepted;
    if(inRange(true,target(true))&&inRange(false,target(false))){
     // Adopt exactly the emitted ticks; never re-level at the mode transition.
-    state.right_percent=clamp(percent(true,target(true)),0,30);state.left_percent=clamp(percent(false,target(false)),0,30);
+    state.right_percent=percent(true,target(true));state.left_percent=percent(false,target(false));
     state.height=(state.right_percent+state.left_percent)/2;difference_=(state.right_percent-state.left_percent)/2;
     state.recovery=state.return_directions=0;roll_rearm_=true;
    }
@@ -246,8 +251,8 @@ class Control {
   if(roll_rearm_&&(keys&12)&&roll_confirmed_)roll_rearm_=false;
   if(roll_confirmed_&&!roll_rearm_&&roll_axis)state.requested_roll=clamp(state.requested_roll+roll_axis*RollRate*dt,-MaxRoll,MaxRoll);
   else if(roll_confirmed_&&!roll_rearm_&&!(keys&12))state.requested_roll=toward(state.requested_roll,0,RollRate*dt);
-  const float rightHi=30,leftHi=30;
-  const float diffLo=fmaxf(-state.height,state.height-leftHi),diffHi=fminf(rightHi-state.height,state.height);
+  const float diffLo=fmaxf(normalLow(true)-state.height,state.height-normalHigh(false)),
+              diffHi=fminf(normalHigh(true)-state.height,state.height-normalLow(false));
   const float room=fminf(fabsf(diffLo),fabsf(diffHi));
   state.applied_roll=roll_confirmed_&&!roll_rearm_?clamp(state.requested_roll,-room/RollGain,room/RollGain):0;
   const float desired=roll_confirmed_&&!roll_rearm_?RollGain*(state.applied_roll-roll):difference_;
@@ -263,17 +268,9 @@ class Control {
  float difference_=0;
  bool armed_=false,roll_confirmed_=false,roll_rearm_=false;
  void pairBounds(float&low,float&high,bool inward)const{
-  low=-100000;high=100000;
-  const float values[]={state.right_percent,state.left_percent};
-  for(unsigned side=0;side<2;++side){
-   const bool right=side==0;const float p=values[side];
-   const float hi=inward?percent(right,position(right,30)):30;
-   float loDelta=-p,hiDelta=hi-p;
-   if(inward&&p>hi)hiDelta=0;
-   if(inward&&p<0)loDelta=0;
-   low=fmaxf(low,loDelta);high=fminf(high,hiDelta);
-  }
+  movementBounds(state.right_percent,state.left_percent,low,high,inward);
  }
+
 
 };
 }

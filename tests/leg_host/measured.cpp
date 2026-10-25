@@ -10,7 +10,7 @@ struct Sink {
  size_t write(const uint8_t*p,size_t n){assert(n<=48&&n<=size_t(room));text.append((const char*)p,n);if(n>maxWrite)maxWrite=n;++cycles;return n;}
 };
 struct IO {
- uint8_t rx[8]{};unsigned at=0,count=0,goals=0,ons=0;int16_t right=1977,left=2082;
+ uint8_t rx[8]{};unsigned at=0,count=0,goals=0,ons=0;int16_t right=1675,left=2412;
  int available(){return count-at;}int read(){return rx[at++];}int availableForWrite(){return 128;}
  size_t write(const uint8_t*p,size_t n){
   if(n==8){const uint16_t v=encodePosition(p[2]==1?right:left);uint8_t r[]={255,255,p[2],4,0,uint8_t(v),uint8_t(v>>8),0};
@@ -21,32 +21,33 @@ struct IO {
  }
 };
 int main(){
- static_assert(ConfiguredAcceptance.extra&&ConfiguredAcceptance.right_min==1977&&ConfiguredAcceptance.right_max==2061&&
- ConfiguredAcceptance.left_min==2026&&ConfiguredAcceptance.left_max==2082,"production confirmed minimum envelope");
- Control c;assert(!c.accepted(true,1976)&&!c.accepted(false,2083));
+ static_assert(ConfiguredAcceptance.extra&&ConfiguredAcceptance.right_min==1675&&ConfiguredAcceptance.right_max==2007&&
+ ConfiguredAcceptance.left_min==2071&&ConfiguredAcceptance.left_max==2412,"production confirmed minimum envelope");
+ Control c;assert(!c.accepted(true,1674)&&!c.accepted(false,2413));
  ServoBus<IO>b;IO io;SerialDiagnostics records;SerialOutput out;Sink sink;
  auto drain=[&](){if(out.idle()){SerialDiagnostics::Record r;uint32_t lost;const bool have=records.pop(r,lost);assert(!lost);if(have)out.begin(r,lost);}out.service(sink);};
  auto cycle=[&](uint32_t t){c.tick(t,true,false,true,0);b.service(io,c,t);c.commit(t,true,Reason::Idle,b.stage(c));records.capture(c.state,b.stage(c),t);drain();};
  auto input=[&](uint8_t k,uint32_t t){c.input(k,true,t);records.input(k,true,t);};
  input(0,1000);cycle(1000);input(1,1001);
  for(unsigned t=1001;t<1600;++t)cycle(t);
- assert(io.goals==1&&io.ons==1&&io.right==1977&&io.left==2082&&c.state.recovery==1);
- assert(sink.text.find("right=1977 left=2082 result=ACCEPTED")!=std::string::npos);
- assert(sink.text.find("initial R=1977..2061 L=2026..2082")!=std::string::npos);
+ assert(io.goals==1&&io.ons==1&&io.right==1675&&io.left==2412&&c.state.recovery==1);
+ assert(sink.text.find("right=1675 (100.000%) left=2412 (100.000%) result=ACCEPTED")!=std::string::npos);
+ assert(sink.text.find("initial R=1675..2007 L=2071..2412")!=std::string::npos);
  assert(sink.text.find("UP=0 DOWN=1")!=std::string::npos);
  input(0,1600);cycle(1600);input(1,1601);cycle(1601);assert(c.state.reason==Reason::RecoveryDirection&&io.goals==1);
  input(4,1602);cycle(1602);assert(io.goals==1&&c.state.reason==Reason::RecoveryDirection);
  input(0,1603);cycle(1603);input(2,1604);
  for(unsigned t=1604;t<2200;++t)cycle(t);
- assert(io.right>1977&&io.left<2082);
+ assert(io.right>1675&&io.left<2412);
  input(0,2200);for(unsigned t=2200;t<2400;++t)cycle(t);
  const auto heldR=io.right,heldL=io.left;const auto goals=io.goals;
  for(unsigned t=2400;t<2600;++t)cycle(t);
  assert(io.right==heldR&&io.left==heldL&&io.goals==goals);
  input(2,2600);unsigned t=2600;
- while(c.state.recovery&&t<12000)cycle(t++);
- assert(!c.state.recovery&&inRange(true,io.right)&&inRange(false,io.left));
+ while(c.state.recovery&&t<26000)cycle(t++);
+ assert(!c.state.recovery&&inRange(true,c.target(true))&&inRange(false,c.target(false)));
  input(0,t++);for(unsigned k=0;k<400;++k)cycle(t++);
+ assert(inRange(true,io.right)&&inRange(false,io.left));
  assert(sink.text.find("LEG STATE: NORMAL_RANGE")!=std::string::npos);
  const auto text=sink.text;for(unsigned k=0;k<1000;++k)cycle(t++);assert(sink.text==text); // no periodic held/idle spam
  // A disconnected/full USB sink never waits or modifies actuator state. Overflow is explicit.
@@ -75,10 +76,10 @@ int main(){
  assert(failureEvents==1);
  SerialDiagnostics readonly;State observed;observed.positions.read_only=true;observed.positions.attempt_ms=600;
  readonly.capture(observed,4,600);observed.positions.current=3;observed.reason=Reason::PositionRange;
- observed.positions.word[0]=1977;observed.positions.word[1]=2082;readonly.capture(observed,0,601);
+ observed.positions.word[0]=1675;observed.positions.word[1]=2412;readonly.capture(observed,0,601);
  unsigned readsDone=0;
  while(readonly.pop(r,lost)){assert(!lost&&r.type!=SerialDiagnostics::SyncFailed);
   if(r.type==SerialDiagnostics::SyncDone){assert(r.allowed);++readsDone;}}
  assert(readsDone==1); // Legacy read-only position query is not a failed motion synchronization.
- printf("PASS: production 1977/2082 exact hold/release/new DOWN/paired return and normal transition; bounded changed-only serial, full sink, loss, RX/config detail; records=%zu output=%zu record=%zu\n",sizeof(records),sizeof(out),sizeof(r));
+ printf("PASS: production 1675/2412 exact hold/release/new DOWN/paired return and normal transition; bounded changed-only serial, full sink, loss, RX/config detail; records=%zu output=%zu record=%zu\n",sizeof(records),sizeof(out),sizeof(r));
 }

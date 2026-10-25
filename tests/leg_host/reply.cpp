@@ -26,6 +26,7 @@ struct IO {
    if(mode==1||mode==7){memcpy(rx+tail,p,8);tail+=8;}
    if(mode!=6){
     uint8_t answer[8];response(answer,p[2]);
+    const auto pos=position(p[2]==RightId,15);answer[5]=uint8_t(pos);answer[6]=uint8_t(pos>>8);checksum(answer,8);
     if(p[2]==bad_target){
      if(mode==2)answer[2]=p[2]==1?2:1;
      if(mode==3)answer[3]=5;

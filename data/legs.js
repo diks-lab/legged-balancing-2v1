@@ -24,12 +24,13 @@ const LEG_BLOCKERS = {
   24: 'サーボ設定を読取り中／再操作前に解放',
   25: '読取り拒否。車輪・脚・他の通信を停止して再要求',
   26: '脚位置の読取り専用測定中',
-  27: '測定拒否。×で全停止・脚トルクOFF後に支持して再要求'
+  27: '測定拒否。×で全停止・脚トルクOFF後に支持して再要求',
+  28: '左右の戻し方向が矛盾。移動せず両脚を保持'
 };
 const LEG_LABELS = {
   mode: '試験モード', available: '操作可否', correction: '左右姿勢補正',
   operation: '現在の操作', blocker: '動作を妨げる理由', sync: '位置同期',
-  height: '高さ指令', roll: '左右傾斜', failure: '直近の操作失敗'
+  height: '高さ指令（サーボ可動量%）', roll: '左右傾斜', failure: '直近の操作失敗'
 };
 function legPresentation(packet, live, elapsed, cache) {
   const l = packet?.legs;
@@ -51,11 +52,11 @@ function legPresentation(packet, live, elapsed, cache) {
     failure: decision.failure
   };
   const detail = valid ? {
-    position: `最終送信位置指令：左 ${l[15] ? l[7] : '未送信'} ／ 右 ${l[15] ? l[6] : '未送信'}（実位置ではありません）`,
+    position: `PS4脚制御の最終送信位置指令：左 ${l[15] ? l[7] : '未送信'} ／ 右 ${l[15] ? l[6] : '未送信'}（実位置ではありません）`,
     timing: `指令 ${l[8]} ms ／ 同期 ${l[9]} ms ／ 診断 ${packet.leg_ms} ms`,
     counters: `送信 ${l[16]} 回 ／ 送信余裕不足 ${l[17]} 回 ／ 処理最大 ${l[18]} us`,
     torque: `トルク：${['未確認', 'OFF送信待ち', 'OFF指令送信済', 'ON指令送信済'][l[11]] || '不明'}（応答未確認）`,
-    limits: `可動制限：${l[14] ? 'あり' : 'なし'} ／ 共通高さ目標 ${n(l[0], '%')}`
+    limits: `可動制限：${l[14] ? 'あり' : 'なし'} ／ 共通サーボ可動量目標 ${n(l[0], '%')}`
   } : { position: '未取得', timing: '未取得', counters: '未取得', torque: '未取得', limits: '未取得' };
   return { values, detail, fresh, note: decision.note };
 }

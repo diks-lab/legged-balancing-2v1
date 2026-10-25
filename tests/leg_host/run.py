@@ -23,6 +23,15 @@ with tempfile.TemporaryDirectory() as tmp:
         'tests/leg_host/measurement.cpp','-o',str(binary),*flags],check=True)
     subprocess.run([str(binary)],check=True)
 
+    subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',
+        'tests/leg_host/geometry.cpp','-o',str(binary),*flags],check=True)
+    subprocess.run([str(binary)],check=True)
+
+    import sys
+    sys.dont_write_bytecode=True
+    import legacy
+    legacy.check(tmp,flags)
+
     # The opt-in flag and measured sign are build settings, not inferred at runtime.
     probe=Path(tmp)/'confirmed.cpp'
     probe.write_text('#include "LegControl.h"\n#include <cassert>\nint main(){\n static_assert(leg::RollDirectionConfirmed,"confirmed build");\n static_assert(leg::ImuRollSign==EXPECTED_SIGN,"measured sign");\n leg::Control c;assert(c.seed(leg::position(true,15),leg::position(false,15),1000));\n c.activate(1000);c.input(4,true);c.tick(1050,true,false,true,-2);\n assert(c.state.requested_roll>0&&c.state.right_percent>c.state.left_percent);\n}\n')
@@ -37,9 +46,9 @@ with tempfile.TemporaryDirectory() as tmp:
     print('PASS: explicit confirmed +/- sign builds and invalid sign rejection')
 
     acceptance=Path(tmp)/'acceptance-flags.cpp'
-    acceptance.write_text('#include "LegControl.h"\n#include <cassert>\nint main(){leg::Control c;assert(c.seed(1977,2082,100));assert(c.state.recovery==1);assert(c.target(true)==1977&&c.target(false)==2082);}\n')
-    configured=['-DLEG_ACCEPT_EXTRA_CONFIRMED=1','-DLEG_ACCEPT_RIGHT_MIN=1950',
-        '-DLEG_ACCEPT_RIGHT_MAX=2100','-DLEG_ACCEPT_LEFT_MIN=2000','-DLEG_ACCEPT_LEFT_MAX=2110']
+    acceptance.write_text('#include "LegControl.h"\n#include <cassert>\nint main(){leg::Control c;assert(c.seed(1675,2412,100));assert(c.state.recovery==1);assert(c.target(true)==1675&&c.target(false)==2412);}\n')
+    configured=['-DLEG_ACCEPT_EXTRA_CONFIRMED=1','-DLEG_ACCEPT_RIGHT_MIN=1675',
+        '-DLEG_ACCEPT_RIGHT_MAX=2007','-DLEG_ACCEPT_LEFT_MIN=2071','-DLEG_ACCEPT_LEFT_MAX=2412']
     subprocess.run(['c++','-std=c++17','-Iinclude',*configured,str(acceptance),'-o',str(binary)],check=True)
     subprocess.run([str(binary)],check=True)
     for bad_flags in (['-DLEG_ACCEPT_EXTRA_CONFIRMED=1'],configured[:-1],

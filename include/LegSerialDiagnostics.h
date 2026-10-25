@@ -43,12 +43,7 @@ class SerialDiagnostics {
   if(s.recovery!=recovery_||s.return_directions!=directions_){
    Record r;r.type=Range;r.ms=now;r.data.sync.recovery=s.recovery;
    r.data.sync.directions=s.return_directions;r.allowed=s.active||s.synced;
-   if(s.recovery==1){
-    const float rh=percent(true,position(true,30)),lh=percent(false,position(false,30));
-    const bool above=s.right_percent>rh||s.left_percent>lh,below=s.right_percent<0||s.left_percent<0;
-    if(above&&!below&&s.right_percent>0&&s.left_percent>0)r.data.sync.directions=2;
-    if(below&&!above&&s.right_percent<rh&&s.left_percent<lh)r.data.sync.directions=1;
-   }
+   if(s.recovery==1)r.data.sync.directions=returnDirections(s.right_percent,s.left_percent);
    push(r);
   }
   if((phase_>=1&&phase_<=6)&&(phase==0||phase==7)&&!s.synced&&!s.active&&!read_done){
@@ -98,7 +93,7 @@ inline const char* serialReason(uint8_t n){
  static const char*const names[]={"RELEASE_REQUIRED","IDLE","SYNCING","ACCEPTED","DRIVING","STOPPED",
   "IMU_INVALID","POSITION_RANGE","REPLY_TIMEOUT","REPLY_INVALID","TX_FAILED","CLOCK_GAP","TX_BUSY",
   "WHEEL_RETRY","ROLL_UNCONFIRMED","INITIALIZING","START_WAITING","EXPLICIT_STOP","CALIBRATING",
-  "POLARITY_TEST","ACCEPTANCE_INVALID","INWARD_ONLY","RELEASE_THEN_PRESS","PAIR_LIMIT","READ_ONLY","CONFIG_BUSY","MEASURE_READ_ONLY","MEASURE_STOP_REQUIRED"};
+  "POLARITY_TEST","ACCEPTANCE_INVALID","INWARD_ONLY","RELEASE_THEN_PRESS","PAIR_LIMIT","READ_ONLY","CONFIG_BUSY","MEASURE_READ_ONLY","MEASURE_STOP_REQUIRED","RETURN_DIRECTIONS_CONFLICT"};
  return n<sizeof(names)/sizeof(*names)?names[n]:"NONE";
 }
 // Consumer-only formatter. A maximum 48-byte write, and no call when TX is full.
@@ -142,9 +137,10 @@ class SerialOutput {
    case D::SyncStart:size_=snprintf(line_,sizeof(line_),"LEG %s: START ms=%lu\n",r.allowed?"READ_ONLY":"SYNC",(unsigned long)r.ms);break;
    case D::SyncFailed:size_=snprintf(line_,sizeof(line_),"LEG SYNC: FAILED reason=%s ms=%lu\n",serialReason(r.reason),(unsigned long)r.ms);break;
    case D::SyncDone:
-    if(!part_)size_=snprintf(line_,sizeof(line_),"LEG %s: right=%d left=%d result=%s mask=%u\n",r.allowed?"READ_ONLY":"SYNC",s.right,s.left,r.allowed?"OBSERVED_NO_MOTION":"ACCEPTED",s.acquired);
-    else size_=snprintf(line_,sizeof(line_),"LEG LIMITS: initial R=%d..%d L=%d..%d; normal R=2010..2061 L=2026..2081 (0..30%%)\n",s.accept.right_min,s.accept.right_max,s.accept.left_min,s.accept.left_max);
-    pending_=part_++==0;break;
+    if(!part_)size_=snprintf(line_,sizeof(line_),"LEG %s: right=%d (%.3f%%) left=%d (%.3f%%) result=%s mask=%u\n",r.allowed?"READ_ONLY":"SYNC",s.right,double(percent(true,s.right)),s.left,double(percent(false,s.left)),r.allowed?"OBSERVED_NO_MOTION":"ACCEPTED",s.acquired);
+    else if(part_==1)size_=snprintf(line_,sizeof(line_),"LEG LIMITS: initial R=%d..%d L=%d..%d; normal R=%d..%d L=%d..%d (servo travel 0..30%% intersect margins)\n",s.accept.right_min,s.accept.right_max,s.accept.left_min,s.accept.left_max,normalMinTick(true),normalMaxTick(true),normalMinTick(false),normalMaxTick(false));
+    else size_=snprintf(line_,sizeof(line_),"LEG GEOMETRY: measured 0/100%% R=%d/%d L=%d/%d; margins R=%d/%d L=%d/%d tick; not linear height\n",RightHome,RightExtended,LeftHome,LeftExtended,RightRetractedMarginTicks,RightExtendedMarginTicks,LeftRetractedMarginTicks,LeftExtendedMarginTicks);
+    pending_=++part_<3;break;
    case D::Range:size_=snprintf(line_,sizeof(line_),s.recovery?
      "LEG STATE: HOLD_OUTSIDE_RANGE; release keys, then NEW inward press; UP=%u DOWN=%u; awaiting_release=%u\n":r.allowed?"LEG STATE: NORMAL_RANGE\n":"LEG STATE: INACTIVE\n",
      unsigned(bool(s.directions&1)),unsigned(bool(s.directions&2)),unsigned(s.recovery==1));break;
@@ -157,16 +153,16 @@ class SerialOutput {
     else {size_=snprintf(line_,sizeof(line_),"LEG RX RAW: ");for(unsigned i=0;i<x.raw_size&&i<sizeof(x.raw);++i)size_+=snprintf(line_+size_,sizeof(line_)-size_,"%02X",x.raw[i]);size_+=snprintf(line_+size_,sizeof(line_)-size_," truncated=%u\n",x.truncated);}
     pending_=++part_<3;break;
    case D::AcceptanceOutside:
-    size_=snprintf(line_,sizeof(line_),"LEG ACCEPTANCE: 初回受付範囲外 (OUTSIDE_INITIAL_RANGE) right=%d limits=%d..%d left=%d limits=%d..%d; no preload/ON\n",
-     s.right,s.accept.right_min,s.accept.right_max,s.left,s.accept.left_min,s.accept.left_max);break;
+    size_=snprintf(line_,sizeof(line_),"LEG ACCEPTANCE: 初回受付範囲外 (OUTSIDE_INITIAL_RANGE) right=%d (%.3f%%) limits=%d..%d left=%d (%.3f%%) limits=%d..%d; no preload/ON\n",
+     s.right,double(percent(true,s.right)),s.accept.right_min,s.accept.right_max,s.left,double(percent(false,s.left)),s.accept.left_min,s.accept.left_max);break;
    case D::MeasureRejected:size_=snprintf(line_,sizeof(line_),"LEG MEASURE: REJECTED reason=%s ms=%lu\n",serialReason(r.reason),(unsigned long)r.ms);break;
    case D::Measure:{
     const auto&m=r.data.measurement;
     if(!part_)size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s start=%lu end=%lu reason=%s; READ ONLY, limits unchanged\n",
      m.status==1?"ACTIVE":m.status==2?"STOPPED":"FAILED",(unsigned long)m.started_ms,(unsigned long)m.finished_ms,m.status==3?serialReason(m.error):"NONE");
     else {const unsigned side=part_-1;const bool have=m.acquired&(1u<<side);
-     if(have)size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s current=%d min=%d max=%d tick sample=%lu count=%lu valid=%u\n",
-      side?"LEFT":"RIGHT",m.latest[side],m.minimum[side],m.maximum[side],(unsigned long)m.sample_ms[side],(unsigned long)m.count[side],unsigned(bool(m.valid&(1u<<side))));
+     if(have)size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s current=%d min=%d max=%d tick pct=%.3f/%.3f/%.3f sample=%lu count=%lu valid=%u\n",
+      side?"LEFT":"RIGHT",m.latest[side],m.minimum[side],m.maximum[side],double(percent(side==0,m.latest[side])),double(percent(side==0,m.minimum[side])),double(percent(side==0,m.maximum[side])),(unsigned long)m.sample_ms[side],(unsigned long)m.count[side],unsigned(bool(m.valid&(1u<<side))));
      else size_=snprintf(line_,sizeof(line_),"LEG MEASURE: %s UNREAD (not zero)\n",side?"LEFT":"RIGHT");
     }
     pending_=++part_<3;break;

@@ -75,7 +75,7 @@ function legPositionPresentation(record, acceptance) {
   const side = (row, index, name) => {
     if (!Array.isArray(row) || row.length !== 11) return `${name}：未取得`;
     const [ms, word, low, high, decoded, percent, min, max, inside, home, extended] = row;
-    const range = `操作判定の整数上下限 ${min}～${max} tick（0～30%）`;
+    const range = `操作判定の整数上下限 ${min}～${max} tick（通常駆動）`;
     if (!(acquired & (1 << index))) return `${name}：未取得 ／ ${range}`;
     const a = acceptance;
     const known = Array.isArray(a) && a.length === 8;
@@ -88,13 +88,13 @@ function legPositionPresentation(record, acceptance) {
 ` +
       `換算 ${pct}%（制限前） ／ ${range} ／ ${inside ? '通常操作範囲内' : '通常操作範囲外（初回受付は別判定）'} ／ ${initial}
 ` +
-      `換算係数 HOME=${home}、100%=${extended}（機械的限界ではありません）`;
+      `サーボ可動量 0%=${home}、100%=${extended} tick（脚の実長・高さとの比例は未確認）`;
   };
   return {
     attempt: `確認開始 ${attempt} ms ／ ${readOnly ? '読取り専用診断' : '操作開始時の実位置同期'}（指令値ではありません）`,
     right: side(right, 0, '右'), left: side(left, 1, '左'),
-    limits: '初回受付・保持範囲と通常操作0～30%は別です。受付範囲内なら現在位置を保持し、解放・再押下から戻し方向だけ許可。' +
-      '読取り専用測定は受付判定をせず、値を許可範囲へ自動反映しません。機械的限界は未設定です。' +
+    limits: '初回受付・保持範囲と通常駆動（0～30%と端余裕の共通範囲）は別です。受付範囲内なら現在位置を保持し、解放・再押下から戻し方向だけ許可。' +
+      '読取り専用測定は受付判定をせず、値を許可範囲へ自動反映しません。実測端と余裕を別に設定し、サーボ角度制限は変更しません。' +
       '整数への既存換算で境界の%値に端数が出ます。表示値を0～30%へ丸めません。'
   };
 }

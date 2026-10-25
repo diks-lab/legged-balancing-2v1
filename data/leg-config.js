@@ -1,14 +1,17 @@
 'use strict';
 function legAcceptanceLines(packet) {
-  const a = packet?.leg_accept;
+  const a = packet?.leg_accept, g = packet?.leg_geometry;
   if (!Array.isArray(a) || a.length !== 8) return ['受付設定：未受信'];
-  const phases = ['通常操作', '範囲外の現在位置保持・キー解放待ち', '手動で操作範囲へ戻す'];
+  const known = Array.isArray(g) && g.length === 3;
+  const phases = ['通常操作', '通常駆動範囲外の位置保持・キー解放待ち', '手動で通常範囲へ戻す'];
   return [
-    `追加受付：${a[0] ? '確認済設定で有効' : '無効（既定）'} ／ 設定整合：${a[1] ? '○' : '×'}`,
+    `初回受付：${a[0] ? '確認済設定で有効' : '通常範囲のみ'} ／ 設定整合：${a[1] ? '○' : '×'}`,
     `初回受付：右 ${a[2]}～${a[3]} tick ／ 左 ${a[4]}～${a[5]} tick`,
-    '通常操作：0～30%（右2010～2061・左2026～2081 tick）。機械的限界とは別です。',
-    `状態：${phases[a[6]] || '不明'} ／ 戻し方向：↑${a[7] & 1 ? '○' : '×'}・↓${a[7] & 2 ? '○' : '×'}`,
-    '初回は読取位置をそのまま保持。範囲外ではキーを解放して再押下。姿勢補正は無効。片側が端なら両脚を止めます。'
+    known ? `通常駆動：右 ${g[0][6]}～${g[0][7]} ／ 左 ${g[1][6]}～${g[1][7]} tick（${g[2][0]}～${g[2][1]}%と端余裕の共通範囲）` : '通常駆動範囲：未受信',
+    known ? `実測0%／100%：右 ${g[0][0]}／${g[0][1]}、左 ${g[1][0]}／${g[1][1]} tick。%はサーボ位置の可動量で、脚長・機体高さとの比例は未確認。` : '実測端：未受信',
+    known ? `端余裕（最縮／最伸）：右 ${g[0][2]}／${g[0][3]}、左 ${g[1][2]}／${g[1][3]} tick・暫定未検証。余裕内側：右 ${g[0][4]}～${g[0][5]}、左 ${g[1][4]}～${g[1][5]} tick。` : '端余裕：未受信',
+    `状態：${phases[a[6]] || '不明'} ／ 解放後の戻し方向：↑${a[7] & 1 ? '○' : '×'}・↓${a[7] & 2 ? '○' : '×'}`,
+    '初回は取得tickをそのまま保持。最縮側は↑、伸長側は↓から戻す。左右の要求方向が矛盾すれば移動せず、片側が進行方向の端なら両脚を停止。自動移動・姿勢補正なし。'
   ];
 }
 function legConfigurationLines(packet) {
@@ -54,7 +57,7 @@ function createLegConfigPanel(section) {
     finally { button.disabled = false; }
   };
   const nodes = [];
-  for (let i = 0; i < 13; i++) {
+  for (let i = 0; i < 15; i++) {
     const p = document.createElement('p');content.appendChild(p);nodes.push(p);
   }
   return nodes;

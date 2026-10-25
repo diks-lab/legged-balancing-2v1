@@ -6,10 +6,10 @@
 #include <initializer_list>
 using namespace leg;
 // These are fictitious mechanically verified limits FOR HOST TESTS ONLY.
-constexpr Acceptance verified{1950,2100,2000,2110,true};
+constexpr Acceptance verified{1675,2007,2071,2412,true};
 struct IO {
  uint8_t rx[32]{},packets[512][24]{};unsigned head=0,tail=0,writes=0,sizes[512]{},at[512]{};
- uint16_t words[2]={1977,2082};int capacity=128,budget=16;bool echo=false,silent=false,partial=false,badMode=false;
+ uint16_t words[2]={1874,2207};int capacity=128,budget=16;bool echo=false,silent=false,partial=false,badMode=false;
  uint32_t now=0;
  int available(){return budget>0?int(tail-head):0;}
  int read(){--budget;return head<tail?rx[head++]:-1;}
@@ -42,49 +42,48 @@ int main(){
   assert(!c.state.active&&c.state.reason==Reason::PositionRange&&io.writes==2);}
  {Control c(false,verified);ServoBus<IO>b;IO io;begin(c,b,io,1000);
   assert(c.state.active&&c.state.recovery==1&&goals(io)==1);
-  assert(io.words[0]==1977&&io.words[1]==2082); // no clamp to 30%, even with held Up
-  assert(c.target(true)==1977&&c.target(false)==2082);
+  assert(io.words[0]==1874&&io.words[1]==2207); // no clamp to 30%, even with held Up
+  assert(c.target(true)==1874&&c.target(false)==2207);
   c.input(0,true,1300);cycle(c,b,io,1300);assert(c.state.recovery==2&&c.state.return_directions==2);
   for(uint32_t t=1301;t<1500;++t)cycle(c,b,io,t);
-  assert(io.words[0]==1977&&io.words[1]==2082&&goals(io)==1); // no automatic return
+  assert(io.words[0]==1874&&io.words[1]==2207&&goals(io)==1); // no automatic return
   c.input(1,true,1500);for(uint32_t t=1500;t<1600;++t)cycle(c,b,io,t);
   assert(c.state.reason==Reason::RecoveryDirection&&goals(io)==1);
   c.input(4,true,1600);cycle(c,b,io,1600);assert(goals(io)==1); // roll rejected
-  c.input(2,true,1601);bool leftEntered=false,leftContinued=false;uint16_t prevR=1977,prevL=2082;
+  c.input(2,true,1601);bool leftEntered=false;uint16_t prevR=1874,prevL=2207;
   uint32_t t=1601;
   for(;t<8000&&c.state.recovery;++t){
    cycle(c,b,io,t);assert(io.words[0]>=prevR&&io.words[1]<=prevL);
    assert(c.accepted(true,decodePosition(io.words[0]))&&c.accepted(false,decodePosition(io.words[1])));
-   if(io.words[1]==2081)leftEntered=true;
-   if(leftEntered&&io.words[1]<2081)leftContinued=true;
+   if(io.words[1]<=2173)leftEntered=true;
    prevR=io.words[0];prevL=io.words[1];
   }
-  assert(!c.state.recovery&&leftEntered&&leftContinued);
+  assert(!c.state.recovery&&leftEntered);
   const int16_t targetR=c.target(true),targetL=c.target(false);
   c.input(0,true,t);for(unsigned k=0;k<200;++k)cycle(c,b,io,t++);
   assert(c.target(true)==targetR&&c.target(false)==targetL); // mode transition/release never re-level
   assert(inRange(true,targetR)&&inRange(false,targetL));
   c.input(2,true,t);
   for(unsigned k=0;k<7000;++k)cycle(c,b,io,t++);
-  assert(c.target(false)==LeftHome&&c.state.limited);
-  const auto right=c.target(true);
+  assert((c.target(true)==position(true,0)||c.target(false)==position(false,0))&&c.state.limited);
+  const auto right=c.target(true),left=c.target(false);
   for(unsigned k=0;k<200;++k)cycle(c,b,io,t++);
-  assert(c.target(true)==right&&c.target(false)==LeftHome); // no one-leg continuation
+  assert(c.target(true)==right&&c.target(false)==left); // no one-leg continuation
  }
  {Control c(true,verified);ServoBus<IO>b;IO io;begin(c,b,io,1000);
   assert(c.state.recovery==1&&goals(io)==1); // even confirmed roll cannot move recovery hold
   c.input(0,true,1300);cycle(c,b,io,1300);assert(goals(io)==1);}
  for(bool conflict:{false,true}){
-  Control c(false,verified);ServoBus<IO>b;IO io;io.words[1]=conflict?2015:2026;begin(c,b,io,1000);
+  Control c(false,verified);ServoBus<IO>b;IO io;io.words[1]=conflict?2071:2081;begin(c,b,io,1000);
   assert(c.state.recovery==1);c.input(0,true,1300);cycle(c,b,io,1300);
   c.input(2,true,1301);for(uint32_t t=1301;t<1500;++t)cycle(c,b,io,t);
-  assert(goals(io)==1&&io.words[0]==1977&&io.words[1]==(conflict?2015:2026));
-  assert(c.state.reason==(conflict?Reason::RecoveryDirection:Reason::PairLimit));
+  assert(goals(io)==1&&io.words[0]==1874&&io.words[1]==(conflict?2071:2081));
+  assert(c.state.reason==(conflict?Reason::ReturnConflict:Reason::PairLimit));
  }
- {Acceptance disabled=verified;disabled.extra=false;Control c(false,disabled);assert(!c.seed(1977,2082,1000));}
+ {Acceptance disabled=verified;disabled.extra=false;Control c(false,disabled);assert(!c.seed(1874,2207,1000));}
  {Acceptance broken{0,100,0,200,true};Control c(false,broken);assert(!c.seed(2036,2053,1000));}
- {Acceptance negative{-100,2100,2000,2110,true};Control c(false,negative);ServoBus<IO>b;IO io;
-  io.words[0]=0x800a;begin(c,b,io,1000);assert(c.state.recovery==1&&io.words[0]==0x800a);}
+ {Acceptance negative{-100,2007,2071,2412,true};Control c(false,negative);assert(!c.seed(-10,2122,1000));
+  assert(encodePosition(-10)==0x800a);}
  // Pure configuration queries: all emitted frames are READ; no position or torque writes.
  for(unsigned failure=0;failure<5;++failure){
   Control c;ServoBus<IO>b;IO io;io.echo=failure==0;io.badMode=failure==1;io.silent=failure==2;

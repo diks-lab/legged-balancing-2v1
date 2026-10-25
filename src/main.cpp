@@ -157,14 +157,12 @@ void wheelAlignTimeout(void*) {
 }
 constexpr uint8_t kRightLegServoId = 1;
 constexpr uint8_t kLeftLegServoId = 2;
-constexpr int16_t kRightLegHomePosition = leg::RightHome;
-constexpr int16_t kRightLegFullyExtendedPosition = leg::RightExtended;
-constexpr int16_t kRightLegTestExtend10PercentPosition = 2044;
+constexpr int16_t kRightLegHomePosition = leg::position(true,0);
+constexpr int16_t kRightLegTestExtend10PercentPosition = leg::position(true,10);
 constexpr uint16_t kRightLegTestSpeed = 150;
 constexpr uint8_t kRightLegTestAcceleration = 15;
-constexpr int16_t kLeftLegHomePosition = leg::LeftHome;
-constexpr int16_t kLeftLegFullyExtendedPosition = leg::LeftExtended;
-constexpr int16_t kLeftLegTestExtend10PercentPosition = 2044;
+constexpr int16_t kLeftLegHomePosition = leg::position(false,0);
+constexpr int16_t kLeftLegTestExtend10PercentPosition = leg::position(false,10);
 constexpr uint16_t kLeftLegTestSpeed = 150;
 constexpr uint8_t kLeftLegTestAcceleration = 15;
 constexpr uint16_t kBothLegsTestSpeed = 150;
@@ -5391,10 +5389,10 @@ void printHelp() {
   Serial.println("  q : print distance-control diagnostics without motor output");
   Serial.println("  v : print speed-control diagnostics without motor output");
   Serial.println("  l : async read-only right/left servo positions (stopped only)");
-  Serial.println("  m : move right leg (ID 1) to 2044");
-  Serial.println("  n : return right leg (ID 1) to HOME 2061");
-  Serial.println("  o : move left leg (ID 2) to 2044 (10% extend)");
-  Serial.println("  y : return left leg (ID 2) to HOME 2026");
+  Serial.printf("  m : right 10%% servo travel target %d\n",kRightLegTestExtend10PercentPosition);
+  Serial.printf("  n : right inner retracted limit %d (not measured 0%% stop)\n",kRightLegHomePosition);
+  Serial.printf("  o : left 10%% servo travel target %d\n",kLeftLegTestExtend10PercentPosition);
+  Serial.printf("  y : left inner retracted limit %d (not measured 0%% stop)\n",kLeftLegHomePosition);
   Serial.println("  w : move both legs to 10% extension");
   Serial.println("  ! : move both legs to 20% extension");
   Serial.println("  @ : move both legs to 30% extension");
@@ -6336,6 +6334,7 @@ void disableLegServoTorqueForTestEnd(const char* reason) {
 }
 
 void moveRightLegForTest(int16_t position) {
+  if(!leg::inRange(true,position)){Serial.println("LEG TEST REJECTED: outside normal drive range");return;}
   if(!prepareLegacyLegAction())return;
   uint8_t ids[] = {kRightLegServoId};
   int16_t positions[] = {position};
@@ -6349,6 +6348,7 @@ void moveRightLegForTest(int16_t position) {
 }
 
 void moveLeftLegForTest(int16_t position, const char* action) {
+  if(!leg::inRange(false,position)){Serial.println("LEG TEST REJECTED: outside normal drive range");return;}
   if(!prepareLegacyLegAction())return;
   uint8_t ids[1] = {kLeftLegServoId};
   int16_t positions[1] = {position};
@@ -6365,23 +6365,8 @@ void moveLeftLegForTest(int16_t position, const char* action) {
   sms_sts.SyncWritePosEx(ids, 1, positions, speeds, accelerations);
 }
 
-int16_t rightLegPositionFromPercent(float percent) {
-  const float constrained_percent = constrain(percent, 0.0f, 100.0f);
-  const float position =
-      kRightLegHomePosition +
-      (kRightLegFullyExtendedPosition - kRightLegHomePosition) *
-          constrained_percent / 100.0f;
-  return static_cast<int16_t>(roundf(position));
-}
-
-int16_t leftLegPositionFromPercent(float percent) {
-  const float constrained_percent = constrain(percent, 0.0f, 100.0f);
-  const float position =
-      kLeftLegHomePosition +
-      (kLeftLegFullyExtendedPosition - kLeftLegHomePosition) *
-          constrained_percent / 100.0f;
-  return static_cast<int16_t>(roundf(position));
-}
+int16_t rightLegPositionFromPercent(float percent) { return leg::position(true,percent); }
+int16_t leftLegPositionFromPercent(float percent) { return leg::position(false,percent); }
 
 void moveBothLegsToPercent(float percent) {
   if(!prepareLegacyLegAction())return;
@@ -6396,7 +6381,7 @@ void moveBothLegsToPercent(float percent) {
                              kBothLegsTestAcceleration};
 
   Serial.println("BOTH LEGS TEST:");
-  Serial.printf("percent=%.1f\n", constrained_percent);
+  Serial.printf("requested_servo_travel_percent=%.1f applied_R=%.3f applied_L=%.3f\n",percent,leg::percent(true,positions[0]),leg::percent(false,positions[1]));
   Serial.printf("right_id=%u\n", ids[0]);
   Serial.printf("right_target=%d\n", positions[0]);
   Serial.printf("left_id=%u\n", ids[1]);

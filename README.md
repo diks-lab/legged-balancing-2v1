@@ -197,6 +197,11 @@ external half-duplex direction/echo behavior must be checked on the machine.
 
 ### Menu
 
+Leg targets use the measured stroke and provisional 10-tick end margins from
+`include/LegGeometry.h`. HOME commands stop inside the measured endpoints;
+percentages describe servo-position travel, not linear leg height. See
+[leg settings and current procedure](docs/ps4-leg-control.md).
+
 Commands are newline-terminated:
 
 | Command | Action / expected result |
@@ -206,8 +211,8 @@ Commands are newline-terminated:
 | `ping3` | Send one standard STS-style Ping to ESP32C3 ID3. A matching, zero-error, length-2 status packet is required; a transmitted-packet echo is logged and ignored. |
 | `pingall` | Run one standard Ping each for ID1, ID2, and ID3. |
 | `pos1`, `pos2` | Read the current raw position at STS address 56 from ID1 or ID2. |
-| `rhome`, `rext` | Move only right ID1 to HOME 2061 or small extension 2044. |
-| `lhome`, `lext` | Move only left ID2 to HOME 2026 or small extension 2044. |
+| `rhome`, `rext` | Move only right ID1 to the inner retracted limit 1997 or 10% servo travel 1974. |
+| `lhome`, `lext` | Move only left ID2 to the inner retracted limit 2081 or 10% servo travel 2105. |
 | `c3ping` | Send the ID3 `0xA0` ASCII command `PING` (expected payload: `OK PONG`). |
 | `c3help` | Send the ID3 `0xA0` ASCII command `HELP` and display its ASCII response. |
 | `c3status` | Send the ID3 `0xA0` ASCII command `STATUS` and display its ASCII response. |

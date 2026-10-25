@@ -8,7 +8,7 @@
 using namespace leg;
 struct IO {
  uint8_t rx[8]{},packets[32][24]{};unsigned at=0,queued=0,writes=0,sizes[32]{};
- uint16_t words[2]={2036,2053};uint8_t corrupt=0;
+ uint16_t words[2]={1957,2122};uint8_t corrupt=0;
  int available(){return int(queued-at);}int read(){return at<queued?rx[at++]:-1;}
  int availableForWrite(){return 128;}
  size_t write(const uint8_t*p,unsigned n){
@@ -33,11 +33,11 @@ int main(){
  assert(decodePosition(0xffff)==-32767);
  struct Case {uint16_t right,left;int rightDecoded,leftDecoded;bool accepted;};
  const Case cases[]={
-  {2036,2053,2036,2053,true}, {2061,2026,2061,2026,true}, {2010,2081,2010,2081,true},
-  {2009,2053,2009,2053,false}, {2062,2053,2062,2053,false},
-  {2036,2025,2036,2025,false}, {2036,2082,2036,2082,false},
-  {0,2053,0,2053,false}, {0x800a,2053,-10,2053,false}, {0xffff,2053,-32767,2053,false},
-  {0xf407,2053,-29703,2053,false}
+  {1957,2122,1957,2122,true}, {1997,2081,1997,2081,true}, {1908,2173,1908,2173,true},
+  {1907,2122,1907,2122,false}, {1998,2122,1998,2122,false},
+  {1957,2080,1957,2080,false}, {1957,2174,1957,2174,false},
+  {0,2122,0,2122,false}, {0x800a,2122,-10,2122,false}, {0xffff,2122,-32767,2122,false},
+  {0xf407,2122,-29703,2122,false}
  };
  for(const auto&test:cases){
   Control c;ServoBus<IO>bus;IO io;io.words[0]=test.right;io.words[1]=test.left;run(c,bus,io,1000);
@@ -56,7 +56,7 @@ int main(){
    assert(io.writes==2&&io.sizes[0]==8&&io.sizes[1]==8); // no clamp, preload or ON
    assert(!c.state.command_valid);
   }
-  if(test.right==2009){
+  if(test.right==1907){
    const char*file=getenv("LEG_POSITION_JSON_OUTPUT");
    if(file){
     diagnostic::Snapshot snapshot{};snapshot.legs=c.state;snapshot.sample_ms=1210;
@@ -67,8 +67,8 @@ int main(){
   const auto saved=seen;c.stop(Reason::Stopped);
   assert(c.state.positions.word[0]==saved.word[0]&&c.state.positions.word[1]==saved.word[1]);
  }
- // The integer 30% endpoint has fractional inverse scaling; diagnostics must not clamp it.
- assert(percent(true,2010)>30&&inRange(true,2010)&&!inRange(true,2009));
+ // Inward quantization keeps the integer endpoint at or below 30%.
+ assert(percent(true,1908)<30&&inRange(true,1908)&&!inRange(true,1907));
  for(uint8_t corrupt:{uint8_t(1),uint8_t(2)}){
   Control c;ServoBus<IO>b;IO io;io.corrupt=corrupt;run(c,b,io,1000);
   assert(!c.state.active&&!c.state.synced);

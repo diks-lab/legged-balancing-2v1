@@ -13,7 +13,8 @@ const legReadyJson = readyFile ? fs.readFileSync(readyFile, 'utf8') : JSON.strin
 const legRxJson = process.env.LEG_RX_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_RX_JSON_OUTPUT, 'utf8') : null;
 const legPositionJson = process.env.LEG_POSITION_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_POSITION_JSON_OUTPUT, 'utf8') : null;
 const legFlowJson = process.env.DRIVE_LEG_FLOW_OUTPUT ? fs.readFileSync(process.env.DRIVE_LEG_FLOW_OUTPUT, 'utf8') : null;
-const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson, legFlowJson });
+const legGeometryJson = process.env.LEG_GEOMETRY_JSON_OUTPUT ? fs.readFileSync(process.env.LEG_GEOMETRY_JSON_OUTPUT, 'utf8') : null;
+const context = vm.createContext({ legReadyJson, legRxJson, legPositionJson, legFlowJson, legGeometryJson });
 for (const name of ['signals.js', 'history.js', 'plot.js', 'diagnosis.js', 'leg-reply.js', 'leg-state.js', 'leg-config.js', 'leg-measure.js', 'legs.js', 'status.js', 'dashboard.js']) {
   vm.runInContext(source(name), context);
 }
@@ -98,8 +99,8 @@ vm.runInContext(`
   }
   if (legPositionJson) {
     const position = legPositionPresentation(JSON.parse(legPositionJson).leg_position);
-    if (!position.right.includes('2009 tick') || !position.right.includes('D9 07') ||
-        !position.right.includes('30.769230%') || !position.right.includes('2010～2061') ||
+    if (!position.right.includes('1907 tick') || !position.right.includes('73 07') ||
+        !position.right.includes('30.120481%') || !position.right.includes('1908～1997') ||
         !position.right.includes('通常操作範囲外（初回受付は別判定）') || !position.left.includes('操作範囲内')) {
       throw Error('real position response -> snapshot -> JSON -> UI');
     }
@@ -121,21 +122,31 @@ vm.runInContext(`
   acceptedPosition[4][4] = 1976;
   if (!legPositionPresentation(acceptedPosition, [1, 1, 1977, 2061, 2026, 2082, 0, 0]).right.includes('tick：範囲外')) throw Error('initial outside');
   const measure = { leg_measure: [100, 0, 0, 3, 1, 3, 3, 0, 0, 0,
-    [200, 2, 1900, 1890, 1977], [250, 2, 2200, 2082, 2200]] };
+    [200, 2, 1900, 1890, 1977, 32.2289, 35.24096, 9.03614], [250, 2, 2200, 2082, 2200, 37.8299, 3.2258, 37.8299]] };
   let measurement = legMeasurementLines(measure, true).join(' / ');
   if (!measurement.includes('最小 1890・最大 1977') || !measurement.includes('現在（最終取得） 2200') ||
-      !measurement.includes('自動反映しません')) throw Error('read only extrema');
+      !measurement.includes('自動反映しません') || !measurement.includes('換算：現在 32.23%')) throw Error('read only extrema');
   measure.leg_measure[4] = 3;measure.leg_measure[6] = 1;measure.leg_measure[8] = 8;
   measurement = legMeasurementLines(measure, false).join(' / ');
   if (!measurement.includes('通信失敗・最後の正常取得値') || !measurement.includes('最終受信情報')) throw Error('measurement failure/stale');
   measure.leg_measure[5] = 0;
   if (!legMeasurementLines(measure, true)[1].includes('未取得（0 tickではありません）')) throw Error('measurement unread');
+  if (legGeometryJson) {
+    const packet = JSON.parse(legGeometryJson);
+    const geometry = legAcceptanceLines(packet).join(' / ');
+    const position = legPositionPresentation(packet.leg_position, packet.leg_accept);
+    if (packet.leg_accept[7] !== 1 || !geometry.includes('右 1908～1997') ||
+        !geometry.includes('2007／1675') || !geometry.includes('最縮／最伸') ||
+        !position.right.includes('実位置 2007 tick') || !position.right.includes('換算 0.000000%') ||
+        !position.right.includes('初回受付 1675～2007 tick：範囲内')) throw Error('real bus snapshot geometry -> UI');
+  }
   const cfgPacket = {
-    leg_accept: [0, 1, 2010, 2061, 2026, 2081, 0, 0],
+    leg_accept: [0, 1, 1908, 1997, 2081, 2173, 0, 0],
+    leg_geometry: [[2007, 1675, 10, 10, 1685, 1997, 1908, 1997], [2071, 2412, 10, 10, 2081, 2402, 2081, 2173], [0, 30]],
     leg_config: [1000, 1151, 0, 2, 0, 4, 15, 15, 0,
       [1001, 1051, 0, 4095, 0], [1101, 1151, 0, 4095, 1]]
   };
-  if (!legAcceptanceLines(cfgPacket).join(' ').includes('無効（既定）')) throw Error('extra default disabled');
+  if (!legAcceptanceLines(cfgPacket).join(' ').includes('通常範囲のみ')) throw Error('extra default disabled');
   const configText = legConfigurationLines(cfgPacket).join(' ');
   if (!configText.includes('0～4095') || !configText.includes('0（位置モード）') ||
       !configText.includes('1（車輪モード）') || !configText.includes('自動適用しません')) throw Error('mode/angle readout');

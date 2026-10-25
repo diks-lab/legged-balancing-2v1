@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include "LegGeometry.h"
 
 #include <cstring>
 
@@ -38,10 +39,10 @@ constexpr uint32_t kBatteryStreamIntervalMs = 1000;
 constexpr uint32_t kMinimumValidAdcMv = 50;
 constexpr uint32_t kMaximumValidAdcMv = 3000;
 
-constexpr int16_t kRightHome = 2061;
-constexpr int16_t kRightExtend = 2044;
-constexpr int16_t kLeftHome = 2026;
-constexpr int16_t kLeftExtend = 2044;
+constexpr int16_t kRightHome = leg::position(true,0);
+constexpr int16_t kRightExtend = leg::position(true,10);
+constexpr int16_t kLeftHome = leg::position(false,0);
+constexpr int16_t kLeftExtend = leg::position(false,10);
 constexpr uint16_t kMoveSpeed = 150;
 constexpr uint8_t kMoveAcceleration = 15;
 
