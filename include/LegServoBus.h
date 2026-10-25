@@ -168,17 +168,28 @@ template<class IO> class ServoBus {
  }
  bool torque(IO&io,Control&c,bool on,uint32_t now){
   uint8_t p[]={255,255,254,8,131,40,1,RightId,uint8_t(on),LeftId,uint8_t(on),0};
-  checksum(p,sizeof(p));if(!send(io,c,p,sizeof(p),now))return false;
+  checksum(p,sizeof(p));const uint32_t busy=c.state.tx_busy;
+  if(!send(io,c,p,sizeof(p),now)){
+   if(on)TxDiagnostics::count(c.state.tx_busy!=busy?c.state.tx.on_wait:c.state.tx.on_failed);
+   return false;
+  }
+  if(on)TxDiagnostics::count(c.state.tx.on_sent);
   c.state.torque=on?3:2;return true;
  }
  bool goal(IO&io,Control&c,int16_t right,int16_t left,uint32_t now){
+  c.state.tx.calculated_right=right;c.state.tx.calculated_left=left;
+  c.state.tx.calculated_ms=now;c.state.tx.calculated_valid=true;
   if(!c.commandAllowed(right,left)){fail(c,Reason::PositionRange,now);return false;}
   uint8_t p[24]={255,255,254,20,131,41,7};
   const uint16_t positions[]={encodePosition(right),encodePosition(left)};
   for(unsigned i=0;i<2;++i){const unsigned at=7+i*8;p[at]=i?LeftId:RightId;p[at+1]=ServoAcceleration;
    p[at+2]=uint8_t(positions[i]);p[at+3]=uint8_t(positions[i]>>8);
    p[at+4]=p[at+5]=0;p[at+6]=uint8_t(ServoSpeed);p[at+7]=uint8_t(ServoSpeed>>8);}
-  checksum(p,sizeof(p));if(!send(io,c,p,sizeof(p),now))return false;
+  checksum(p,sizeof(p));const uint32_t busy=c.state.tx_busy;
+  if(!send(io,c,p,sizeof(p),now)){
+   TxDiagnostics::count(c.state.tx_busy!=busy?c.state.tx.goal_wait:c.state.tx.goal_failed);return false;
+  }
+  TxDiagnostics::count(c.state.tx.goals);
   c.state.right_command=right;c.state.left_command=left;c.state.command_ms=now;c.state.command_valid=true;return true;
  }
 };

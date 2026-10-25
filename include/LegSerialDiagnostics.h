@@ -7,12 +7,21 @@ namespace leg {
 // No formatting, Serial access, allocation or waits in capture/input/pop.
 class SerialDiagnostics {
  public:
- enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected,Sticks,Calibration };
+ enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected,Sticks,Calibration,Motion };
  struct Sync { Geometry geometry;Acceptance accept;int16_t right,left;uint8_t acquired,recovery,directions; };
+ struct MotionState {
+  TxDiagnostics tx;
+  float height=0,roll=0;
+  int16_t sent_right=0,sent_left=0;
+  uint32_t sent_ms=0,coalesced=0;
+  int8_t lx=0,ly=0;
+  uint8_t torque=0,flags=0,reason=0,blocker=255;
+ };
+ static_assert(sizeof(MotionState)<=sizeof(RxFailure),"keep bounded diagnostic record size");
  struct Record {
   uint32_t ms=0;
   Type type=Input;uint8_t keys=0,allowed=0,reason=0;
-  union Payload { Sync sync;RxFailure rx;ServoConfiguration config;Measurement measurement;ps4_control::StickObservation stick;struct { LegCalibration value;Geometry geometry; } calibration;struct { Measurement value;Geometry geometry; } measured;Payload():rx{}{} } data;
+  union Payload { MotionState motion;Sync sync;RxFailure rx;ServoConfiguration config;Measurement measurement;ps4_control::StickObservation stick;struct { LegCalibration value;Geometry geometry; } calibration;struct { Measurement value;Geometry geometry; } measured;Payload():rx{}{} } data;
  };
  static constexpr unsigned Capacity=8,Chunk=48;
  void input(uint8_t keys,bool gate,uint32_t now){
@@ -87,6 +96,7 @@ class SerialDiagnostics {
   if(s.calibration.revision!=calibration_revision_){
    Record r;r.type=Calibration;r.ms=now;r.data.calibration.value=s.calibration;r.data.calibration.geometry=s.geometry;push(r);calibration_revision_=s.calibration.revision;
   }
+  captureMotion(s,now);
   synced_=s.synced;recovery_=s.recovery;directions_=s.return_directions;phase_=phase;
   allowed_=o.allowed;operation_=o.operation;blocker_=o.blocker;decision_keys_=o.raw_keys;
   config_ms_=c.finished_ms;config_status_=c.status;
@@ -95,14 +105,54 @@ class SerialDiagnostics {
   lost=lost_;lost_=0;
   if(!count_){
    if(uint32_t(observed_now_-continuous_ms_)<500)return false;
-   if(input_pending_){r=latest_input_;input_pending_=false;}
-   else if(stick_pending_){r=latest_stick_;stick_pending_=false;}
+   if(motion_count_){
+    r=motion_edges_[motion_head_];motion_head_=(motion_head_+1)%2;--motion_count_;
+    r.data.motion.coalesced=motion_lost_;motion_lost_=0;continuous_ms_=observed_now_;return true;
+   }
+   if(input_pending_&&(!stick_pending_||input_turn_)){r=latest_input_;input_pending_=false;input_turn_=false;}
+   else if(stick_pending_){r=latest_stick_;stick_pending_=false;input_turn_=true;}
    else return false;
    continuous_ms_=observed_now_;return true;
   }
   r=records_[head_];head_=(head_+1)%Capacity;--count_;return true;
  }
  private:
+ // Separate two-edge queue: noisy movement transitions cannot fill the critical FIFO.
+ Record motion_edges_[2];
+ uint8_t motion_head_=0,motion_count_=0,motion_direction_=0;
+ bool final_pending_=false,input_turn_=true;
+ uint32_t motion_lost_=0,final_failures_=0;
+ void pushMotion(const Record&r){
+  if(motion_count_==2){motion_edges_[(motion_head_+1)%2]=r;TxDiagnostics::count(motion_lost_);return;}
+  motion_edges_[(motion_head_+motion_count_)%2]=r;++motion_count_;
+ }
+ void captureMotion(const State&s,uint32_t now){
+  // Observe accepted/routed intent even when it produces no applied movement.
+  // The packet observer bit selects the real PS4 path; core tests use applied rates.
+  const uint8_t direction=(s.stick.flags&32)?
+   ((s.stick.flags&65)==65?s.operation.raw_keys:0):
+   (s.active?ps4_control::directions(s.stick.applied_height,s.stick.applied_roll):0);
+  Record r;r.type=Motion;r.ms=now;
+  auto&m=r.data.motion;m.tx=s.tx;m.height=s.stick.applied_height;m.roll=s.stick.applied_roll;
+  m.sent_right=s.right_command;m.sent_left=s.left_command;m.sent_ms=s.command_ms;
+  m.lx=s.stick.lx;m.ly=s.stick.ly;m.torque=s.torque;m.reason=uint8_t(s.reason);
+  m.blocker=s.operation.committed?s.operation.blocker:uint8_t(s.reason);
+  m.flags=(s.tx.calculated_valid?1:0)|(s.command_valid?2:0)|(s.limited?4:0)|(s.synced?8:0)|(s.active?16:0)|(s.stick.flags&1?32:0);
+  const bool pending=s.tx.calculated_valid&&(!s.command_valid||s.tx.calculated_right!=s.right_command||s.tx.calculated_left!=s.left_command);
+  if(direction!=motion_direction_){
+   r.allowed=direction?(motion_direction_?3:1):2;pushMotion(r);
+   if(!direction){
+    final_pending_=s.active&&pending;final_failures_=s.tx.goal_failed;
+    if(latest_stick_.type==Motion)stick_pending_=false;
+   }else final_pending_=false;
+   motion_direction_=direction;
+  }
+  if(final_pending_&&(!pending||!s.active||s.tx.goal_failed!=final_failures_)){
+   r.allowed=4;pushMotion(r);final_pending_=false;
+   if(latest_stick_.type==Motion)stick_pending_=false;
+  }
+  if(direction||final_pending_){r.allowed=0;latest_stick_=r;stick_pending_=true;}
+ }
  Record records_[Capacity],latest_input_,latest_stick_;
  uint32_t observed_now_=0,continuous_ms_=0,calibration_revision_=0,seen_refusals_=0;
  bool input_pending_=false,stick_pending_=false;
@@ -205,6 +255,18 @@ class SerialOutput {
     else size_=snprintf(line_,sizeof(line_),"PS4 APPLIED: leg_height=%+.3f leg_roll=%+.3f drive_request=%+.3f m/s yaw_request=%+.3f V (before profile/limits)\n",
      double(i.applied_height),double(i.applied_roll),double(i.drive),double(i.yaw));
     pending_=part_++==0;break;
+   }
+   case D::Motion:{
+    const auto&m=r.data.motion;const auto&t=m.tx;
+    static const char*const event[]={"PROGRESS","START","END","CHANGE","FINAL_UART"};
+    static const char*const torque[]={"UNKNOWN","OFF_PENDING","OFF_SENT_UNCONFIRMED","ON_SENT_UNCONFIRMED"};
+    if(!part_)size_=snprintf(line_,sizeof(line_),"LEG MOTION: %s ms=%lu raw_LX_LY=%d/%d applied=%+.3f/%+.3f calc_RL=%d/%d valid=%u calc_ms=%lu\n",
+     r.allowed<5?event[r.allowed]:"UNKNOWN",(unsigned long)r.ms,int(m.lx),int(m.ly),double(m.height),double(m.roll),t.calculated_right,t.calculated_left,unsigned(bool(m.flags&1)),(unsigned long)t.calculated_ms);
+    else if(part_==1)size_=snprintf(line_,sizeof(line_),"LEG UART: last_RL=%d/%d valid=%u last_ms=%lu goal_sent=%lu wait=%lu failed=%lu flags=%02X\n",
+     m.sent_right,m.sent_left,unsigned(bool(m.flags&2)),(unsigned long)m.sent_ms,(unsigned long)t.goals,(unsigned long)t.goal_wait,(unsigned long)t.goal_failed,unsigned(m.flags));
+    else size_=snprintf(line_,sizeof(line_),"LEG TORQUE: %s on_sent=%lu wait=%lu failed=%lu reason=%s blocker=%s edge_coalesced=%lu\n",
+     m.torque<4?torque[m.torque]:"UNKNOWN",(unsigned long)t.on_sent,(unsigned long)t.on_wait,(unsigned long)t.on_failed,serialReason(m.reason),serialReason(m.blocker),(unsigned long)m.coalesced);
+    pending_=++part_<3;break;
    }
    case D::Calibration:{
     const auto&v=r.data.calibration.value;const auto&g=r.data.calibration.geometry;

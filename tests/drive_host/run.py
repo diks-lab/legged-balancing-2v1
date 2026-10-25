@@ -93,6 +93,8 @@ template<class T, class L, class H> T constrain(T x,L lo,H hi) {
 }
 std::function<void()> onSerialOutput;
 struct DriveSerial : FakeSerial {
+  using FakeSerial::write;
+  size_t write(const uint8_t*p,size_t n){assert(n<=48&&n<=size_t(room));output.append(reinterpret_cast<const char*>(p),n);return n;}
   void println(const char* s="") {
     if(onSerialOutput) onSerialOutput();
     output += std::string(s)+"\n";
@@ -253,7 +255,7 @@ prefix += source[source.index('struct HttpResponseTransport {'):source.index('vo
 prefix += source[source.index('struct CalibrationNvs {'):source.index('void loadWheelCalibration(){')]
 prefix += source[source.index('extern "C" void observeImuTransaction('):source.index('void observeFocAlignPoint(', source.index('extern "C" void observeImuTransaction('))]
 names = ['loadLegCalibration','legCalibrationCommand','serviceLegCalibrationResult','serviceLegSaveWorker',
-    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','recordLegInput','captureLegSerial','readLegConfiguration','legMeasurementStopped','startLegMeasurement','stopLegMeasurement','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
+    'handleWheelCalibrationRequest','handleWheelCalibrationAbort','loadWheelCalibration','saveWheelCalibration','requestWheelCalibration','fallRecoveryChecks','serviceFallAutoRecovery','serviceWheelFaultDiagnostics','serviceLegControl','serviceLegSerial','recordLegInput','captureLegSerial','readLegConfiguration','legMeasurementStopped','startLegMeasurement','stopLegMeasurement','disableLegServoTorqueForTestEnd','prepareLegacyLegAction','acquireRuntimeMeasurements','reportWheelCommunication','updateStoppedMeasurements','bootAutoMeasurementsReady','serviceBootAutoStart','serviceHttpFileResponse','recordBoundedHttpResult','sendSmallHttpResponse',
     'updateTestLqrOutput','lqrTestModeLogName','lqrTestModeDisplayName','lqrSpeedSourceName',
     'requestLqrDrive','requestLqrSoftStop','startPendingLqrDrive','updateLqrDiagnostic',
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
@@ -1440,7 +1442,7 @@ int main(){
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
-checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
+checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
 with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     cpp=Path(directory)/'drive.cpp';binary=Path(directory)/'drive'

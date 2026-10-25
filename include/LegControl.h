@@ -63,6 +63,14 @@ struct PositionObservation {
 };
 enum class Reason:uint8_t { ReleaseRequired,Idle,Syncing,Accepted,Driving,Stopped,
  ImuInvalid,PositionRange,ReplyTimeout,ReplyInvalid,TxFailed,ClockGap,TxBusy,WheelRetry,RollUnconfirmed,Initializing,StartWaiting,ExplicitStop,Calibrating,PolarityTest,AcceptanceInvalid,RecoveryDirection,RecoveryRelease,PairLimit,ConfigReadOnly,ConfigBusy,Measuring,MeasureStopRequired,ReturnConflict,CalibrationRequired };
+// Diagnostic observations only. A successful UART write is NOT servo feedback.
+struct TxDiagnostics {
+ uint32_t goals=0,goal_wait=0,goal_failed=0,on_sent=0,on_wait=0,on_failed=0;
+ uint32_t calculated_ms=0;
+ int16_t calculated_right=0,calculated_left=0;
+ bool calculated_valid=false;
+ static void count(uint32_t&value){if(value!=UINT32_MAX)++value;}
+};
 struct State {
  float height=0,requested_roll=0,applied_roll=0,measured_roll=NAN;
  float right_percent=0,left_percent=0;
@@ -72,6 +80,7 @@ struct State {
  uint8_t torque=0; // unknown, OFF pending, OFF queued, ON queued; never physical feedback
  bool active=false,synced=false,limited=false,command_valid=false;
  uint8_t mode=0; // unavailable, supported stopped test, stationary balance
+ TxDiagnostics tx;
  RxFailure rx_failure;
  PositionObservation positions;
  OperationObservation operation;
@@ -142,6 +151,10 @@ class Control {
  void activate(uint32_t now){state.active=true;state.reason=state.recovery?Reason::RecoveryRelease:Reason::Accepted;last_=now;}
  void tick(uint32_t now,bool eligible,bool moving,bool imu_valid,float roll){
   update(now,eligible,moving,imu_valid,roll);
+  if(state.synced&&validGeometry(activeGeometry())){
+   state.tx.calculated_right=target(true);state.tx.calculated_left=target(false);
+   state.tx.calculated_ms=now;state.tx.calculated_valid=true;
+  }
   observe(Source::Control,now,state.operation.phase);
  }
  void observe(Source source,uint32_t now,uint8_t phase){

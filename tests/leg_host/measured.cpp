@@ -46,7 +46,7 @@ int main(){
  input(2,2600);unsigned t=2600;
  while(c.state.recovery&&t<26000)cycle(t++);
  assert(!c.state.recovery&&inRange(true,c.target(true))&&inRange(false,c.target(false)));
- input(0,t++);for(unsigned k=0;k<400;++k)cycle(t++);
+ input(0,t++);for(unsigned k=0;k<1800;++k)cycle(t++); // drain 2 Hz final-send/edge diagnostics
  assert(inRange(true,io.right)&&inRange(false,io.left));
  assert(sink.text.find("LEG STATE: NORMAL_RANGE")!=std::string::npos);
  const auto text=sink.text;for(unsigned k=0;k<1000;++k)cycle(t++);assert(sink.text==text); // no periodic held/idle spam
