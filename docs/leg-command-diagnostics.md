@@ -28,7 +28,7 @@ PS4の受理された左入力の開始／終了／方向変更を、制御側�
 同期中・範囲外保持・左右補正未確認等では、入力があっても適用0になり得る。
 
 ```text
-LEG MOTION: START ms=... raw_LX_LY=0/127 applied=-1.000/+0.000 calc_RL=1697/2408 valid=1 calc_ms=...
+LEG MOTION: START ms=... raw_LX_LY=0/-128 applied=-1.000/+0.000 calc_RL=1697/2408 valid=1 calc_ms=...
 LEG UART: last_RL=1697/2408 valid=1 last_ms=... goal_sent=1 wait=0 failed=0 flags=3B
 LEG TORQUE: ON_SENT_UNCONFIRMED on_sent=1 wait=0 failed=0 reason=ACCEPTED blocker=NONE edge_coalesced=0
 ```

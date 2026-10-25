@@ -106,7 +106,8 @@ class Control {
  }
  void rawStick(int8_t lx,int8_t ly,int8_t rx,int8_t ry,uint32_t received){
   auto&s=state.stick;s.lx=lx;s.ly=ly;s.rx=rx;s.ry=ry;s.ms=received;
-  s.height=-ps4_control::legAxis(ly);s.roll=-ps4_control::legAxis(lx);
+  // Measured PS4 axes: physical UP is positive LY. Convert once here.
+  s.height=ps4_control::legAxis(ly);s.roll=-ps4_control::legAxis(lx);
   state.operation.raw_keys=ps4_control::directions(s.height,s.roll);
  }
  void stickInput(int8_t lx,int8_t ly,int8_t rx,int8_t ry,bool gate,uint32_t now,uint32_t received){

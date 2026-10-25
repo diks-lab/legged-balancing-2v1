@@ -13,7 +13,7 @@
       Serial2.mode=1;
     };
     Ps4InputState zero{},up{},down{},left{},diagonal{},forward{},yaw{},reserved{};
-    up.left_stick_y=-128;down.left_stick_y=127;left.left_stick_x=-128;
+    up.left_stick_y=127;down.left_stick_y=-128;left.left_stick_x=-128;
     diagonal=up;diagonal.left_stick_x=-128;forward.right_stick_y=-127;yaw.right_stick_x=127;
     // D-pad has no actuator effect and does not act as a drive start/release condition.
     fixture(false);const auto dReads=Serial2.reads,dGoals=Serial2.goals;
@@ -30,13 +30,13 @@
     assert(leg_control.state.stick.applied_height==1&&leg_control.state.stick.applied_roll==0&&leg_control.state.requested_roll==0);
     assert(leg_control.state.operation.allowed&&leg_control.state.operation.operation==uint8_t(leg::Operation::Extend));
     send(zero);wait(100);const auto heldHeight=leg_control.state.height;wait(500);near(leg_control.state.height,heldHeight);
-    // Actual callback half input and no-notification hold retain time-based proportional speed.
-    fixture(true);Ps4InputState half{};half.left_stick_y=-72;send(half);wait(350);assert(leg_control.state.active);
+    // Actual callback near-half input (56/111) and no-notification hold retain time-based proportional speed.
+    fixture(true);Ps4InputState half{};half.left_stick_y=72;send(half);wait(350);assert(leg_control.state.active);
     const float halfStart=leg_control.state.height;wait(1000);
-    assert(fabsf(leg_control.state.height-halfStart-2.f)<.005f);
+    assert(fabsf(leg_control.state.height-halfStart-(4.f*56.f/111.f))<.005f);
     send(zero);wait(50);const float halfHold=leg_control.state.height;wait(200);near(leg_control.state.height,halfHold);
-    Ps4InputState tiny{};tiny.left_stick_y=-17;send(tiny);const float tinyStart=leg_control.state.height;wait(1000);
-    assert(fabsf(leg_control.state.height-tinyStart-4.f/112.f)<.002f);
+    Ps4InputState tiny{};tiny.left_stick_y=17;send(tiny);const float tinyStart=leg_control.state.height;wait(1000);
+    assert(fabsf(leg_control.state.height-tinyStart-4.f/111.f)<.002f);
     // Right alone cannot start balance/drive in the bench, and it freezes legs.
     send(forward);wait(100);send(yaw);wait(50);assert(!lqr_direction_test_armed&&!balance_wait_active&&!lqr_drive_start_pending&&!leg_control.state.active);
     send(up);wait(300); // Right was centered but left never returned to center after priority.

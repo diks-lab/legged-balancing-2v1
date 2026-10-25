@@ -9,7 +9,7 @@
     auto send=[&](const Ps4InputState&packet){PS4.input=packet;PS4.input_cb();cycle();};
     auto wait=[&](unsigned ms){for(unsigned i=0;i<ms;++i)cycle();};
     ps4_was_connected=false;PS4.ok=true;setupPs4Controller();PS4.connect_cb();cycle();
-    Ps4InputState center{},stop{},share{},down{};stop.cross=true;share.share=true;down.left_stick_y=127;
+    Ps4InputState center{},stop{},share{},down{};stop.cross=true;share.share=true;down.left_stick_y=-128;
     send(center);send(stop);send(center);send(share);send(center);
     Serial2.mode=5;Serial2.measuredRight=1697;Serial2.measuredLeft=2408;
     const auto beforeGoals=Serial2.goals,beforeOns=Serial2.ons;

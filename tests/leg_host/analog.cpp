@@ -11,11 +11,11 @@ int main(){
  assert(ps4_control::legAxis(127)==1&&ps4_control::legAxis(-128)==-1);
  assert(ps4_control::legAxis(17)>0&&ps4_control::legAxis(17)<.01f);
  assert(ps4_control::legAxis(-72)==-.5f);
- for(unsigned dt:{1u,5u,20u,50u})for(int raw:{-16,-17,-72,-128}){
+ for(unsigned dt:{1u,5u,20u,50u})for(int raw:{-16,-17,-72,-128,16,17,72,127}){
   Control c;assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
   c.stickInput(0,int8_t(raw),0,0,true,1000,1000);const float initial=c.state.height;
   for(uint32_t t=1000+dt;t<=2000;t+=dt)c.tick(t,true,false,true,35);
-  assert(fabsf(c.state.height-initial-4.f*(-ps4_control::legAxis(raw)))<.002f);
+  assert(fabsf(c.state.height-initial-4.f*ps4_control::legAxis(raw))<.002f);
   const auto h=c.state.height;c.stickInput(0,0,0,0,true,2001,2001);c.tick(2051,true,false,true,-35);
   assert(fabsf(c.state.height-h)<.00001f);
  }
@@ -30,7 +30,7 @@ int main(){
   c.stickInput(-128,0,0,0,true,1001,1001);c.tick(1001,true,false,true,30);c.commit(1001,true,Reason::Idle,0);
   assert(!c.want_sync&&!c.state.operation.allowed&&c.state.operation.blocker==uint8_t(Reason::RollUnconfirmed));
   // X-only does not consume a previously confirmed center; adding Y permits height only.
-  c.stickInput(-128,-128,0,0,true,1002,1002);c.tick(1002,true,false,true,30);assert(c.want_sync);
+  c.stickInput(-128,127,0,0,true,1002,1002);c.tick(1002,true,false,true,30);assert(c.want_sync);
   assert(c.seed(position(true,15),position(false,15),1002));c.activate(1002);c.tick(1052,true,false,true,30);
   c.commit(1052,true,Reason::Idle,8);
   assert(c.state.stick.applied_height==1&&c.state.stick.applied_roll==0&&c.state.requested_roll==0);
@@ -45,7 +45,7 @@ int main(){
  // Raw observation is independent of routing; stale input cannot change command rates.
  {Control c;assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
   c.stickInput(0,0,0,0,true,1000,1000);const auto h=c.state.height;
-  c.rawStick(0,-128,127,-128,999);c.tick(1050,true,false,true,0);assert(c.state.height==h&&c.state.stick.height==1);
+  c.rawStick(0,127,127,-128,999);c.tick(1050,true,false,true,0);assert(c.state.height==h&&c.state.stick.height==1);
  }
  // Stable raw input, accepted rate and changing timestamps alone never produce repeated records.
  {SerialDiagnostics log;Control c;assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);

@@ -650,9 +650,9 @@ int main(){
   packet.options=true;processPs4Input(packet,nowMs+=50);assert(balance_wait_active);
   // D-pad supplies held axes, gated by the same connection release handshake.
   setupCase();leg_control=leg::Control{};handlePs4Connection(false);handlePs4Connection(true);
-  packet={};packet.left_stick_y=-127;processPs4Input(packet,nowMs+=50);
+  packet={};packet.left_stick_y=127;processPs4Input(packet,nowMs+=50);
   assert(leg_control.keys==0);
-  packet={};processPs4Input(packet,nowMs+=50);packet.left_stick_y=-127;packet.left_stick_x=127;
+  packet={};processPs4Input(packet,nowMs+=50);packet.left_stick_y=127;packet.left_stick_x=127;
   processPs4Input(packet,nowMs+=50);assert(leg_control.keys==9);
   processPs4Input(packet,nowMs+=50);assert(leg_control.keys==9); // identical held input remains active
   handlePs4Connection(false);assert(leg_control.keys==0&&!leg_control.input_gate);
@@ -945,7 +945,7 @@ int main(){
   bootFixture();serviceBootAutoStart();step();
   handlePs4Connection(false);handlePs4Connection(true);
   Ps4InputState legNeutral{},legStop{},legShare{},legUp{};
-  legStop.cross=true;legShare.share=true;legUp.left_stick_y=-127;
+  legStop.cross=true;legShare.share=true;legUp.left_stick_y=127;
   processPs4Input(legNeutral,nowMs);serviceLegControl();
   processPs4Input(legStop,nowMs+=5);serviceLegControl();
   assert(emergency_stop_active&&leg_control.state.mode==0);
@@ -990,7 +990,7 @@ int main(){
     PS4.connect_cb();updatePs4Controller();
     auto cycleLeg=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();publishDiagnosticSnapshot(true);};
     auto sendLeg=[&](const Ps4InputState&input){PS4.input=input;PS4.input_cb();cycleLeg();};
-    Ps4InputState neutral{},cross{},share{},up{};cross.cross=true;share.share=true;up.left_stick_y=-127;
+    Ps4InputState neutral{},cross{},share{},up{};cross.cross=true;share.share=true;up.left_stick_y=127;
     sendLeg(neutral);sendLeg(cross);sendLeg(neutral);sendLeg(share);sendLeg(neutral);
     assert(!emergency_stop_active&&!lqr_direction_test_armed&&!balance_wait_active);
     assert(leg_control.state.operation.allowed&&leg_control.state.operation.blocker==255);
@@ -1060,7 +1060,7 @@ int main(){
   ps4_was_connected=false;PS4.ok=true;setupPs4Controller();PS4.connect_cb();updatePs4Controller();
   auto measuredCycle=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();};
   auto measuredInput=[&](const Ps4InputState&v){PS4.input=v;PS4.input_cb();measuredCycle();};
-  Ps4InputState measuredDown{};measuredDown.left_stick_y=127;
+  Ps4InputState measuredDown{};measuredDown.left_stick_y=-128;
   measuredInput(legNeutral);measuredInput(legStop);measuredInput(legNeutral);measuredInput(legShare);measuredInput(legNeutral);
   Serial2.mode=4;const auto heldGoals=Serial2.goals;measuredInput(legUp);
   for(unsigned i=0;i<500;++i)measuredCycle();
@@ -1442,7 +1442,7 @@ int main(){
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
-checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
+checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
 with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     cpp=Path(directory)/'drive.cpp';binary=Path(directory)/'drive'

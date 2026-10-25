@@ -212,14 +212,14 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       });
       await page.evaluate(() => window.peer.onmessage({ data: JSON.stringify({ type: 'wheel_diagnostics', boot_id: 'boot-test',
         leg_ms: window.sequence * 50, leg_age_ms: 0, leg_state: window.legState(1),
-        leg_stick: [100, -128, -72, 0, 0, .5, 1, .5, 0, 0, 0, 97],
+        leg_stick: [100, -128, 72, 0, 0, 56/111, 1, 56/111, 0, 0, 0, 97],
         leg_accept: [0, 1, 1908, 1997, 2081, 2173, 0, 0],
         leg_geometry: [[2007, 1675, 10, 10, 1685, 1997, 1908, 1997], [2071, 2412, 10, 10, 2081, 2402, 2081, 2173], [0, 30]],
         leg_config: [1000, 1151, 0, 2, 0, 4, 15, 15, 0, [1001, 1051, 0, 4095, 0], [1101, 1151, 0, 4095, 1]],
         legs: [0, 0, 0, 0, null, null, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 1, 0, 0]
       }) }));
-      await page.waitForFunction(() => document.getElementById('leg-stick-0').textContent.includes('LX=-128 LY=-72 RX=0 RY=0'));
-      assert((await page.locator('#leg-stick-2').textContent()).includes('上下 0.500 ／ 左右 0.000'));
+      await page.waitForFunction(() => document.getElementById('leg-stick-0').textContent.includes('LX=-128 LY=72 RX=0 RY=0'));
+      assert((await page.locator('#leg-stick-2').textContent()).includes('上下 0.505 ／ 左右 0.000'));
       await page.click('#leg-read-config');
       await page.waitForFunction(() => document.getElementById('leg-config-request').textContent.includes('読取要求を送信'));
       assert.deepEqual(legReadRequests, ['POST']);

@@ -140,12 +140,12 @@ vm.runInContext(`
         !position.right.includes('実位置 2007 tick') || !position.right.includes('換算 0.000000%') ||
         !position.right.includes('初回受付 1675～2007 tick：範囲内')) throw Error('real bus snapshot geometry -> UI');
   }
-  const stickPacket = { leg_stick: [100, -128, -72, 0, 0, .5, 1, .5, 0, 0, 0, 97] };
+  const stickPacket = { leg_stick: [100, -128, 72, 0, 0, 56/111, 1, 56/111, 0, 0, 0, 97] };
   let stickText = legStickLines(stickPacket, true).join(' / ');
-  if (!stickText.includes('LX=-128 LY=-72 RX=0 RY=0') || !stickText.includes('上下 0.500') ||
+  if (!stickText.includes('LX=-128 LY=72 RX=0 RY=0') || !stickText.includes('上下 0.505') ||
       !stickText.includes('左右 0.000') || !stickText.includes('DZ±16') || !stickText.includes('両軸±10')) throw Error('raw/applied stick split');
   if (!legStickLines(stickPacket, false)[0].includes('最終受信情報')) throw Error('stale stick');
-  const rightPriority = { ...stickPacket, leg_stick: [100, 0, -128, 127, -127, 1, 0, 0, 0, .05, .1, 109] };
+  const rightPriority = { ...stickPacket, leg_stick: [100, 0, -128, 127, -127, -1, 0, 0, 0, .05, .1, 109] };
   if (!legStickLines(rightPriority, true).join(' / ').includes('右優先○') ||
       !legStickLines(rightPriority, true).join(' / ').includes('速度 0.050')) throw Error('right priority observation');
   const cfgPacket = {
