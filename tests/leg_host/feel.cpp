@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <initializer_list>
 using namespace leg;
-static_assert(HeightRate==12&&RollGain==3&&MaxRoll==3&&DifferentialRate==8&&RollRate==8.f/3);
+static_assert(HeightRate==24&&RollGain==3&&MaxRoll==3&&DifferentialRate==16&&RollRate==16.f/3);
 static_assert(ServoSpeed==150&&ServoAcceleration==15&&SendIntervalMs==50&&TargetHysteresisTicks==.25f);
 int main(){
  activeGeometry()=ConfirmedCandidate;
@@ -28,7 +28,7 @@ int main(){
    const float angle=c.state.requested_roll,diff=(c.state.right_percent-c.state.left_percent)/2;
    c.tick(t,true,false,true,0);
    assert(fabsf(c.state.requested_roll-angle)<=RollRate*dt*.001f+.00001f);
-   assert(fabsf((c.state.right_percent-c.state.left_percent)/2-diff)<=8*dt*.001f+.00001f);
+   assert(fabsf((c.state.right_percent-c.state.left_percent)/2-diff)<=16*dt*.001f+.00001f);
    assert(c.state.height==height&&inRange(true,c.target(true))&&inRange(false,c.target(false)));
   };
   for(unsigned t=dt;t<=2000;t+=dt)advance(start+t);
@@ -45,12 +45,12 @@ int main(){
   // Y is a HOME-centered position demand, with the same bounded rate.
   c.stickInput(0,int8_t(raw),0,0,true,start+8500,start+8500);const float h=c.state.height;
   for(unsigned t=8500+dt;t<=9500;t+=dt)c.tick(start+t,true,false,true,0);
-  assert(fabsf(c.state.height-h-clamp(heightTarget(heightInput(ps4_control::legAxis(raw)))-h,-12.f,12.f))<.002f);
+  assert(fabsf(c.state.height-h-clamp(heightTarget(heightInput(ps4_control::legAxis(raw)))-h,-24.f,24.f))<.002f);
   c.stickInput(0,0,0,0,true,start+9500,start+9500);const auto held=c.state.height;
   for(unsigned t=9500+dt;t<=10500;t+=dt)c.tick(start+t,true,false,true,0);
   assert(fabsf(c.state.height-homeHeight())<=fabsf(held-homeHeight()));
   for(unsigned t=10500+dt;t<=11500;t+=dt)c.tick(start+t,true,false,true,0);
   assert(fabsf(c.state.height-homeHeight())<.0001f);
  }
- puts("PASS: monotone soft curve/DZ/endpoints; direct position roll holds without accumulation, reversal/center <=8 pp/s at 1/2/5/10/20/50ms, Y HOME-position/return, sync-only compensation gate");
+ puts("PASS: monotone soft curve/DZ/endpoints; direct position roll holds without accumulation, reversal/center <=16 pp/s at 1/2/5/10/20/50ms, Y HOME-position/return, sync-only compensation gate");
 }

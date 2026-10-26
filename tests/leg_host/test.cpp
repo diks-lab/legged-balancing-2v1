@@ -39,11 +39,11 @@ int main(){
   Control c(true);c.input(0,true);c.tick(1000,true,false,true,0);c.input(1,true);c.tick(1001,true,false,true,0);
   assert(c.want_sync);assert(c.seed(position(true,15),position(false,15),1001));c.activate(1001);
   const float initial=c.state.height;
-  for(uint32_t now=1001+dt;now<=2001;now+=dt){c.tick(now,true,false,true,0);check(c);}
-  near(c.state.height,initial+HeightRate); // independent of packet/loop count
-  c.input(3,true);c.tick(2051,true,false,true,0);near(c.state.height,toward(initial+HeightRate,homeHeight(),.6f));
-  c.input(0,true);c.tick(2101,true,false,true,0);near(c.state.height,toward(initial+HeightRate,homeHeight(),1.2f));
-  c.input(4,true);for(uint32_t now=2151;now<=4101;now+=50)c.tick(now,true,false,true,0);
+  for(uint32_t now=1001+dt;now<=1501;now+=dt){c.tick(now,true,false,true,0);check(c);}
+  near(c.state.height,initial+HeightRate*.5f); // independent of packet/loop count
+  c.input(3,true);c.tick(1551,true,false,true,0);near(c.state.height,toward(initial+HeightRate*.5f,homeHeight(),1.2f));
+  c.input(0,true);c.tick(1601,true,false,true,0);near(c.state.height,toward(initial+HeightRate*.5f,homeHeight(),2.4f));
+  c.input(4,true);for(uint32_t now=1651;now<=4101;now+=50)c.tick(now,true,false,true,0);
   near(c.state.requested_roll,MaxRoll);assert(c.state.right_percent>c.state.left_percent);
   const float height=c.state.height,target=c.state.requested_roll;
   c.input(12,true);c.tick(4151,true,false,true,0);near(c.state.requested_roll,target);

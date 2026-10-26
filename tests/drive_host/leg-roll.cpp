@@ -22,7 +22,7 @@ int main(){
   assert(leg::decodePosition(uint16_t(Serial2.last_goal[17])|(uint16_t(Serial2.last_goal[18])<<8))==leg_control.state.left_command);};
  for(unsigned dt:{1u,5u,10u,20u,50u}){
   fixture();mpu6050.roll=0;period=dt;send(left);wait(500-dt);
-  assert(fabsf(leg_control.state.requested_roll-(8.f/3*.5f))<.001f);
+  assert(fabsf(leg_control.state.requested_roll-(16.f/3*.5f))<.001f);
   send(center);wait(500-dt);assert(fabsf(leg_control.state.requested_roll)<.001f);wait(dt);
   Ps4InputState half=left;half.left_stick_x=-72;send(half);wait(1000-dt);
   assert(fabsf(leg_control.state.requested_roll-.9375f)<.001f);

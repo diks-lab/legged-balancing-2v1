@@ -12,11 +12,11 @@ constexpr uint8_t RightId=1,LeftId=2;
 constexpr uint16_t ServoSpeed=150;
 constexpr uint8_t ServoAcceleration=15;
 constexpr float HomeRangeFraction=.5f;    // normal operational HOME, distinct from retracted legacy HOME
-constexpr float HeightRate=12;            // maximum servo-travel percentage points/s
+constexpr float HeightRate=24;            // maximum servo-travel percentage points/s
 constexpr float MaxRoll=3;              // direct stick-position target limit, deg
 constexpr float RollGain=3;              // differential extension pp/deg
 constexpr float TargetHysteresisTicks=.25f; // extra margin around the half-tick boundary; command coordinates only
-constexpr float DifferentialRate=8;      // pp/s, limits feedback-induced movement
+constexpr float DifferentialRate=16;      // pp/s, limits feedback-induced movement
 // Match target slew to the differential actuator budget: P * deg/s = pp/s.
 constexpr float RollRate=DifferentialRate/RollGain;
 constexpr float HeightCurveBlend=.5f,RollCurveBlend=.5f;

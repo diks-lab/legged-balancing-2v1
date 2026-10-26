@@ -1,6 +1,6 @@
   // Actual PS4 pipeline at different control periods, with unchanged UART cadence.
   {
-    static_assert(leg::HeightRate==12&&leg::SendIntervalMs==50&&leg::ServoSpeed==150&&leg::ServoAcceleration==15&&!leg::RollDirectionConfirmed,"height rate only; preserve bus/servo/roll settings");
+    static_assert(leg::HeightRate==24&&leg::SendIntervalMs==50&&leg::ServoSpeed==150&&leg::ServoAcceleration==15&&!leg::RollDirectionConfirmed,"height rate only; preserve bus/servo/roll settings");
     const auto old=leg::activeGeometry();leg::activeGeometry()=leg::ConfirmedCandidate;
     uint32_t period=1;
     auto cycle=[&](){
@@ -31,7 +31,7 @@
       const auto before=nowMs;send(input);wait(1000-dt);
       assert(nowMs-before==1000);
       const float target=leg::clamp(leg::heightTarget(leg::heightInput(ps4_control::legAxis(input.left_stick_y))),initial+low,initial+high);
-      assert(fabsf(leg_control.state.height-initial-leg::clamp(target-initial,-12.f,12.f))<.01f);
+      assert(fabsf(leg_control.state.height-initial-leg::clamp(target-initial,-24.f,24.f))<.01f);
       wait(2000);assert(fabsf(leg_control.state.height-target)<.01f); // held input is a position
       send(center);wait(2000);const auto r=leg_control.state.right_command,l=leg_control.state.left_command;
       assert(fabsf(leg_control.state.height-leg::homeHeight())<.001f);
@@ -46,14 +46,14 @@
     assert(Serial2.goals==preload&&leg_control.state.reason==leg::Reason::RecoveryDirection);
     assert(leg::recoveryHint(leg_control.state)==1);
     publishDiagnosticSnapshot(true);char profile[2048];assert(diagnostic::wheelReadMessage(profile,sizeof(profile),diagnostic_latest,"rate"));
-    assert(strstr(profile,"\"leg_rate\":12")&&strstr(profile,"\"leg_hint\":1"));
+    assert(strstr(profile,"\"leg_rate\":24")&&strstr(profile,"\"leg_hint\":1"));
     send(center);send(down);wait(1000);
-    assert(fabsf(leg_control.state.right_percent-88)<.03f&&fabsf(leg_control.state.left_percent-88)<.03f);
+    assert(fabsf(leg_control.state.right_percent-76)<.03f&&fabsf(leg_control.state.left_percent-76)<.03f);
     wait(7500); // enter normal range and stop at the paired retracted endpoint
     assert(!leg_control.state.recovery&&leg_control.state.limited);
     const auto atEnd=Serial2.goals;const int r=leg_control.state.right_command,l=leg_control.state.left_command;
     assert(leg::inRange(true,r)&&leg::inRange(false,l));wait(500);
     assert(Serial2.goals==atEnd&&leg_control.state.right_command==r&&leg_control.state.left_command==l);
     leg::activeGeometry()=old;
-    std::cout<<"PASS: PS4 -> UART 12 pp/s bounded HOME-position input at 1/2/5/10/20/50 ms; central HOME return, exact preload, return hint and paired endpoint stop\n";
+    std::cout<<"PASS: PS4 -> UART 24 pp/s bounded HOME-position input at 1/2/5/10/20/50 ms; central HOME return, exact preload, return hint and paired endpoint stop\n";
   }

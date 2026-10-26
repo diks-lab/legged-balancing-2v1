@@ -6,16 +6,16 @@
 #include <string>
 using namespace leg;
 int main(){
- static_assert(HeightRate==12&&RollRate==8.f/3&&MaxRoll==3,"preserve rates and roll limit");
+ static_assert(HeightRate==24&&RollRate==16.f/3&&MaxRoll==3,"preserve rates and roll limit");
  assert(ps4_control::legAxis(16)==0&&ps4_control::legAxis(-16)==0);
  assert(ps4_control::legAxis(127)==1&&ps4_control::legAxis(-128)==-1);
  assert(ps4_control::legAxis(17)>0&&ps4_control::legAxis(17)<.01f);
  assert(ps4_control::legAxis(-72)==-.5f);
  for(unsigned dt:{1u,5u,20u,50u})for(int raw:{-16,-17,-72,-128,16,17,72,127}){
   Control c;assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
-  c.stickInput(0,int8_t(raw),0,0,true,1000,1000);const float initial=c.state.height;
+  c.stickInput(0,int8_t(raw),0,0,true,1000,1000);const float initial=c.state.height;float lo,hi;movementBounds(c.state.right_percent,c.state.left_percent,lo,hi,false);
   for(uint32_t t=1000+dt;t<=2000;t+=dt)c.tick(t,true,false,true,35);
-  assert(fabsf(c.state.height-initial-(ps4_control::legAxis(raw)==0?0:clamp(heightTarget(heightInput(ps4_control::legAxis(raw)))-initial,-12.f,12.f)))<.002f);
+  assert(fabsf(c.state.height-initial-(ps4_control::legAxis(raw)==0?0:clamp(heightTarget(heightInput(ps4_control::legAxis(raw)))-initial,lo,hi)))<.002f);
   const auto h=c.state.height;c.stickInput(0,0,0,0,true,2001,2001);c.tick(2051,true,false,true,-35);
   assert(fabsf(c.state.height-homeHeight())<=fabsf(h-homeHeight())+.00001f);
  }

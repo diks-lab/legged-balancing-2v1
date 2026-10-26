@@ -21,7 +21,7 @@
     const auto start=nowMs;send(down);wait(2999);
     assert(nowMs-start==3000&&leg_control.state.stick.applied_height==-1);
     const int targetR=leg_control.target(true),targetL=leg_control.target(false);
-    assert(targetR>=1821&&targetR<=1823&&targetL>=2290&&targetL<=2292);
+    assert(targetR>=1946&&targetR<=1948&&targetL>=2174&&targetL<=2176);
     assert(leg_control.state.tx.calculated_right==targetR&&leg_control.state.tx.calculated_left==targetL);
     assert(Serial2.goals>beforeGoals+30&&leg_control.state.right_command>1697&&leg_control.state.left_command<2408);
     assert(leg_control.state.tx.goals==Serial2.goals-beforeGoals);
@@ -31,7 +31,7 @@
     assert(Serial.output.find("LEG MOTION: START")!=std::string::npos&&Serial.output.find("LEG MOTION: END")!=std::string::npos);
     assert(Serial.output.find("ON_SENT_UNCONFIRMED")!=std::string::npos&&Serial.output.find("goal_sent=")!=std::string::npos);
     assert(Serial.output.find("短縮して通常範囲へ戻す必要あり")!=std::string::npos);
-    assert(Serial.output.find("LEG PROFILE: max_height=12 pp/s")!=std::string::npos);
+    assert(Serial.output.find("LEG PROFILE: max_height=24 pp/s")!=std::string::npos);
     assert(Serial.output.find("last_RL=")!=std::string::npos&&Serial.output.find("calc_RL=")!=std::string::npos);
     assert(!lqr_direction_test_armed&&!lqr_auto_drive_active);
     leg_serial_records.setDetailed(false);

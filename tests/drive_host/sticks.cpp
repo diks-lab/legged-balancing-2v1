@@ -26,7 +26,7 @@
     fixture(true);const auto xReads=Serial2.reads;send(left);wait(250);
     assert(Serial2.reads==xReads&&!leg_control.state.active&&leg_control.state.operation.blocker==uint8_t(leg::Reason::RollUnconfirmed));
     send(diagonal);wait(400);assert(leg_control.state.active&&!lqr_direction_test_armed&&!lqr_drive_start_pending);
-    const auto oldHeight=leg_control.state.height;wait(500);assert(leg_control.state.height>oldHeight);
+    const auto oldHeight=leg_control.state.height;wait(100);assert(leg_control.state.height>oldHeight);
     assert(leg_control.state.stick.applied_height==1&&leg_control.state.stick.applied_roll==0&&leg_control.state.requested_roll==0);
     assert(leg_control.state.operation.allowed&&leg_control.state.operation.operation==uint8_t(leg::Operation::Extend));
     send(zero);wait(2000);near(leg_control.state.height,leg::homeHeight());

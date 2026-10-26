@@ -25,12 +25,12 @@
     };
     fixture(2000,2120);
     auto r=leg_control.state.right_command,l=leg_control.state.left_command;auto goals=Serial2.goals;
-    send(up);wait(1000);assert(leg_control.keys==1&&leg_control.state.stick.height==1&&leg_control.state.stick.applied_height==1);
+    send(up);wait(200);assert(leg_control.keys==1&&leg_control.state.stick.height==1&&leg_control.state.stick.applied_height==1);
     assert(leg_control.state.operation.confirmed.raw==1&&leg_control.state.operation.operation==uint8_t(leg::Operation::Extend));
     assert(leg_control.state.right_command<r&&leg_control.state.left_command>l&&Serial2.goals>goals);verifyFrame();
     send(center);wait(2000);r=leg_control.state.right_command;l=leg_control.state.left_command;goals=Serial2.goals;
     wait(600);assert(Serial2.goals==goals&&leg_control.state.right_command==r&&leg_control.state.left_command==l);
-    send(down);wait(1000);assert(leg_control.keys==2&&leg_control.state.stick.height==-1&&leg_control.state.stick.applied_height==-1);
+    send(down);wait(200);assert(leg_control.keys==2&&leg_control.state.stick.height==-1&&leg_control.state.stick.applied_height==-1);
     assert(leg_control.state.operation.confirmed.raw==2&&leg_control.state.operation.operation==uint8_t(leg::Operation::Retract));
     assert(leg_control.state.right_command>r&&leg_control.state.left_command<l);verifyFrame();
     send(center);wait(2000);r=leg_control.state.right_command;l=leg_control.state.left_command;
@@ -55,7 +55,7 @@
     fixture(2000,2120);send(up);wait(200);PS4.disconnect_cb();cycle();goals=Serial2.goals;
     PS4.connect_cb();PS4.input=up;PS4.input_cb();cycle();wait(400);
     assert(Serial2.goals==goals&&!leg_control.want_sync&&leg_control.state.stick.applied_height==0&&!leg_control.state.operation.allowed); // Existing disconnect may retain active position hold.
-    send(center);send(up);wait(400);assert(leg_control.state.active&&leg_control.state.stick.applied_height==1);verifyFrame();
+    send(center);send(up);wait(100);assert(leg_control.state.active&&leg_control.state.stick.applied_height==1);verifyFrame();
     leg::activeGeometry()=previousGeometry;
     std::cout<<"PASS: physical positive-LY UP/negative-LY DOWN through UART; normal tick signs, both outer margins, exact hold/recenter, diagonal X disabled, disconnect/reconnect held-input barrier\n";
   }

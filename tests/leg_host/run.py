@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory() as tmp:
         outputs.append([float(v) for v in subprocess.check_output([str(binary)],text=True).split()])
     assert len(outputs[0])==len(outputs[1])==30
     assert all(abs(new-1.5*old)<.0001 for old,new in zip(*outputs))
-    print('PASS: real P2/P3 control comparison, 1.5x unclipped correction at +/-0.25/0.5/1 deg, all 1/5/10/20/50ms periods; 8 pp/s, height and range caps')
+    print('PASS: real P2/P3 control comparison, 1.5x unclipped correction at +/-0.25/0.5/1 deg, all 1/5/10/20/50ms periods; 16 pp/s, height and range caps')
 
     # Same UART path at the same 50ms cadence: reproduce the old rounding chatter.
     chatter=[]
