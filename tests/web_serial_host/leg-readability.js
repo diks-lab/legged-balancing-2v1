@@ -41,7 +41,7 @@ const fs = require('node:fs');
             i, 17, 9, i, i + 1, 15, 15, 63, 1023, 2]);
           window.packet = {
             type: 'wheel_diagnostics', boot_id: 'layout', leg_rate: 12, leg_hint: 1, leg_ms: 53588, leg_age_ms: 0,
-            leg_mode: 1, leg_roll_confirmed: false, leg_roll_sign: 1,
+            leg_mode: 1, leg_roll_confirmed: true, leg_roll_sign: -1,
             leg_state: [4294967295, 4294967295, 1, 0, 7, 9, 15, 15, 63, 4, 1023, 9, 53587, 3, 4294967295, 4, events],
             leg_accept: [1, 1, 1697, 2044, 2084, 2408, 1, 2],
             leg_geometry: [[2044, 1697, 10, 10, 1707, 2034, 1940, 2034], [2084, 2408, 10, 10, 2094, 2398, 2094, 2181], [0, 30]],
@@ -103,6 +103,8 @@ const fs = require('node:fs');
         let result = await check();
         assert.deepEqual(result.failures, [], JSON.stringify({ physical, zoom, ...result }));
         assert(result.wrapped > 8 && result.lines > 40, 'exercise real wrapped text');
+        assert((await page.locator('#leg-correction').textContent()).includes('有効'));
+        assert((await page.locator('#leg-roll').textContent()).includes('左正'));
         assert.equal(await page.locator('#leg-state-trace').textContent().then(s => s.split('\n').length), 4);
         assert((await page.locator('#leg-blocker').textContent()).includes('左：'));
         // All actual long gate reasons remain readable; no artificial display delay.

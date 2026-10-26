@@ -23,7 +23,7 @@ struct IO {
 int main(){
  assert(configuredAcceptance().extra&&configuredAcceptance().right_min==1675&&configuredAcceptance().right_max==2007&&
  configuredAcceptance().left_min==2071&&configuredAcceptance().left_max==2412);
- Control c;assert(!c.accepted(true,1674)&&!c.accepted(false,2413));
+ Control c(false);assert(!c.accepted(true,1674)&&!c.accepted(false,2413));
  ServoBus<IO>b;IO io;SerialDiagnostics records;SerialOutput out;Sink sink;
  auto drain=[&](){if(out.idle()){SerialDiagnostics::Record r;uint32_t lost;const bool have=records.pop(r,lost);assert(!lost);if(have)out.begin(r,lost);}out.service(sink);};
  auto cycle=[&](uint32_t t){c.tick(t,true,false,true,0);b.service(io,c,t);c.commit(t,true,Reason::Idle,b.stage(c));records.capture(c.state,b.stage(c),t);drain();};

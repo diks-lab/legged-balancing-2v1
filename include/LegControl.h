@@ -124,6 +124,7 @@ class Control {
  void received(uint8_t value,uint32_t now){state.operation.raw_keys=value;observe(Source::Input,now,state.operation.phase);}
  void disconnect(){
   keys=0;input_gate=false;height_input_=roll_input_=0;
+  state.requested_roll=state.applied_roll=0;roll_rearm_=true;
   state.stick.applied_height=state.stick.applied_roll=0;
   // Cancel an unsent ramp increment; hold the last position actually queued to UART.
   if(state.active&&state.command_valid){
@@ -153,7 +154,7 @@ class Control {
   state.height=(r+l)/2;difference_=(r-l)/2;
   state.right_percent=r;state.left_percent=l;state.requested_roll=state.applied_roll=0;
   state.recovery=outside?1:0;
-  roll_rearm_=state.recovery!=0;state.return_directions=0;
+  roll_rearm_=true;state.return_directions=0;
   state.synced=true;state.sync_ms=now;want_sync=false;last_=now;return true;
  }
  void activate(uint32_t now){state.active=true;state.reason=state.recovery?Reason::RecoveryRelease:Reason::Accepted;last_=now;}

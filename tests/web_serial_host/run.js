@@ -67,6 +67,11 @@ vm.runInContext(`
       readyView.values.available !== '上下操作可能' ||
       readyView.values.sync !== '実位置確認前' || readyView.values.blocker !== 'なし' ||
       readyView.values.height !== '指令未送信') throw Error('real Share snapshot consistency');
+  const signedRoll = { ...legPacket, leg_roll_confirmed: true, leg_roll_sign: -1, legs: [...legPacket.legs] };
+  signedRoll.legs[3] = 9.1;
+  const rollView = legPresentation(signedRoll, true, 0, {});
+  if (!rollView.values.roll.includes('AngleX -9.1') || !rollView.values.roll.includes('左正 9.1') ||
+      !rollView.values.correction.includes('有効')) throw Error('measured roll sign presentation');
   const legCache = {};
   const legState = legPresentation(legPacket, true, 0, legCache);
   if (legState.values.mode !== '支持試験（倒立OFF）' || legState.values.available !== '上下操作可能' ||

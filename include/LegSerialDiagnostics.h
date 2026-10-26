@@ -12,12 +12,13 @@ class SerialDiagnostics {
  struct MotionState {
   TxDiagnostics tx;
   float height=0,roll=0;
+  float measured=0,requested=0,applied=0;
   int16_t sent_right=0,sent_left=0;
   uint32_t sent_ms=0,coalesced=0;
   int8_t lx=0,ly=0;
   uint8_t torque=0,flags=0,reason=0,blocker=255;
  };
- static_assert(sizeof(MotionState)<=sizeof(RxFailure),"keep bounded diagnostic record size");
+ static_assert(sizeof(MotionState)<=80,"bounded motion diagnostics");
  struct Record {
   uint32_t ms=0;
   Type type=Input;uint8_t keys=0,allowed=0,reason=0;
@@ -134,6 +135,7 @@ class SerialDiagnostics {
    (s.active?ps4_control::directions(s.stick.applied_height,s.stick.applied_roll):0);
   Record r;r.type=Motion;r.ms=now;
   auto&m=r.data.motion;m.tx=s.tx;m.height=s.stick.applied_height;m.roll=s.stick.applied_roll;
+  m.measured=s.measured_roll;m.requested=s.requested_roll;m.applied=s.applied_roll;
   m.sent_right=s.right_command;m.sent_left=s.left_command;m.sent_ms=s.command_ms;
   m.lx=s.stick.lx;m.ly=s.stick.ly;m.torque=s.torque;m.reason=uint8_t(s.reason);
   m.blocker=s.operation.committed?s.operation.blocker:uint8_t(s.reason);
@@ -269,9 +271,11 @@ class SerialOutput {
      r.allowed<5?event[r.allowed]:"UNKNOWN",(unsigned long)r.ms,int(m.lx),int(m.ly),double(m.height),double(m.roll),t.calculated_right,t.calculated_left,unsigned(bool(m.flags&1)),(unsigned long)t.calculated_ms);
     else if(part_==1)size_=snprintf(line_,sizeof(line_),"LEG UART: last_RL=%d/%d valid=%u last_ms=%lu goal_sent=%lu wait=%lu failed=%lu flags=%02X\n",
      m.sent_right,m.sent_left,unsigned(bool(m.flags&2)),(unsigned long)m.sent_ms,(unsigned long)t.goals,(unsigned long)t.goal_wait,(unsigned long)t.goal_failed,unsigned(m.flags));
-    else size_=snprintf(line_,sizeof(line_),"LEG TORQUE: %s on_sent=%lu wait=%lu failed=%lu reason=%s blocker=%s edge_coalesced=%lu\n",
+    else if(part_==2)size_=snprintf(line_,sizeof(line_),"LEG TORQUE: %s on_sent=%lu wait=%lu failed=%lu reason=%s blocker=%s edge_coalesced=%lu\n",
      m.torque<4?torque[m.torque]:"UNKNOWN",(unsigned long)t.on_sent,(unsigned long)t.on_wait,(unsigned long)t.on_failed,serialReason(m.reason),serialReason(m.blocker),(unsigned long)m.coalesced);
-    pending_=++part_<3;break;
+    if(part_==3)size_=snprintf(line_,sizeof(line_),"LEG ROLL: AngleX=%+.2f left_positive=%+.2f target_requested=%+.2f applied=%+.2f deg; limited=%u; LX negative=LEFT (physical direction to verify)\n",
+     double(m.measured/ImuRollSign),double(m.measured),double(m.requested),double(m.applied),unsigned(bool(m.flags&4)));
+    pending_=++part_<4;break;
    }
    case D::Calibration:{
     const auto&v=r.data.calibration.value;const auto&g=r.data.calibration.geometry;

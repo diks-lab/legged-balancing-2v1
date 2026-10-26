@@ -1443,6 +1443,13 @@ int main(){
 }
 '''
 checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-rate.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
+if os.environ.get('DRIVE_ROLL_TEST'):
+    checks=checks[:checks.index('int main(){')]+Path('tests/drive_host/leg-roll.cpp').read_text()
+    import configparser,shlex
+    ini=configparser.ConfigParser();ini.read('platformio.ini')
+    production_flags=shlex.split(ini['env:esp32dev']['build_flags'])
+else:
+    production_flags=[] # historical disabled-roll regression remains explicit
 foc = Path(os.environ.get('SIMPLEFOC_SRC','.pio/libdeps/esp32dev/Arduino-FOC/src'))
 with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     cpp=Path(directory)/'drive.cpp';binary=Path(directory)/'drive'
@@ -1455,7 +1462,7 @@ with tempfile.TemporaryDirectory(prefix='drive-control-') as directory:
     sanitizer_flags = ['-fsanitize=address,undefined','-fno-omit-frame-pointer'] if os.environ.get('CSV_TEST_SANITIZERS') else []
     subprocess.run(['c++','-include','tests/leg_host/fixture.h','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable',
                     '-pthread','-Iinclude','-Itests/wheel_host','-I'+str(foc),str(cpp),
-                    str(foc/'common/pid.cpp'),str(foc/'common/lowpass_filter.cpp'),str(foc/'common/base_classes/Sensor.cpp'),'-o',str(binary)]+sanitizer_flags,check=True)
+                    str(foc/'common/pid.cpp'),str(foc/'common/lowpass_filter.cpp'),str(foc/'common/base_classes/Sensor.cpp'),'-o',str(binary)]+sanitizer_flags+production_flags,check=True)
     subprocess.run([str(binary)],check=True)
 
 for term in ['malloc(', 'free(', 'releaseHttpTraceSnapshot(', 'reapHttpTraceSnapshot(']:
@@ -1477,3 +1484,9 @@ for name in ('recordLegInput','captureLegSerial'):
 assert 'Serial.' not in function('serviceLegControl')
 assert source.count('    serviceLegSerial();')==1
 assert 'serviceLegSerial();' not in function('updatePs4Controller')
+
+# Always exercise the active production roll settings as well as the historical
+# disabled-roll comparison. The child guard prevents recursive invocations.
+if not os.environ.get('DRIVE_ROLL_TEST'):
+    import sys
+    subprocess.run([sys.executable,__file__],env=dict(os.environ,DRIVE_ROLL_TEST='1'),check=True)
