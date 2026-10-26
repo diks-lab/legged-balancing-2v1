@@ -67,7 +67,7 @@ int main(){
   assert(io.reads[0]+io.reads[1]==0);io.now=1500;b.service(io,c,1500);assert(io.reads[1]==1);
  }
  // Poisoned, mixed direction/motion/read records stay typed through copies and output.
- SerialDiagnostics log;Control c;Sink sink;SerialOutput out;
+ SerialDiagnostics log(true);Control c;Sink sink;SerialOutput out;
  for(unsigned k=1;k<50;++k){
   c.state.active=true;c.state.stick.flags=97;c.state.stick.lx=k&1?-127:0;c.state.stick.ly=k&1?0:127;
   c.state.operation.raw_keys=k&1?4:1;c.state.stick.applied_roll=k&1?1:0;c.state.stick.applied_height=k&1?0:1;

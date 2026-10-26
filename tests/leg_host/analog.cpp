@@ -48,7 +48,7 @@ int main(){
   c.rawStick(0,127,127,-128,999);c.tick(1050,true,false,true,0);assert(c.state.height==h&&c.state.stick.height==1);
  }
  // Stable raw input, accepted rate and changing timestamps alone never produce repeated records.
- {SerialDiagnostics log;Control c;assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
+ {SerialDiagnostics log(true);Control c;assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
   c.stickInput(0,-72,0,0,true,1000,1000);c.state.stick.flags=97;c.tick(1050,true,false,true,0);
   log.capture(c.state,8,1050);SerialDiagnostics::Record record;uint32_t lost;while(log.pop(record,lost))assert(!lost);
   for(uint32_t t=1051;t<1200;++t){c.tick(t,true,false,true,0);log.capture(c.state,8,t);}

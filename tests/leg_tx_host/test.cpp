@@ -75,16 +75,19 @@ int main(){
   assert(partial?x.state.tx.on_failed==1:x.state.tx.on_wait>0);
  }
  // Movement-edge bursts cannot consume critical receive/calibration FIFO slots.
- SerialDiagnostics logs;State s;s.active=s.synced=true;s.stick.flags=97;s.tx.calculated_valid=true;
+ SerialDiagnostics logs(true);State s;s.active=s.synced=true;s.stick.flags=97;s.tx.calculated_valid=true;
  for(unsigned t=1;t<10000;++t){s.stick.applied_height=t&1?1:0;s.stick.ly=t&1?-128:0;s.operation.raw_keys=t&1?1:0;logs.capture(s,8,t);}
  s.rx_failure.issues=RxTimeout;s.rx_failure.ms=10000;logs.capture(s,8,10000);
  SerialDiagnostics::Record record;uint32_t lost;bool receive=false,coalesced=false;
+ for(unsigned cycle=0;cycle<4;++cycle){
+ logs.capture(s,8,10000+cycle*500);
  while(logs.pop(record,lost)){assert(!lost);receive|=record.type==SerialDiagnostics::Receive;
   if(record.type==SerialDiagnostics::Motion){assert(receive);coalesced|=record.data.motion.coalesced>0;}
  }
+ }
  assert(receive&&coalesced);
  // Formatter remains bounded, explicit about validity/ACK and never waits for USB.
- record={};record.type=SerialDiagnostics::Motion;record.allowed=2;record.ms=UINT32_MAX;
+ record={};record.type=SerialDiagnostics::Motion;record.allowed=2;record.reason=1;record.ms=UINT32_MAX;
  record.data.motion.tx=c.state.tx;record.data.motion.tx.goals=UINT32_MAX;record.data.motion.tx.goal_failed=UINT32_MAX;
  record.data.motion.torque=3;record.data.motion.flags=3;record.data.motion.coalesced=UINT32_MAX;
  Sink sink;SerialOutput output;output.begin(record,0);sink.room=0;for(unsigned i=0;i<100;++i)output.service(sink);assert(!sink.writes);

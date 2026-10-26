@@ -66,7 +66,7 @@ int main(){
  // Same coherent snapshot carries raw/sign/target diagnostics without extra reads.
  publishDiagnosticSnapshot(true);char json[2048];assert(diagnostic::wheelReadMessage(json,sizeof(json),diagnostic_latest,"roll"));
  assert(strstr(json,"\"leg_roll_confirmed\":true")&&strstr(json,"\"leg_roll_sign\":-1"));
- leg::SerialDiagnostics records;leg::SerialOutput output;records.capture(leg_control.state,leg_bus.stage(leg_control),nowMs);
+ leg::SerialDiagnostics records(true);leg::SerialOutput output;records.capture(leg_control.state,leg_bus.stage(leg_control),nowMs);
  Serial.output.clear();for(unsigned i=0;i<600;++i){
   if(i%100==0)records.capture(leg_control.state,leg_bus.stage(leg_control),nowMs+500*(i/100));
   if(output.idle()){leg::SerialDiagnostics::Record rec;uint32_t lost=0;if(records.pop(rec,lost))output.begin(rec,lost);}

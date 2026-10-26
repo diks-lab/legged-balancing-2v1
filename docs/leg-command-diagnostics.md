@@ -1,3 +1,5 @@
+> 現行のUSB出力は[Arduino IDE用ログ](leg-serial-monitor.md)。定期脚詳細は既定OFF、単発statusと終了後のまとめを利用できます。以下は導入時の記録です。
+
 > [現行の実位置追従診断とedge_coalesced修正](leg-following-diagnostics.md)を参照。以下は送信診断導入時の記録。
 
 # 脚診断の可読性・指令送信の切り分け

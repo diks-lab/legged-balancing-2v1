@@ -69,7 +69,7 @@ int main(){
   assert(d.state.torque==2&&!d.state.active&&!d.state.synced&&!d.want_sync);
  }
  // Transition reporting is bounded, changed-only, and is not used to drive servos.
- SerialDiagnostics log;SerialOutput out;Sink sink;
+ SerialDiagnostics log(true);SerialOutput out;Sink sink;
  auto emit=[&](){for(unsigned k=0;k<100;++k){if(out.idle()){SerialDiagnostics::Record r;uint32_t lost;
    if(log.pop(r,lost)){assert(!lost);out.begin(r,lost);}}out.service(sink);}};
  Control observed;observed.state.measurement.begin(10);log.capture(observed.state,11,10);emit();

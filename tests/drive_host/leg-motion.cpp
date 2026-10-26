@@ -2,7 +2,7 @@
   {
     const auto previousGeometry=leg::activeGeometry();leg::activeGeometry()=leg::ConfirmedCandidate;
     setupCase();resetPs4MotionInput();
-    leg_serial_records=leg::SerialDiagnostics{};leg_serial_output=leg::SerialOutput{};
+    leg_serial_records=leg::SerialDiagnostics{true};leg_serial_output=leg::SerialOutput{};
     ps4_diagnostic_serial_offset=ps4_diagnostic_serial_size;release_memory_serial_active=false;
     ps4_event_inbox.drain(ps4_event_batch);ps4_controls_barrier_valid=false;ps4_event_rearm_required=false;
     auto cycle=[&](){++nowMs;noteImuMeasurement();updatePs4Controller();serviceLegControl();serviceLegSerial();};
@@ -34,6 +34,7 @@
     assert(Serial.output.find("LEG PROFILE: max_height=12 pp/s")!=std::string::npos);
     assert(Serial.output.find("last_RL=")!=std::string::npos&&Serial.output.find("calc_RL=")!=std::string::npos);
     assert(!lqr_direction_test_armed&&!lqr_auto_drive_active);
+    leg_serial_records.setDetailed(false);
     std::cout<<"PASS: actual PS4 100% -> release/new DOWN 3s: calculated="<<targetR<<"/"<<targetL
       <<" UART="<<leg_control.state.right_command<<"/"<<leg_control.state.left_command<<" goal_frames="<<leg_control.state.tx.goals<<" ON_sent="<<leg_control.state.tx.on_sent<<" (no servo ACK)\n";
     leg::activeGeometry()=previousGeometry;

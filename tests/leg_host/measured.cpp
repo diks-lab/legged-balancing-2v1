@@ -24,7 +24,7 @@ int main(){
  assert(configuredAcceptance().extra&&configuredAcceptance().right_min==1675&&configuredAcceptance().right_max==2007&&
  configuredAcceptance().left_min==2071&&configuredAcceptance().left_max==2412);
  Control c(false);assert(!c.accepted(true,1674)&&!c.accepted(false,2413));
- ServoBus<IO>b;IO io;SerialDiagnostics records;SerialOutput out;Sink sink;
+ ServoBus<IO>b;IO io;SerialDiagnostics records(true);SerialOutput out;Sink sink;
  auto drain=[&](){if(out.idle()){SerialDiagnostics::Record r;uint32_t lost;const bool have=records.pop(r,lost);assert(!lost);if(have)out.begin(r,lost);}out.service(sink);};
  auto cycle=[&](uint32_t t){c.tick(t,true,false,true,0);b.service(io,c,t);c.commit(t,true,Reason::Idle,b.stage(c));records.capture(c.state,b.stage(c),t);drain();};
  auto input=[&](uint8_t k,uint32_t t){c.input(k,true,t);records.input(k,true,t);};
@@ -51,7 +51,7 @@ int main(){
  assert(sink.text.find("LEG STATE: NORMAL_RANGE")!=std::string::npos);
  const auto text=sink.text;for(unsigned k=0;k<1000;++k)cycle(t++);assert(sink.text.substr(text.size()).find("LEG MOTION:")==std::string::npos); // idle feedback is intentional; no repeated input/motion spam
  // A disconnected/full USB sink never waits or modifies actuator state. Overflow is explicit.
- SerialDiagnostics full;State overflow;for(unsigned k=1;k<80;++k){overflow.rx_failure.issues=RxTimeout;overflow.rx_failure.ms=k;full.capture(overflow,0,k);}
+ SerialDiagnostics full;State overflow;for(unsigned k=1;k<80;++k){overflow.rx_failure.issues=k&1?RxTimeout:RxChecksum;overflow.rx_failure.ms=k;full.capture(overflow,0,k);}
  SerialDiagnostics::Record r;uint32_t lost;assert(full.pop(r,lost)&&lost>0);out.begin(r,lost);sink.room=0;
  const auto writes=sink.cycles;for(unsigned k=0;k<100;++k)out.service(sink);assert(sink.cycles==writes);
  sink.room=7;for(unsigned k=0;k<300;++k)out.service(sink);assert(sink.text.find("dropped=")!=std::string::npos);

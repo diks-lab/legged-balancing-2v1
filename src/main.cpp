@@ -833,6 +833,7 @@ void printSpeedDiagnostic();
 void serviceLegControl();
 void recordLegInput(uint32_t now);
 void captureLegSerial(uint32_t now);
+void handleLegSerialAction(char action);
 void serviceLegSerial();
 bool readLegConfiguration();
 bool legMeasurementStopped();
@@ -6240,6 +6241,13 @@ void recordLegInput(uint32_t now){
   leg_serial_records.input(leg_control.state.operation.raw_keys,leg_control.input_gate&&ps4_controls_released&&ps4_was_connected,now);
   portEXIT_CRITICAL(&leg_serial_lock);
 }
+void handleLegSerialAction(char action){
+  if(action>='i'&&action<='k'){
+    portENTER_CRITICAL(&leg_serial_lock);
+    leg_serial_records.request(action,leg_control.state,leg_bus.stage(leg_control),millis());
+    portEXIT_CRITICAL(&leg_serial_lock);
+  }else if(action)legCalibrationCommand(action);
+}
 void captureLegSerial(uint32_t now){
   portENTER_CRITICAL(&leg_serial_lock);
   leg_serial_records.capture(leg_control.state,leg_bus.stage(leg_control),now);
@@ -6249,6 +6257,10 @@ void captureLegSerial(uint32_t now){
 void serviceLegSerial(){
   if(foc_alignment_observer.active()||release_memory_serial_active||
       ps4_diagnostic_serial_offset<ps4_diagnostic_serial_size)return;
+  portENTER_CRITICAL(&leg_serial_lock);
+  const bool detailed=leg_serial_records.detailed();
+  portEXIT_CRITICAL(&leg_serial_lock);
+  if(!detailed)leg_serial_output.quiet();
   if(leg_serial_output.idle()){
     leg::SerialDiagnostics::Record record;uint32_t lost;
     portENTER_CRITICAL(&leg_serial_lock);
@@ -6509,7 +6521,7 @@ void handleSerialCommand() {
   const char command = Serial.read();
   static leg::LegCalSerialParser leg_parser;char leg_action=0;
   if(leg_parser.feed(command,leg_action)){
-   if(leg_action)legCalibrationCommand(leg_action);
+   if(leg_action)handleLegSerialAction(leg_action);
    return;
   }
 

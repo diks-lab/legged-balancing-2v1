@@ -123,8 +123,8 @@ struct LegCalSerialParser {
  bool feed(char c,char&action){
   action=0;if(!active){if(c!=':')return false;active=true;used=0;overflow=false;return true;}
   if(c=='\r'||c=='\n'){
-   if(!overflow){line[used]=0;static const char*const names[]={"leg begin","leg candidate","leg r0","leg r100","leg l0","leg l100","leg save","leg abort"};
-    for(unsigned i=0;i<8;++i)if(!strcmp(line,names[i]))action=char('a'+i);}
+   if(!overflow){line[used]=0;static const char*const names[]={"leg begin","leg candidate","leg r0","leg r100","leg l0","leg l100","leg save","leg abort","leg log on","leg log off","leg status"};
+    for(unsigned i=0;i<11;++i)if(!strcmp(line,names[i]))action=char('a'+i);}
    if(!action)action='?';
    active=false;used=0;return true;
   }
