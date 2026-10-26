@@ -178,13 +178,13 @@ struct {
 } PS4;
 struct {
  int16_t measuredRight=1977,measuredLeft=2082;
- uint8_t rx[16]{},last[24]{};unsigned head=0,tail=0,mode=0;int capacity=128;
+ uint8_t rx[16]{},last[24]{},last_goal[24]{};unsigned head=0,tail=0,mode=0;int capacity=128;
  size_t writes=0,last_size=0,reads=0,goals=0,ons=0;
  int available(){return int(tail-head);}int read(){return head<tail?rx[head++]:-1;}
  int availableForWrite(){return capacity;}
  size_t write(const uint8_t*p,size_t n){
   assert(n<=sizeof(last));memcpy(last,p,n);last_size=n;++writes;
-  if(n==24)++goals;
+  if(n==24){++goals;memcpy(last_goal,p,24);}
   if(n==12&&p[5]==40&&p[8])++ons;
   if(n==8){
    ++reads;

@@ -49,7 +49,7 @@ int main(){
  input(0,t++);for(unsigned k=0;k<1800;++k)cycle(t++); // drain 2 Hz final-send/edge diagnostics
  assert(inRange(true,io.right)&&inRange(false,io.left));
  assert(sink.text.find("LEG STATE: NORMAL_RANGE")!=std::string::npos);
- const auto text=sink.text;for(unsigned k=0;k<1000;++k)cycle(t++);assert(sink.text==text); // no periodic held/idle spam
+ const auto text=sink.text;for(unsigned k=0;k<1000;++k)cycle(t++);assert(sink.text.substr(text.size()).find("LEG MOTION:")==std::string::npos); // idle feedback is intentional; no repeated input/motion spam
  // A disconnected/full USB sink never waits or modifies actuator state. Overflow is explicit.
  SerialDiagnostics full;State overflow;for(unsigned k=1;k<80;++k){overflow.rx_failure.issues=RxTimeout;overflow.rx_failure.ms=k;full.capture(overflow,0,k);}
  SerialDiagnostics::Record r;uint32_t lost;assert(full.pop(r,lost)&&lost>0);out.begin(r,lost);sink.room=0;

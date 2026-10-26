@@ -6,7 +6,7 @@
 #include <string>
 using namespace leg;
 int main(){
- static_assert(HeightRate==12&&RollRate==2&&MaxRoll==3,"preserve rates and roll limit");
+ static_assert(HeightRate==12&&RollRate==4&&MaxRoll==3,"preserve rates and roll limit");
  assert(ps4_control::legAxis(16)==0&&ps4_control::legAxis(-16)==0);
  assert(ps4_control::legAxis(127)==1&&ps4_control::legAxis(-128)==-1);
  assert(ps4_control::legAxis(17)>0&&ps4_control::legAxis(17)<.01f);
@@ -38,7 +38,7 @@ int main(){
  }
  {Control c(true);assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
   c.stickInput(-72,0,0,0,true,1000,1000);for(uint32_t t=1050;t<=2000;t+=50)c.tick(t,true,false,true,0);
-  assert(fabsf(c.state.requested_roll-1.f)<.0001f);
+  assert(fabsf(c.state.requested_roll-2.f)<.0001f);
   c.stickInput(0,0,0,0,true,2001,2001);for(uint32_t t=2051;t<2700;t+=50)c.tick(t,true,false,true,0);
   assert(c.state.requested_roll==0);
  }

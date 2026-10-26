@@ -7,7 +7,7 @@ namespace leg {
 // No formatting, Serial access, allocation or waits in capture/input/pop.
 class SerialDiagnostics {
  public:
- enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected,Sticks,Calibration,Motion };
+ enum Type:uint8_t { Input,Decision,SyncStart,SyncDone,Range,Receive,Configuration,SyncFailed,AcceptanceOutside,Measure,MeasureRejected,Sticks,Calibration,Motion,FollowingRead };
  struct Sync { Geometry geometry;Acceptance accept;int16_t right,left;uint8_t acquired,recovery,directions,hint; };
  struct MotionState {
   TxDiagnostics tx;
@@ -22,8 +22,9 @@ class SerialDiagnostics {
  struct Record {
   uint32_t ms=0;
   Type type=Input;uint8_t keys=0,allowed=0,reason=0;
-  union Payload { MotionState motion;Sync sync;RxFailure rx;ServoConfiguration config;Measurement measurement;ps4_control::StickObservation stick;struct { LegCalibration value;Geometry geometry; } calibration;struct { Measurement value;Geometry geometry; } measured;Payload():rx{}{} } data;
+  union Payload { MotionState motion;Following following;Sync sync;RxFailure rx;ServoConfiguration config;Measurement measurement;ps4_control::StickObservation stick;struct { LegCalibration value;Geometry geometry; } calibration;struct { Measurement value;Geometry geometry; } measured;Payload():motion{}{} } data;
  };
+ static_assert(sizeof(Record::Payload)==sizeof(MotionState),"initialize the largest payload completely");
  static constexpr unsigned Capacity=8,Chunk=48;
  void input(uint8_t keys,bool gate,uint32_t now){
   if(keys==raw_)return;
@@ -97,6 +98,14 @@ class SerialDiagnostics {
   if(s.calibration.revision!=calibration_revision_){
    Record r;r.type=Calibration;r.ms=now;r.data.calibration.value=s.calibration;r.data.calibration.geometry=s.geometry;push(r);calibration_revision_=s.calibration.revision;
   }
+  for(unsigned side=0;side<2;++side){
+   const auto&f=s.following.side[side];
+   if(f.status!=follow_status_[side]||f.sample_ms!=follow_sample_[side]){
+    latest_feedback_=Record{};latest_feedback_.type=FollowingRead;latest_feedback_.ms=now;
+    latest_feedback_.data.following=s.following;feedback_pending_=true;
+    follow_status_[side]=f.status;follow_sample_[side]=f.sample_ms;
+   }
+  }
   captureMotion(s,now);
   synced_=s.synced;recovery_=s.recovery;directions_=s.return_directions;phase_=phase;
   allowed_=o.allowed;operation_=o.operation;blocker_=o.blocker;decision_keys_=o.raw_keys;
@@ -106,6 +115,10 @@ class SerialDiagnostics {
   lost=lost_;lost_=0;
   if(!count_){
    if(uint32_t(observed_now_-continuous_ms_)<500)return false;
+   if(feedback_pending_&&feedback_turn_){
+    r=latest_feedback_;feedback_pending_=false;feedback_turn_=false;continuous_ms_=observed_now_;return true;
+   }
+   feedback_turn_=true;
    if(motion_count_){
     r=motion_edges_[motion_head_];motion_head_=(motion_head_+1)%2;--motion_count_;
     r.data.motion.coalesced=motion_lost_;motion_lost_=0;continuous_ms_=observed_now_;return true;
@@ -134,7 +147,7 @@ class SerialDiagnostics {
    ((s.stick.flags&65)==65?s.operation.raw_keys:0):
    (s.active?ps4_control::directions(s.stick.applied_height,s.stick.applied_roll):0);
   Record r;r.type=Motion;r.ms=now;
-  auto&m=r.data.motion;m.tx=s.tx;m.height=s.stick.applied_height;m.roll=s.stick.applied_roll;
+  auto&m=r.data.motion;m=MotionState{};m.tx=s.tx;m.height=s.stick.applied_height;m.roll=s.stick.applied_roll;
   m.measured=s.measured_roll;m.requested=s.requested_roll;m.applied=s.applied_roll;
   m.sent_right=s.right_command;m.sent_left=s.left_command;m.sent_ms=s.command_ms;
   m.lx=s.stick.lx;m.ly=s.stick.ly;m.torque=s.torque;m.reason=uint8_t(s.reason);
@@ -155,7 +168,10 @@ class SerialDiagnostics {
   }
   if(direction||final_pending_){r.allowed=0;latest_stick_=r;stick_pending_=true;}
  }
- Record records_[Capacity],latest_input_,latest_stick_;
+ Record records_[Capacity],latest_input_,latest_stick_,latest_feedback_;
+ uint32_t follow_sample_[2]{};
+ uint8_t follow_status_[2]{};
+ bool feedback_pending_=false,feedback_turn_=true;
  uint32_t observed_now_=0,continuous_ms_=0,calibration_revision_=0,seen_refusals_=0;
  bool input_pending_=false,stick_pending_=false;
  uint32_t attempt_=0,rx_ms_=0,config_ms_=0,lost_=0,measure_revision_=0,measure_log_ms_=0,measure_rejected_ms_=0;
@@ -276,6 +292,17 @@ class SerialOutput {
     if(part_==3)size_=snprintf(line_,sizeof(line_),"LEG ROLL: AngleX=%+.2f left_positive=%+.2f target_requested=%+.2f applied=%+.2f deg; limited=%u; LX negative=LEFT (physical direction to verify)\n",
      double(m.measured/ImuRollSign),double(m.measured),double(m.requested),double(m.applied),unsigned(bool(m.flags&4)));
     pending_=++part_<4;break;
+   }
+   case D::FollowingRead:{
+    const auto&f=r.data.following.side[part_];
+    static const char*const status[]={"UNREAD","WAITING","VALID","FAILED","CANCELLED","TX_BUSY","TX_FAILED"};
+    const uint32_t age=r.ms-f.sample_ms;
+    const bool valid=f.status==2&&age<=FollowFreshMs;
+    char error[16];if(valid)snprintf(error,sizeof(error),"%ld",long(f.tick)-long(f.command));else strcpy(error,"UNKNOWN");
+    size_=snprintf(line_,sizeof(line_),"LEG FEEDBACK: %s %s tick=%d ms=%lu read=%lu cmd_at_read=%d cmd_ms=%lu error=%s age=%lu issues=%02X\n",
+     part_?"L":"R",f.status==2&&!valid?"STALE":f.status<7?status[f.status]:"UNKNOWN",f.tick,(unsigned long)f.sample_ms,(unsigned long)f.request_ms,
+     f.command,(unsigned long)f.command_ms,error,(unsigned long)age,unsigned(f.issues));
+    pending_=++part_<2;break;
    }
    case D::Calibration:{
     const auto&v=r.data.calibration.value;const auto&g=r.data.calibration.geometry;

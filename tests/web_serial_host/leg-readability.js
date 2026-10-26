@@ -53,6 +53,8 @@ const fs = require('node:fs');
             leg_stick: [4294967295, -128, 127, 127, -128, 1, 1, 0, 0, 0.05, 0.1, 127],
             leg_config: [4294967200, 4294967295, 4294967295, 3, 9, 3, 15, 0, 25,
               [4294967295, 4294967295, 0, 4095, 0], [4294967295, 4294967295, 0, 4095, 0]],
+            leg_follow: [1, 1800, 2310, 53580,
+              [2, 1697, 53588, 53587, 1800, 53580, 0], [3, 2408, 52000, 53587, 2310, 53580, 32]],
             legs: [100, 3, 0, -48.9, 100, 100, 1697, 2408, 53588, 53587, 9, 2, 0, 0, 1, 1, 4294967295, 4294967295, 4294967295]
           };
           window.peer.onmessage({ data: JSON.stringify(window.packet) });
@@ -103,6 +105,7 @@ const fs = require('node:fs');
         let result = await check();
         assert.deepEqual(result.failures, [], JSON.stringify({ physical, zoom, ...result }));
         assert(result.wrapped > 8 && result.lines > 40, 'exercise real wrapped text');
+        assert((await page.locator('#leg-diagnostics').textContent()).includes('READ時指令'));
         assert((await page.locator('#leg-correction').textContent()).includes('有効'));
         assert((await page.locator('#leg-roll').textContent()).includes('左正'));
         assert.equal(await page.locator('#leg-state-trace').textContent().then(s => s.split('\n').length), 4);

@@ -31,6 +31,10 @@ with tempfile.TemporaryDirectory() as tmp:
         'tests/leg_host/analog.cpp','-o',str(binary),*flags],check=True)
     subprocess.run([str(binary)],check=True)
 
+    subprocess.run(['c++','-include','tests/leg_host/fixture.h','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',
+        'tests/leg_host/following.cpp','-o',str(binary),*flags],check=True)
+    subprocess.run([str(binary)],check=True)
+
     import sys
     sys.dont_write_bytecode=True
     import legacy

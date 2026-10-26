@@ -12,7 +12,7 @@ constexpr uint8_t RightId=1,LeftId=2;
 constexpr uint16_t ServoSpeed=150;
 constexpr uint8_t ServoAcceleration=15;
 constexpr float HeightRate=12;            // maximum servo-travel percentage points/s
-constexpr float RollRate=2,MaxRoll=3;     // deg/s, deg
+constexpr float RollRate=4,MaxRoll=3;     // deg/s, deg
 constexpr float RollGain=1;              // differential extension pp/deg
 constexpr float DifferentialRate=4;      // pp/s, limits feedback-induced movement
 // Enable only after measuring both the IMU sign and the leg extension directions.
@@ -71,7 +71,18 @@ struct TxDiagnostics {
  bool calculated_valid=false;
  static void count(uint32_t&value){if(value!=UINT32_MAX)++value;}
 };
+// Diagnostic only: command-at-READ is not an acknowledgement from the servo.
+struct Following {
+ struct Side {
+  uint32_t sample_ms=0,request_ms=0,command_ms=0;
+  int16_t tick=0,command=0;
+  uint8_t status=0,issues=0; // unread, waiting, valid, failed, cancelled, TX busy, partial TX
+ } side[2];
+};
+constexpr uint32_t FollowIntervalMs=500,FollowFreshMs=1500;
 struct State {
+ Following following;
+
  float height=0,requested_roll=0,applied_roll=0,measured_roll=NAN;
  float right_percent=0,left_percent=0;
  int16_t right_command=0,left_command=0;

@@ -54,12 +54,13 @@ function legPresentation(packet, live, elapsed, cache) {
     failure: decision.failure
   };
   const detail = valid ? {
+    following: legFollowing(packet, fresh, elapsed),
     position: `PS4脚制御の最終送信位置指令：左 ${l[15] ? l[7] : '未送信'} ／ 右 ${l[15] ? l[6] : '未送信'}（実位置ではありません）`,
     timing: `指令 ${l[8]} ms ／ 同期 ${l[9]} ms ／ 診断 ${packet.leg_ms} ms`,
     counters: `送信 ${l[16]} 回 ／ 送信余裕不足 ${l[17]} 回 ／ 処理最大 ${l[18]} us`,
     torque: `トルク：${['未確認', 'OFF送信待ち', 'OFF指令送信済', 'ON指令送信済'][l[11]] || '不明'}（応答未確認）`,
     limits: `可動制限：${l[14] ? 'あり：上下端・左右差の可動余裕不足' : 'なし'} ／ 共通サーボ可動量目標 ${n(l[0], '%')}`
-  } : { position: '未取得', timing: '未取得', counters: '未取得', torque: '未取得', limits: '未取得' };
+  } : { following: '追従位置：未取得', position: '未取得', timing: '未取得', counters: '未取得', torque: '未取得', limits: '未取得' };
   return { values, detail, fresh, note: decision.note };
 }
 function createLegPanel(view) {
@@ -85,7 +86,7 @@ function createLegPanel(view) {
   const details = make('details', '', section);
   make('summary', '脚部詳細（指令・時刻・通信）', details);
   const detail = {};
-  for (const key of ['position', 'timing', 'counters', 'torque', 'limits']) {
+  for (const key of ['following', 'position', 'timing', 'counters', 'torque', 'limits']) {
     detail[key] = make('p', '', details);
   }
   const guide = make('details', '', section);
@@ -93,7 +94,7 @@ function createLegPanel(view) {
   const list = make('ul', '', guide);
   for (const text of [
     '左スティック上下：上（LY正）で伸長、下（LY負）で短縮。倒し量で速度変更、最大12ポイント/秒。中央で保持。',
-    '左スティック左右：LX負で左目標、LX正で右目標。中央で2°/秒で0°へ戻す。物理方向は最初に照合。',
+    '左スティック左右：LX負で左目標、LX正で右目標。中央で4°/秒で0°へ戻す。物理方向は最初に照合。',
     '停止：×は車輪全停止・脚トルクOFF。走行と脚操作の同時使用は対象外。',
     '支持試験：外部電源のまま機体を支持。×→全解放→Share→Share解放。倒立は開始しません。',
     '初回：実位置を非同期確認。初回受付範囲外・応答失敗は拒否。受付内なら現在位置を保持し、HOMEへ自動移動しません。',

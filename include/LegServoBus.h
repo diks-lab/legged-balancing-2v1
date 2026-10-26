@@ -5,7 +5,7 @@ namespace leg {
 // At most 16 received bytes and one capacity-checked contiguous TX per service.
 template<class IO> class ServoBus {
  public:
- uint8_t stage(const Control&c)const{return off_pending_?7:phase_==Idle&&c.state.active?8:uint8_t(phase_);}
+ uint8_t stage(const Control&c)const{return off_pending_?7:(phase_==Idle||phase_==FollowWait)&&c.state.active?8:uint8_t(phase_);}
  bool busy()const{return phase_!=Idle||off_pending_;}
  bool inspecting()const{return config_active_;}
  bool observing()const{return observe_only_||config_active_||measure_active_||capture_active_;}
@@ -42,6 +42,7 @@ template<class IO> class ServoBus {
   measure_active_=false;phase_=Idle;reply_.clearFrame();c.stop(Reason::ConfigReadOnly);
  }
  void off(Control& c,uint32_t now=0){
+  if(phase_==FollowWait)c.state.following.side[follow_side_].status=4;
   cancelCalibration(c,now);
   stopMeasurement(c,now);
   if(config_active_){c.state.configuration.status=3;c.state.configuration.error=uint8_t(Reason::Stopped);c.state.configuration.finished_ms=now;}
@@ -51,6 +52,10 @@ template<class IO> class ServoBus {
  }
  void cancel(){capture_active_=false;phase_=Idle;reply_.clearFrame();observe_only_=false;config_active_=false;measure_active_=false;}
  void service(IO& io,Control& c,uint32_t now){
+  if((!c.state.active||((c.state.stick.flags&32)&&!(c.state.stick.flags&64)))&&phase_==FollowWait){
+   c.state.following.side[follow_side_].status=4;phase_=Idle;reply_.clearFrame();
+  }
+  if(!c.state.active||((c.state.stick.flags&32)&&!(c.state.stick.flags&64)))for(auto&f:c.state.following.side)if(f.status==1||f.status==2)f.status=4;
   serviceOnce(io,c,now);c.observe(Source::Bus,now,stage(c));
  }
  private:
@@ -68,6 +73,10 @@ template<class IO> class ServoBus {
    const auto result=reply_.feed(uint8_t(byte));
    if(result==ServoReply::Bad){failReceive(c,now);break;}
    if(result!=ServoReply::Good)continue;
+   if(phase_==FollowWait){
+    auto&f=c.state.following.side[follow_side_];f.tick=reply_.position();f.sample_ms=now;f.status=2;f.issues=0;
+    phase_=Idle;reply_.clearFrame();continue;
+   }
    if(phase_==CaptureWait){c.state.calibration.received(reply_.position(),true,now);capture_active_=false;phase_=Idle;reply_.clearFrame();continue;}
    if(phase_==MeasureWait){
     auto&m=c.state.measurement;m.capture(m.side,reply_.position(),now);m.side^=1;
@@ -98,7 +107,7 @@ template<class IO> class ServoBus {
     else phase_=Seed;
    }
   }
-  if(int32_t(now-next_send_)<0)return;
+  if(int32_t(now-next_send_)<0){follow(io,c,now);return;}
   if(off_pending_){if(torque(io,c,false,now))off_pending_=false;return;}
   if(phase_==CaptureSend){
    uint8_t p[]={255,255,uint8_t(c.state.calibration.point<2?RightId:LeftId),4,2,56,2,0};checksum(p,8);
@@ -133,19 +142,38 @@ template<class IO> class ServoBus {
   }
   if(c.state.active){
    const int16_t right=c.target(true),left=c.target(false);
-   if(!c.state.command_valid||right!=c.state.right_command||left!=c.state.left_command)goal(io,c,right,left,now);
+   if(!c.state.command_valid||right!=c.state.right_command||left!=c.state.left_command){goal(io,c,right,left,now);return;}
+   follow(io,c,now);
   }
  }
  private:
- enum Phase:uint8_t { Idle,ReadRight,WaitRight,ReadLeft,WaitLeft,Seed,Enable,ConfigSend=9,ConfigWait,MeasureSend,MeasureWait,CaptureSend,CaptureWait } phase_=Idle;
+ enum Phase:uint8_t { Idle,ReadRight,WaitRight,ReadLeft,WaitLeft,Seed,Enable,ConfigSend=9,ConfigWait,MeasureSend,MeasureWait,CaptureSend,CaptureWait,FollowWait } phase_=Idle;
  ServoReply reply_;
  int16_t positions_[2]{};
- uint32_t first_ms_=0,next_send_=0;
+ uint32_t first_ms_=0,next_send_=0,follow_due_=0;
+ uint8_t follow_side_=1;
  bool off_pending_=false,observe_only_=false,config_active_=false,measure_active_=false,capture_active_=false;
- bool waiting()const{return phase_==WaitRight||phase_==WaitLeft||phase_==ConfigWait||phase_==MeasureWait||phase_==CaptureWait;}
+ bool waiting()const{return phase_==WaitRight||phase_==WaitLeft||phase_==ConfigWait||phase_==MeasureWait||phase_==CaptureWait||phase_==FollowWait;}
  void failReceive(Control&c,uint32_t now){
+  if(phase_==FollowWait){
+   auto&f=c.state.following.side[follow_side_];f.status=3;f.issues=reply_.failure(now).issues;
+   phase_=Idle;reply_.clearFrame();return; // diagnostic failure never changes drive state
+  }
   c.state.rx_failure=reply_.failure(now);
   fail(c,(c.state.rx_failure.issues&RxTimeout)?Reason::ReplyTimeout:Reason::ReplyInvalid,now);
+ }
+ void follow(IO&io,Control&c,uint32_t now){
+  if(phase_!=Idle||off_pending_||c.want_sync||!c.state.active||!c.state.command_valid||c.state.torque!=3||
+     ((c.state.stick.flags&32)&&!(c.state.stick.flags&64))||int32_t(now-follow_due_)<0)return;
+  // One alternating READ/500ms, independent of the 50ms position-write budget.
+  // A due goal/OFF was already handled first. Never waits for TX capacity.
+  follow_due_=now+FollowIntervalMs;follow_side_^=1;
+  auto&f=c.state.following.side[follow_side_];f.request_ms=now;f.command_ms=c.state.command_ms;
+  f.command=follow_side_?c.state.left_command:c.state.right_command;f.issues=0;
+  uint8_t p[]={255,255,uint8_t(follow_side_?LeftId:RightId),4,2,56,2,0};checksum(p,8);
+  if(io.availableForWrite()<8){f.status=5;return;}
+  if(io.write(p,8)!=8){f.status=6;return;}
+  ++c.state.tx_frames;f.status=1;reply_.begin(p[2],now);phase_=FollowWait;
  }
  static void checksum(uint8_t*p,unsigned n){uint8_t sum=0;for(unsigned i=2;i+1<n;++i)sum+=p[i];p[n-1]=~sum;}
  void fail(Control&c,Reason reason,uint32_t now){

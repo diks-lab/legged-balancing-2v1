@@ -17,11 +17,11 @@
       if(release){send(center);wait(100);}
     };
     auto verifyFrame=[&](){
-      assert(Serial2.last_size==24&&Serial2.last[4]==0x83&&Serial2.last[5]==41);
-      const int r=leg::decodePosition(uint16_t(Serial2.last[9])|(uint16_t(Serial2.last[10])<<8));
-      const int l=leg::decodePosition(uint16_t(Serial2.last[17])|(uint16_t(Serial2.last[18])<<8));
+      assert(Serial2.goals>0&&Serial2.last_goal[4]==0x83&&Serial2.last_goal[5]==41);
+      const int r=leg::decodePosition(uint16_t(Serial2.last_goal[9])|(uint16_t(Serial2.last_goal[10])<<8));
+      const int l=leg::decodePosition(uint16_t(Serial2.last_goal[17])|(uint16_t(Serial2.last_goal[18])<<8));
       assert(r==leg_control.state.right_command&&l==leg_control.state.left_command);
-      unsigned sum=0;for(unsigned i=2;i<24;++i)sum+=Serial2.last[i];assert((sum&255)==255);
+      unsigned sum=0;for(unsigned i=2;i<24;++i)sum+=Serial2.last_goal[i];assert((sum&255)==255);
     };
     fixture(2000,2120);
     auto r=leg_control.state.right_command,l=leg_control.state.left_command;auto goals=Serial2.goals;

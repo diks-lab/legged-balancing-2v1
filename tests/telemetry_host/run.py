@@ -112,6 +112,8 @@ int main(){
   measure.status=3;measure.acquired=measure.valid=3;measure.side=1;measure.error=12;measure.reject_reason=27;
   auto&stick=all.legs.stick;stick.ms=UINT32_MAX;stick.lx=stick.ly=-128;stick.rx=stick.ry=127;
   stick.height=stick.roll=stick.applied_height=stick.applied_roll=-1;stick.drive=-.05f;stick.yaw=-.1f;stick.flags=127;
+  auto&tx=all.legs.tx;tx.calculated_valid=true;tx.calculated_right=tx.calculated_left=-32767;tx.calculated_ms=UINT32_MAX;
+  for(auto&f:all.legs.following.side){f.status=3;f.issues=63;f.tick=f.command=-32767;f.sample_ms=f.request_ms=f.command_ms=UINT32_MAX;}
   char wheel[2048];assert(diagnostic::wheelReadMessage(wheel,sizeof(wheel),all,"0123456789abcdef",UINT32_MAX));
   assert(strstr(wheel,"\"wheel0\":[")&&strstr(wheel,"\"wheel1\":["));
   assert(strstr(wheel,"\"legs\":["));

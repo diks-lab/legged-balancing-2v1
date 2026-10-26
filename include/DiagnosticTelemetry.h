@@ -146,6 +146,11 @@ inline bool wheelReadMessage(char*dest,size_t capacity,const Snapshot&s,const ch
   (unsigned long)l.tx_frames,(unsigned long)l.tx_busy,(unsigned long)l.max_service_us);
  j.add(",\"leg_mode\":%u,\"leg_roll_confirmed\":%s,\"leg_roll_sign\":%d",unsigned(l.mode),
   leg::RollDirectionConfirmed?"true":"false",int(leg::ImuRollSign));
+ const auto&t=l.tx;
+ j.add(",\"leg_follow\":[%u,%d,%d,%lu",unsigned(t.calculated_valid),int(t.calculated_right),int(t.calculated_left),(unsigned long)t.calculated_ms);
+ for(const auto&f:l.following.side)j.add(",[%u,%d,%lu,%lu,%d,%lu,%u]",unsigned(f.status),int(f.tick),
+  (unsigned long)f.sample_ms,(unsigned long)f.request_ms,int(f.command),(unsigned long)f.command_ms,unsigned(f.issues));
+ j.add("]");
  const auto&p=l.positions;
  j.add(",\"leg_position\":[%lu,%u,%u,%u",(unsigned long)p.attempt_ms,
   unsigned(p.read_only),unsigned(p.acquired),unsigned(p.current));

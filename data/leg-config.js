@@ -86,3 +86,24 @@ function legMotionProfile(packet) {
   }
   return `上下最大 ${rate} ポイント/秒 ／ ${range}。サーボ可動量の割合。`;
 }
+
+// READ feedback is diagnostic only. UART write success is not arrival feedback.
+function legFollowing(packet, fresh, elapsed) {
+  const f = packet?.leg_follow, l = packet?.legs;
+  if (!Array.isArray(f) || f.length !== 6 || !Array.isArray(l)) return '追従位置：未取得';
+  const now = ((packet.leg_ms || 0) + elapsed) >>> 0;
+  return [0, 1].map(side => {
+    const p = f[4 + side], sent = l[15] ? l[6 + side] : null;
+    const name = side ? '左' : '右';
+    if (!Array.isArray(p) || p.length !== 7) return `${name}：追従診断不正・現在値不明`;
+    let status = ['未取得', '読取り中', '正常取得', '読取り失敗', '停止・切断後の最終値', '送信空き不足', 'READ送信失敗'][p[0]] || '不明';
+    const valid = fresh && p[0] === 2 && ((now - p[2]) >>> 0) <= 1500;
+    if (p[0] === 2 && !valid) status = '古い取得値・現在値不明';
+    const reasons = LEG_RX_ISSUES.filter(([bit]) => p[6] & bit).map(([, name]) => name).join('・') || 'なし';
+    const calc = f[0] ? f[1 + side] : '未計算';
+    const error = valid && Number.isFinite(sent) ? p[1] - sent : '不明';
+    return `${name}：計算 ${calc} ／ UART指令 ${sent ?? '未送信'} ／ 実位置 ${valid ? p[1] : '現在値不明'} tick` +
+      `\n${status}${!fresh ? '・通信停止／最終受信情報' : ''} ／ 取得 ${p[2]} ms ／ READ ${p[3]} ms ／ ${reasons}（${p[6]}）` +
+      `\n最終取得 ${p[2] ? p[1] : '未取得'} tick ／ 差（実位置−最新UART指令）${error} tick ／ READ時指令 ${p[4]}（${p[5]} ms）。到達・受理保証なし。`;
+  }).join('\n');
+}

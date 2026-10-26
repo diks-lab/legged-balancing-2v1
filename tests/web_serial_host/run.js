@@ -72,6 +72,15 @@ vm.runInContext(`
   const rollView = legPresentation(signedRoll, true, 0, {});
   if (!rollView.values.roll.includes('AngleX -9.1') || !rollView.values.roll.includes('左正 9.1') ||
       !rollView.values.correction.includes('有効')) throw Error('measured roll sign presentation');
+  const follow = { ...legPacket, leg_follow: [1, 1980, 2140, 900,
+    [2, 1979, 990, 989, 1981, 980, 0], [3, 2145, 850, 990, 2140, 980, 32]] };
+  const following = legFollowing(follow, true, 0);
+  if (!following.includes('実位置 1979') || !following.includes('差（実位置−最新UART指令）-55') ||
+      !following.includes('読取り失敗') || !following.includes('READ時指令 1981')) throw Error('independent real feedback');
+  if (!legFollowing(follow, true, 1600).includes('古い取得値') ||
+      !legFollowing(follow, false, 0).includes('通信停止／最終受信情報')) throw Error('feedback freshness');
+  follow.leg_follow[4][0] = 0;
+  if (legFollowing(follow, true, 0).includes('実位置 1979')) throw Error('unread must not be current');
   const legCache = {};
   const legState = legPresentation(legPacket, true, 0, legCache);
   if (legState.values.mode !== '支持試験（倒立OFF）' || legState.values.available !== '上下操作可能' ||
