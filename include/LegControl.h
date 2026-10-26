@@ -14,6 +14,7 @@ constexpr uint8_t ServoAcceleration=15;
 constexpr float HeightRate=12;            // maximum servo-travel percentage points/s
 constexpr float RollRate=4,MaxRoll=3;     // deg/s, deg
 constexpr float RollGain=3;              // differential extension pp/deg
+constexpr float TargetHysteresisTicks=.25f; // extra margin around the half-tick boundary; command coordinates only
 constexpr float DifferentialRate=4;      // pp/s, limits feedback-induced movement
 // Enable only after measuring both the IMU sign and the leg extension directions.
 #ifndef LEG_ROLL_DIRECTION_CONFIRMED
@@ -153,7 +154,13 @@ class Control {
  }
  int16_t target(bool right)const{
   const float pct=right?state.right_percent:state.left_percent;
-  return int16_t(lroundf(zeroTick(right)+(fullTick(right)-zeroTick(right))*pct/100));
+  const float ticks=zeroTick(right)+(fullTick(right)-zeroTick(right))*pct/100;
+  const int16_t rounded=int16_t(lroundf(ticks)),previous=right?state.right_command:state.left_command;
+  // Never alter initial preload or outside-range return. Retain sub-tick intent
+  // in right/left_percent; suppress only repeated crossings of one round boundary.
+  if(state.active&&state.command_valid&&!state.recovery&&inRange(right,previous)&&inRange(right,rounded)&&
+     fabsf(ticks-previous)<=.5f+TargetHysteresisTicks)return previous;
+  return rounded;
  }
  bool commandAllowed(int16_t right,int16_t left)const{
   return state.recovery?accepted(true,right)&&accepted(false,left):inRange(true,right)&&inRange(false,left);
