@@ -41,16 +41,16 @@ with tempfile.TemporaryDirectory() as tmp:
 
     # Compare the same real controller under the previous single constant and current P.
     header=Path('include/LegControl.h').read_text()
-    assert header.count('constexpr float RollGain=2;')==1
+    assert header.count('constexpr float RollGain=3;')==1
     outputs=[]
-    for gain in (1,2):
-        (Path(tmp)/'LegControl.h').write_text(header.replace('constexpr float RollGain=2;',f'constexpr float RollGain={gain};'))
+    for gain in (2,3):
+        (Path(tmp)/'LegControl.h').write_text(header.replace('constexpr float RollGain=3;',f'constexpr float RollGain={gain};'))
         subprocess.run(['c++','-include','tests/leg_host/fixture.h','-std=c++17','-Wall','-Wextra','-Werror',
             '-I'+tmp,'-Iinclude',f'-DEXPECTED_GAIN={gain}','tests/leg_host/gain.cpp','-o',str(binary),*flags],check=True)
         outputs.append([float(v) for v in subprocess.check_output([str(binary)],text=True).split()])
     assert len(outputs[0])==len(outputs[1])==30
-    assert all(abs(new-2*old)<.0001 for old,new in zip(*outputs))
-    print('PASS: real P1/P2 control comparison, 2x unclipped correction at +/-0.25/0.5/1 deg, all 1/5/10/20/50ms periods; unchanged 4 pp/s, height and range caps')
+    assert all(abs(new-1.5*old)<.0001 for old,new in zip(*outputs))
+    print('PASS: real P2/P3 control comparison, 1.5x unclipped correction at +/-0.25/0.5/1 deg, all 1/5/10/20/50ms periods; unchanged 4 pp/s, height and range caps')
 
     import sys
     sys.dont_write_bytecode=True
