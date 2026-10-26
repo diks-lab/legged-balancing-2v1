@@ -29,31 +29,35 @@
     const auto oldHeight=leg_control.state.height;wait(500);assert(leg_control.state.height>oldHeight);
     assert(leg_control.state.stick.applied_height==1&&leg_control.state.stick.applied_roll==0&&leg_control.state.requested_roll==0);
     assert(leg_control.state.operation.allowed&&leg_control.state.operation.operation==uint8_t(leg::Operation::Extend));
-    send(zero);wait(100);const auto heldHeight=leg_control.state.height;wait(500);near(leg_control.state.height,heldHeight);
-    // Actual callback near-half input (56/111) and no-notification hold retain time-based proportional speed.
-    fixture(true);Ps4InputState half{};half.left_stick_y=72;send(half);wait(350);assert(leg_control.state.active);
-    const float halfStart=leg_control.state.height;wait(1000);
-    assert(fabsf(leg_control.state.height-halfStart-(12.f*56.f/111.f))<.005f);
-    send(zero);wait(50);const float halfHold=leg_control.state.height;wait(200);near(leg_control.state.height,halfHold);
-    Ps4InputState tiny{};tiny.left_stick_y=17;send(tiny);const float tinyStart=leg_control.state.height;wait(1000);
-    assert(fabsf(leg_control.state.height-tinyStart-12.f/111.f)<.002f);
-    // Right alone cannot start balance/drive in the bench, and it freezes legs.
-    send(forward);wait(100);send(yaw);wait(50);assert(!lqr_direction_test_armed&&!balance_wait_active&&!lqr_drive_start_pending&&!leg_control.state.active);
-    send(up);wait(300); // Right was centered but left never returned to center after priority.
-    assert(!leg_control.state.active&&!leg_control.want_sync);
-    send(zero);send(up);wait(300);assert(leg_control.state.active&&!lqr_drive_start_pending);
-    // Normal drive request and yaw only use right axes; simultaneous left is frozen.
+    send(zero);wait(2000);near(leg_control.state.height,leg::homeHeight());
+    // Curve-position goal: holding does not integrate, and center returns HOME.
+    fixture(true);Ps4InputState half{};half.left_stick_y=72;send(half);wait(1500);assert(leg_control.state.active);
+    near(leg_control.state.height,leg::heightTarget(leg::heightInput(56.f/111.f)));
+    const auto heldHeight=leg_control.state.height;wait(1000);near(leg_control.state.height,heldHeight);
+    send(zero);wait(1500);near(leg_control.state.height,leg::homeHeight());
+    Ps4InputState tiny{};tiny.left_stick_y=17;send(tiny);wait(1000);
+    near(leg_control.state.height,leg::heightTarget(leg::heightInput(1.f/111.f)));
+    // Bench right input does not start wheels or interrupt accepted leg operation.
+    send(forward);wait(100);send(yaw);wait(50);
+    assert(!lqr_direction_test_armed&&!balance_wait_active&&!lqr_drive_start_pending&&leg_control.state.active);
+    send(up);wait(300);assert(leg_control.state.active);
+    // Simultaneous left/right follows both owners; no new sync or ON on drive end.
     fixture(false);send(up);wait(350);assert(leg_control.state.active&&!lqr_drive_start_pending&&!lqr_auto_drive_active);
+    const auto onBeforeDrive=Serial2.ons;
     Ps4InputState simultaneous=up;simultaneous.right_stick_y=-127;simultaneous.right_stick_x=127;send(simultaneous);
-    assert(lqr_drive_start_pending&&!leg_control.state.active&&ps4_leg_drive_priority);
+    assert(lqr_drive_start_pending&&leg_control.state.active&&ps4_right_input_active&&leg_control.state.mode==3);
     startPendingLqrDrive();wait(300);assert(lqr_auto_drive_active&&ps4_yaw_request>0);
-    assert(leg_control.state.stick.applied_height==0&&leg_control.state.stick.drive>0);
+    assert(leg_control.state.stick.drive>0&&leg_control.state.active&&leg_control.state.operation.allowed);
     send(up);assert(lqr_soft_stop_active||ps4_drive_state==Ps4DriveState::Neutral);
     for(unsigned i=0;i<800&&ps4_drive_state!=Ps4DriveState::Neutral;++i){step();nowMs+=50;cycle();}
     assert(!lqr_soft_stop_active&&!lqr_auto_drive_active&&!lqr_drive_start_pending);
-    const auto afterDrive=Serial2.reads;wait(100);assert(!leg_control.state.active&&!leg_control.want_sync&&Serial2.reads==afterDrive);
-    Ps4InputState band{};band.left_stick_y=-15;send(band);send(up);wait(150);assert(Serial2.reads==afterDrive);
-    send(zero);send(up);wait(350);assert(leg_control.state.active);
+    assert(leg_control.state.active&&Serial2.ons==onBeforeDrive);
+    send(zero);wait(2000);near(leg_control.state.height,leg::homeHeight());
+    // Exceptional wheel recovery still inhibits and requires central re-arm.
+    drive_recovery_state=DriveRecoveryState::AttitudeOnly;cycle();assert(!leg_control.state.active);
+    drive_recovery_state=DriveRecoveryState::Inactive;send(up);wait(100);assert(!leg_control.state.active);
+    send(zero);send(up);wait(300);assert(leg_control.state.active);
+    Ps4InputState band{};band.left_stick_y=-15;
     // FOC's fresh-event barrier closes the left gate as well as the right drive gate.
     fixture(true);rearmPs4AfterFoc();send(up);wait(150);
     assert(!leg_control.state.active&&!leg_control.want_sync&&!leg_control.state.operation.allowed);
@@ -99,7 +103,7 @@
     }
     fixture(true);send(down);wait(4000);
     const auto minR=leg_control.state.right_command,minL=leg_control.state.left_command;const auto minGoals=Serial2.goals;
-    wait(300);assert(leg_control.state.limited&&Serial2.goals==minGoals&&leg_control.state.right_command==minR&&leg_control.state.left_command==minL);
-    assert(minR==leg::position(true,0)||minL==leg::position(false,0));
-    std::cout<<"PASS: actual PS4 sticks/D-pad routing, proportional/diagonal height, right priority/recenter, bench no drive, errors/disconnect/stop/fall/wheel retry barriers, exact outer hold\n";
+    wait(300);assert(Serial2.goals==minGoals&&leg_control.state.right_command==minR&&leg_control.state.left_command==minL);
+    assert(leg::inRange(true,minR)&&leg::inRange(false,minL)&&fabsf(leg_control.state.height-leg::homeLow())<.001f);
+    std::cout<<"PASS: actual PS4 sticks/D-pad routing, HOME/curved-position height, drive+leg co-control, bench no drive, errors/disconnect/stop/fall/wheel retry barriers, exact outer hold\n";
   }

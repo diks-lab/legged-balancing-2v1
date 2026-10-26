@@ -11,11 +11,18 @@ namespace leg {
 constexpr uint8_t RightId=1,LeftId=2;
 constexpr uint16_t ServoSpeed=150;
 constexpr uint8_t ServoAcceleration=15;
+constexpr float HomeRangeFraction=.5f;    // normal operational HOME, distinct from retracted legacy HOME
 constexpr float HeightRate=12;            // maximum servo-travel percentage points/s
-constexpr float RollRate=4,MaxRoll=3;     // deg/s, deg
+constexpr float MaxRoll=3;              // direct stick-position target limit, deg
 constexpr float RollGain=3;              // differential extension pp/deg
 constexpr float TargetHysteresisTicks=.25f; // extra margin around the half-tick boundary; command coordinates only
-constexpr float DifferentialRate=4;      // pp/s, limits feedback-induced movement
+constexpr float DifferentialRate=8;      // pp/s, limits feedback-induced movement
+// Match target slew to the differential actuator budget: P * deg/s = pp/s.
+constexpr float RollRate=DifferentialRate/RollGain;
+constexpr float HeightCurveBlend=.5f,RollCurveBlend=.5f;
+static_assert(HomeRangeFraction>=0&&HomeRangeFraction<=1,"HOME must be inside normal range");
+static_assert(HeightCurveBlend>=0&&HeightCurveBlend<=1&&RollCurveBlend>=0&&RollCurveBlend<=1,
+              "input curve blends must be within 0..1");
 // Enable only after measuring both the IMU sign and the leg extension directions.
 #ifndef LEG_ROLL_DIRECTION_CONFIRMED
 #define LEG_ROLL_DIRECTION_CONFIRMED 0
@@ -31,6 +38,13 @@ constexpr bool RollDirectionConfirmed=LEG_ROLL_DIRECTION_CONFIRMED;
 constexpr float ImuRollSign=LEG_IMU_ROLL_SIGN; // ignored for actuation until confirmed
 constexpr uint32_t SendIntervalMs=50,ReplyTimeoutMs=10,SyncMaxAgeMs=250;
 inline float clamp(float x,float lo,float hi){return fmaxf(lo,fminf(hi,x));}
+inline float shapeInput(float x,float blend){x=clamp(x,-1,1);return x*((1-blend)+blend*x*x);}
+inline float heightInput(float normalized){return shapeInput(normalized,HeightCurveBlend);}
+inline float rollInput(float normalized){return shapeInput(normalized,RollCurveBlend);}
+inline float homeLow(){return fmaxf(normalLow(true),normalLow(false));}
+inline float homeHigh(){return fminf(normalHigh(true),normalHigh(false));}
+inline float homeHeight(){return homeLow()+HomeRangeFraction*(homeHigh()-homeLow());}
+inline float heightTarget(float axis){const float home=homeHeight();return home+axis*(axis>=0?homeHigh()-home:home-homeLow());}
 inline float toward(float x,float target,float step){return x+clamp(target-x,-step,step);}
 // Common displacement preserves both legs' existing difference. Every interval contains zero.
 inline void movementBounds(float rightPct,float leftPct,float&low,float&high,bool inward){
@@ -91,7 +105,7 @@ struct State {
  Reason reason=Reason::ReleaseRequired;
  uint8_t torque=0; // unknown, OFF pending, OFF queued, ON queued; never physical feedback
  bool active=false,synced=false,limited=false,command_valid=false;
- uint8_t mode=0; // unavailable, supported stopped test, stationary balance
+ uint8_t mode=0; // unavailable, supported stopped test, balance, drive+legs
  TxDiagnostics tx;
  RxFailure rx_failure;
  PositionObservation positions;
@@ -126,7 +140,7 @@ class Control {
  void rawStick(int8_t lx,int8_t ly,int8_t rx,int8_t ry,uint32_t received){
   auto&s=state.stick;s.lx=lx;s.ly=ly;s.rx=rx;s.ry=ry;s.ms=received;
   // Measured PS4 axes: physical UP is positive LY. Convert once here.
-  s.height=ps4_control::legAxis(ly);s.roll=-ps4_control::legAxis(lx);
+  s.height=heightInput(ps4_control::legAxis(ly));s.roll=rollInput(-ps4_control::legAxis(lx));
   state.operation.raw_keys=ps4_control::directions(s.height,s.roll);
  }
  void stickInput(int8_t lx,int8_t ly,int8_t rx,int8_t ry,bool gate,uint32_t now,uint32_t received){
@@ -136,7 +150,7 @@ class Control {
  void received(uint8_t value,uint32_t now){state.operation.raw_keys=value;observe(Source::Input,now,state.operation.phase);}
  void disconnect(){
   keys=0;input_gate=false;height_input_=roll_input_=0;
-  state.requested_roll=state.applied_roll=0;roll_rearm_=true;
+  state.requested_roll=state.applied_roll=0;roll_rearm_=true;height_rearm_=true;
   state.stick.applied_height=state.stick.applied_roll=0;
   // Cancel an unsent ramp increment; hold the last position actually queued to UART.
   if(state.active&&state.command_valid){
@@ -147,7 +161,7 @@ class Control {
  void stop(Reason reason){
   state.operation.tx_wait=false;height_input_=roll_input_=0;state.stick.applied_height=state.stick.applied_roll=0;state.recovery=state.return_directions=0;
   state.active=state.synced=false;want_sync=false;armed_=false;state.reason=reason;
-  state.requested_roll=state.applied_roll=0;state.limited=false;last_=0;
+  state.requested_roll=state.applied_roll=0;state.limited=false;last_=0;height_rearm_=true;
  }
  bool accepted(bool right,int16_t tick)const{
   return state.acceptance.valid()&&(inRange(right,tick)||(state.acceptance.extra&&state.acceptance.contains(right,tick)));
@@ -172,12 +186,12 @@ class Control {
   state.height=(r+l)/2;difference_=(r-l)/2;
   state.right_percent=r;state.left_percent=l;state.requested_roll=state.applied_roll=0;
   state.recovery=outside?1:0;
-  roll_rearm_=true;state.return_directions=0;
+  roll_rearm_=true;height_rearm_=true;state.return_directions=0;
   state.synced=true;state.sync_ms=now;want_sync=false;last_=now;return true;
  }
  void activate(uint32_t now){state.active=true;state.reason=state.recovery?Reason::RecoveryRelease:Reason::Accepted;last_=now;}
- void tick(uint32_t now,bool eligible,bool moving,bool imu_valid,float roll){
-  update(now,eligible,moving,imu_valid,roll);
+ void tick(uint32_t now,bool eligible,bool paused,bool imu_valid,float roll){
+  update(now,eligible,paused,imu_valid,roll);
   if(state.synced&&validGeometry(activeGeometry())){
    state.tx.calculated_right=target(true);state.tx.calculated_left=target(false);
    state.tx.calculated_ms=now;state.tx.calculated_valid=true;
@@ -246,12 +260,12 @@ class Control {
   }
  }
  private:
- void update(uint32_t now,bool eligible,bool moving,bool imu_valid,float roll){
+ void update(uint32_t now,bool eligible,bool paused,bool imu_valid,float roll){
   state.measured_roll=imu_valid?roll:NAN;
   const uint32_t elapsed=last_?uint32_t(now-last_):0;last_=now;
   if(!eligible){stop(Reason::Stopped);return;}
   if(!validGeometry(activeGeometry())){stop(Reason::CalibrationRequired);return;}
-  if(moving){stop(Reason::Driving);return;}
+  if(paused){stop(Reason::Driving);return;} // caller passes protective pause, not ordinary drive
   if(!imu_valid){stop(Reason::ImuInvalid);return;}
   if(centered_&&input_gate)armed_=true;
   if(!state.active){
@@ -308,21 +322,26 @@ class Control {
     // Adopt exactly the emitted ticks; never re-level at the mode transition.
     state.right_percent=percent(true,target(true));state.left_percent=percent(false,target(false));
     state.height=(state.right_percent+state.left_percent)/2;difference_=(state.right_percent-state.left_percent)/2;
-    state.recovery=state.return_directions=0;roll_rearm_=true;
+    state.recovery=state.return_directions=0;roll_rearm_=true;height_rearm_=true;
    }
    return;
   }
   float low,high;pairBounds(low,high,false);
-  const float requested=height_axis*HeightRate*dt,delta=clamp(requested,low,high);
+  if(height_rearm_&&height_axis)height_rearm_=false;
+  // Explicit Y operation arms normal HOME/position tracking; sync alone holds.
+  const float requested=height_rearm_?0:clamp(heightTarget(height_axis)-state.height,-HeightRate*dt,HeightRate*dt);
+  const float delta=clamp(requested,low,high);
   if(fabsf(delta)>.000001f)state.stick.applied_height=height_axis;
   state.right_percent+=delta;state.left_percent+=delta;
   state.height=(state.right_percent+state.left_percent)/2;
-  const bool height_limited=height_axis&&fabsf(delta-requested)>.00001f;
-  const float prior_roll=state.requested_roll;
+  const bool height_limited=fabsf(delta-requested)>.00001f;
   if(roll_rearm_&&(keys&12)&&roll_confirmed_)roll_rearm_=false;
-  if(roll_confirmed_&&!roll_rearm_&&roll_axis)state.requested_roll=clamp(state.requested_roll+roll_axis*RollRate*dt,-MaxRoll,MaxRoll);
-  else if(roll_confirmed_&&!roll_rearm_&&!(keys&12))state.requested_roll=toward(state.requested_roll,0,RollRate*dt);
-  if(state.requested_roll!=prior_roll&&roll_axis)state.stick.applied_roll=roll_axis;
+  if(roll_confirmed_&&!roll_rearm_){
+   // Opposite digital test-adapter keys hold; a real analog stick has one X value.
+   const float target_roll=(keys&12)==12?state.requested_roll:roll_axis*MaxRoll;
+   state.requested_roll=toward(state.requested_roll,target_roll,RollRate*dt);
+   state.stick.applied_roll=roll_axis;
+  }
   const float diffLo=fmaxf(normalLow(true)-state.height,state.height-normalHigh(false)),
               diffHi=fminf(normalHigh(true)-state.height,state.height-normalLow(false));
   const float room=fminf(fabsf(diffLo),fabsf(diffHi));
@@ -338,7 +357,7 @@ class Control {
  private:
  uint32_t last_=0;
  float difference_=0;
- bool armed_=false,roll_confirmed_=false,roll_rearm_=false,centered_=true;
+ bool armed_=false,roll_confirmed_=false,roll_rearm_=false,height_rearm_=true,centered_=true;
  float height_input_=0,roll_input_=0;
  void setInput(float height,float roll,bool centered,bool gate,uint32_t now){
   state.stick.height=height;state.stick.roll=roll;centered_=centered;

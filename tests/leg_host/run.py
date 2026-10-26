@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory() as tmp:
         outputs.append([float(v) for v in subprocess.check_output([str(binary)],text=True).split()])
     assert len(outputs[0])==len(outputs[1])==30
     assert all(abs(new-1.5*old)<.0001 for old,new in zip(*outputs))
-    print('PASS: real P2/P3 control comparison, 1.5x unclipped correction at +/-0.25/0.5/1 deg, all 1/5/10/20/50ms periods; unchanged 4 pp/s, height and range caps')
+    print('PASS: real P2/P3 control comparison, 1.5x unclipped correction at +/-0.25/0.5/1 deg, all 1/5/10/20/50ms periods; 8 pp/s, height and range caps')
 
     # Same UART path at the same 50ms cadence: reproduce the old rounding chatter.
     chatter=[]
@@ -63,6 +63,10 @@ with tempfile.TemporaryDirectory() as tmp:
     assert chatter[0][0]>=90 and chatter[0][1]>=180 and chatter[1]==[0,0]
     print('PASS: same 50ms stream, rounding-boundary chatter old/new frames/travel=',chatter,
           '; both directions/return monotonic, <=0.75 tick error, exact initial/outside behavior')
+
+    subprocess.run(['c++','-include','tests/leg_host/fixture.h','-std=c++17','-Wall','-Wextra','-Werror','-Iinclude',
+        'tests/leg_host/feel.cpp','-o',str(binary),*flags],check=True)
+    subprocess.run([str(binary)],check=True)
 
     import sys
     sys.dont_write_bytecode=True

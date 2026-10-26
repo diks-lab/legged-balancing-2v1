@@ -28,12 +28,12 @@
     send(up);wait(1000);assert(leg_control.keys==1&&leg_control.state.stick.height==1&&leg_control.state.stick.applied_height==1);
     assert(leg_control.state.operation.confirmed.raw==1&&leg_control.state.operation.operation==uint8_t(leg::Operation::Extend));
     assert(leg_control.state.right_command<r&&leg_control.state.left_command>l&&Serial2.goals>goals);verifyFrame();
-    send(center);wait(100);r=leg_control.state.right_command;l=leg_control.state.left_command;goals=Serial2.goals;
+    send(center);wait(2000);r=leg_control.state.right_command;l=leg_control.state.left_command;goals=Serial2.goals;
     wait(600);assert(Serial2.goals==goals&&leg_control.state.right_command==r&&leg_control.state.left_command==l);
     send(down);wait(1000);assert(leg_control.keys==2&&leg_control.state.stick.height==-1&&leg_control.state.stick.applied_height==-1);
     assert(leg_control.state.operation.confirmed.raw==2&&leg_control.state.operation.operation==uint8_t(leg::Operation::Retract));
     assert(leg_control.state.right_command>r&&leg_control.state.left_command<l);verifyFrame();
-    send(center);wait(100);r=leg_control.state.right_command;l=leg_control.state.left_command;
+    send(center);wait(2000);r=leg_control.state.right_command;l=leg_control.state.left_command;
     send(diagonal);wait(500);assert(leg_control.state.right_command<r&&leg_control.state.left_command>l);
     assert(leg_control.state.stick.roll==1&&leg_control.state.stick.applied_roll==0&&leg_control.state.requested_roll==0);verifyFrame();
     assert(!lqr_direction_test_armed&&!lqr_auto_drive_active&&!lqr_drive_start_pending);

@@ -1442,9 +1442,9 @@ int main(){
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
-checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-rate.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+Path('tests/drive_host/leg-log.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
+checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-rate.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+Path('tests/drive_host/leg-log.cpp').read_text()+Path('tests/drive_host/leg-combined.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
 if os.environ.get('DRIVE_ROLL_TEST'):
-    checks=checks[:checks.index('int main(){')]+Path('tests/drive_host/leg-roll.cpp').read_text().replace(' std::cout<<"PASS: production roll flags',Path('tests/drive_host/leg-log.cpp').read_text()+' std::cout<<"PASS: production roll flags')
+    checks=checks[:checks.index('int main(){')]+Path('tests/drive_host/leg-roll.cpp').read_text().replace(' std::cout<<"PASS: production roll flags',Path('tests/drive_host/leg-log.cpp').read_text()+Path('tests/drive_host/leg-combined.cpp').read_text()+' std::cout<<"PASS: production roll flags')
     import configparser,shlex
     ini=configparser.ConfigParser();ini.read('platformio.ini')
     production_flags=shlex.split(ini['env:esp32dev']['build_flags'])

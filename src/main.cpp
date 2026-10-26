@@ -371,7 +371,7 @@ struct LegUartIO {
 leg::ServoBus<LegUartIO> leg_bus;
 float ps4_drive_speed_request = 0.0f;
 int ps4_drive_stick_y = 0;
-bool ps4_leg_drive_priority=false;
+bool ps4_right_input_active=false;
 enum class Ps4DriveState {
   Neutral,
   OutsideDeadzone,
@@ -5887,7 +5887,7 @@ bool executePs4Command(OperatorCommand command) {
 
 void resetPs4MotionInput() {
   ps4_drive_speed_request = 0.0f;
-  ps4_drive_stick_y = 0;ps4_leg_drive_priority=false;
+  ps4_drive_stick_y = 0;ps4_right_input_active=false;
   ps4_yaw_request = ps4_yaw_output = 0.0f;
   ps4_motion_ready = false;
 }
@@ -6071,12 +6071,12 @@ void processPs4Input(const Ps4InputState& input, uint32_t now_ms) {
       }
     }
   }
-  ps4_leg_drive_priority=ps4_was_connected&&ps4_controls_released&&!input.cross&&!right_centered;
+  ps4_right_input_active=ps4_was_connected&&ps4_controls_released&&!input.cross&&!right_centered;
   const bool leg_changed=input_changed&&(input.left_stick_x!=previous_ps4_input.left_stick_x||input.left_stick_y!=previous_ps4_input.left_stick_y);
-  if(leg_changed&&right_centered&&!ps4_packet_command_attempted){
+  if(leg_changed&&!ps4_packet_command_attempted){
     ps4_packet_command_attempted=true;
-    const bool routed=ps4_was_connected&&ps4_controls_released&&!input.cross&&!ps4_leg_drive_priority;
-    ps4_diagnostics.decision("LEFT_LEG_INPUT",routed,routed?"QUEUED_SEE_LEG_STATUS":"RELEASE_OR_RIGHT_PRIORITY");
+    const bool routed=test_system_ready&&!emergency_stop_active&&ps4_was_connected&&ps4_controls_released&&!input.cross;
+    ps4_diagnostics.decision("LEFT_LEG_INPUT",routed,!test_system_ready?"FOC_NOT_INITIALIZED":emergency_stop_active?"DRIVERS_DISABLED":routed?"QUEUED_SEE_LEG_STATUS":"RELEASE_REQUIRED");
   }
   const uint16_t dpad_changed=(Ps4Diagnostics::buttons(input)^Ps4Diagnostics::buttons(previous_ps4_input))&0xf0u;
   if(input_changed&&dpad_changed&&!ps4_packet_command_attempted){
@@ -6274,8 +6274,8 @@ void serviceLegSerial(){
 
 void serviceLegControl() {
   const uint32_t start=micros(),now=millis();
-  const bool moving=lqr_auto_drive_active||lqr_drive_start_pending||lqr_soft_stop_active||
-      drive_recovery_state!=DriveRecoveryState::Inactive||ps4_leg_drive_priority;
+  const bool moving=lqr_auto_drive_active||lqr_drive_start_pending||lqr_soft_stop_active;
+  const bool protective_pause=drive_recovery_state!=DriveRecoveryState::Inactive;
   // Existing explicit STOP + u/Share permits supported bench tests without balance.
   const bool bench=!lqr_direction_test_armed&&!balance_wait_active&&
       boot_auto_start.phase==BootAutoStart::Phase::Cancelled;
@@ -6289,7 +6289,7 @@ void serviceLegControl() {
       (calibration_active.load()?leg::Calibration:0)|(polarity_test_active?leg::Polarity:0)|
       (ps4_was_connected?leg::Connected:0);
   leg_control.state.measured_roll=roll;
-  leg_control.state.mode=eligible&&!moving&&imu&&!wheel_comm_suspended?(bench?1:2):0;
+  leg_control.state.mode=eligible&&!protective_pause&&imu&&!wheel_comm_suspended?(bench?1:moving?3:2):0;
   const bool hard_stop=!test_system_ready||emergency_stop_active||calibration_active.load()||
       polarity_test_active||!imu;
   if(leg_bus.measuring()&&!legMeasurementStopped())leg_bus.stopMeasurement(leg_control,now);
@@ -6305,8 +6305,8 @@ void serviceLegControl() {
   } else {
     if(hard_stop&&(leg_control.state.active||leg_control.state.synced||leg_bus.busy()||leg_control.state.torque==3)){
       leg_bus.off(leg_control,now);
-    } else if((moving||!eligible)&&leg_bus.busy())leg_bus.cancel();
-    leg_control.tick(now,eligible,moving,imu,roll);
+    } else if((protective_pause||!eligible)&&leg_bus.busy())leg_bus.cancel();
+    leg_control.tick(now,eligible,protective_pause,imu,roll);
     if(!eligible){
       leg_control.state.reason=!test_system_ready?leg::Reason::Initializing:
           (calibration_active.load()||leg_control.state.calibration.active())?leg::Reason::Calibrating:
@@ -6317,7 +6317,7 @@ void serviceLegControl() {
   }
   leg_control.observe(leg::Source::Guard,now,leg_bus.stage(leg_control));
   leg_bus.service(leg_uart,leg_control,now);
-  const bool healthy=eligible&&!moving&&imu&&!wheel_comm_suspended;
+  const bool healthy=eligible&&!protective_pause&&imu&&!wheel_comm_suspended;
   const leg::Reason gate=!test_system_ready?leg::Reason::Initializing:
       (calibration_active.load()||leg_control.state.calibration.active())?leg::Reason::Calibrating:polarity_test_active?leg::Reason::PolarityTest:
       emergency_stop_active?leg::Reason::ExplicitStop:!leg::validGeometry(leg::activeGeometry())?leg::Reason::CalibrationRequired:!eligible?leg::Reason::StartWaiting:
@@ -6329,7 +6329,7 @@ void serviceLegControl() {
   stick.drive=drive_gate?ps4_drive_speed_request:0;
   stick.yaw=drive_gate?ps4_yaw_request:0;
   stick.flags=(leg_control.input_gate&&ps4_controls_released&&ps4_was_connected?1:0)|(ps4_control::leftCentered(stick.lx,stick.ly)?2:0)|
-      (ps4_leg_drive_priority?4:0)|(drive_gate?8:0)|(leg::RollDirectionConfirmed?16:0)|
+      (ps4_right_input_active?4:0)|(drive_gate?8:0)|(leg::RollDirectionConfirmed?16:0)|
       (ps4_diagnostics.has_input?32:0)|(ps4_was_connected?64:0);
   captureLegSerial(now);
   if(leg_control.state.torque) sms_sts.servo_off=leg_control.state.torque!=3;

@@ -167,7 +167,7 @@ const assets = ['index.html', 'style.css', 'panels.css', 'signals.js', 'history.
       // Short states retain minimum row heights. Long reasons may expand rows;
       // preserving readability takes precedence over identical y coordinates.
       for (const state of legResult.states) assert(state.geometry.every(row => row.h >= 0));
-      assert(legResult.states[1].operation.includes('伸長'));
+      assert(legResult.states[1].operation.includes('背伸び'));
       assert(legResult.states[2].operation.includes('位置確認'));
       assert(legResult.states[3].blocker.includes('応答なし'));
       assert.equal(legResult.states[4].blocker, 'なし');

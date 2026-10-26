@@ -4,7 +4,7 @@
 #include <initializer_list>
 using namespace leg;
 static_assert(RollGain==EXPECTED_GAIN,"compile actual old/new control header");
-static_assert(RollRate==4&&MaxRoll==3&&DifferentialRate==4&&HeightRate==12,"preserve rates/target limit");
+static_assert(RollRate*RollGain==DifferentialRate&&MaxRoll==3&&DifferentialRate==8&&HeightRate==12,"preserve rates/target limit");
 static_assert(SendIntervalMs==50&&ServoSpeed==150&&ServoAcceleration==15,"preserve servo settings");
 int main(){
  activeGeometry()=ConfirmedCandidate;
@@ -17,7 +17,7 @@ int main(){
    const float before=(c.state.right_percent-c.state.left_percent)/2;
    c.tick(t,true,false,true,error);
    const float after=(c.state.right_percent-c.state.left_percent)/2;
-   assert(fabsf(after-before)<=4*dt*.001f+.00001f);
+   assert(fabsf(after-before)<=8*dt*.001f+.00001f);
    assert(c.state.height==height&&!c.state.limited);
    assert(inRange(true,c.target(true))&&inRange(false,c.target(false)));
   }
@@ -28,7 +28,7 @@ int main(){
    const float before=(c.state.right_percent-c.state.left_percent)/2;
    c.tick(t,true,false,true,error>0?100:-100);
    const float after=(c.state.right_percent-c.state.left_percent)/2;
-   assert(fabsf(after-before)<=4*dt*.001f+.00001f);
+   assert(fabsf(after-before)<=8*dt*.001f+.00001f);
    assert(c.state.height==height&&inRange(true,c.target(true))&&inRange(false,c.target(false)));
   }
   assert(c.state.limited);

@@ -1,7 +1,7 @@
 'use strict';
 const LEG_SOURCES = ['未確定', 'PS4入力', '脚制御', 'UART処理', '安全判定', '停止処理', 'シリアル'];
 const LEG_PHASES = ['待機', '右要求', '右応答待ち', '左要求', '左応答待ち', '位置プリロード', 'トルクON待ち', 'OFF処理', '動作中', '設定要求', '設定応答待ち', '測定要求', '測定応答待ち', '校正位置要求', '校正位置応答待ち'];
-const LEG_OPERATIONS = ['待機・高さ保持', '伸長指令', '短縮指令', '左傾斜指令', '右傾斜指令',
+const LEG_OPERATIONS = ['待機・目標追従', '背伸び目標', 'しゃがみ目標', '左傾斜目標', '右傾斜目標',
   '位置確認・同期中', '停止・条件待ち', '操作失敗・左を中央へ戻す', '左スティック中央待ち'];
 function legDecision(packet, live, elapsed) {
   const s = packet?.leg_state;
@@ -18,7 +18,7 @@ function legDecision(packet, live, elapsed) {
   }
   return {
     fresh,
-    mode: valid ? ['操作不可', '支持試験（倒立OFF）', '静止倒立'][s[2]] || '未確定' : '未取得',
+    mode: valid ? ['操作不可', '支持試験（倒立OFF）', '倒立中', '走行併用'][s[2]] || '未確定' : '未取得',
     available: !fresh ? '現在不明' : s[4] === 5 ? '同期処理中' : s[3] ?
       recovery ? '範囲へ戻す方向のみ操作可' : packet.leg_roll_confirmed ? '上下・左右操作可能' : '上下操作可能' : '操作不可／条件待ち',
     operation: fresh ? LEG_OPERATIONS[s[4]] || '未確定' : '現在不明',
@@ -50,7 +50,7 @@ function createLegStatePanel(section) {
 }
 function renderLegState(nodes, packet, fresh = true) {
   const s = packet?.leg_state;
-  const gateNames = ['必須初期化', '倒立', '支持試験', '明示停止', '右操作優先', 'IMU正常', '車輪再試行', '校正', '極性試験', 'PS4接続'];
+  const gateNames = ['必須初期化', '倒立', '支持試験', '明示停止', '走行・右入力', 'IMU正常', '車輪再試行', '校正', '極性試験', 'PS4接続'];
   const keys = mask => ['↑', '↓', '←', '→'].filter((_, i) => mask & (1 << i)).join('') || '中央';
   let current = '確定状態未受信', trace = '遷移未受信';
   if (Array.isArray(s) && s.length === 17) {
@@ -83,8 +83,8 @@ function legStickLines(packet, fresh) {
   const live = fresh && (flags & 32) && (flags & 64);
   return [
     `${live ? '生値' : '最終受信情報・現在不明'} @ ${ms} ms：LX=${lx} LY=${ly} RX=${rx} RY=${ry}`,
-    `左の正規化要求：上下 ${f(h)} ／ 左右 ${f(r)}。上=LY正・伸長／下=LY負・短縮。動作DZ±16、再操作中央は両軸±10。`,
+    `左のカーブ後要求：上下 ${f(h)} ／ 左右 ${f(r)}。上=LY正・背伸び目標／下=LY負・しゃがみ目標。動作DZ±16、再操作中央は両軸±10。`,
     `適用脚入力：上下 ${f(ah)} ／ 左右 ${f(ar)}。右の適用要求：速度 ${f(drive)} m/s ／ 旋回 ${f(yaw)} V（プロファイル・出力制限前）。`,
-    `入力ゲート${flags & 1 ? '○' : '×'} ／ 左中央${flags & 2 ? '○' : '×'} ／ 右優先${flags & 4 ? '○' : '×'} ／ 走行ゲート${flags & 8 ? '○' : '×'}。十字キーは予約・指令なし。`
+    `入力ゲート${flags & 1 ? '○' : '×'} ／ 左中央${flags & 2 ? '○' : '×'} ／ 右入力${flags & 4 ? '○' : '×'} ／ 走行ゲート${flags & 8 ? '○' : '×'}。十字キーは予約・指令なし。`
   ];
 }

@@ -15,6 +15,6 @@ struct StickObservation {
  uint32_t ms=0;
  float height=0,roll=0,applied_height=0,applied_roll=0,drive=0,yaw=0;
  int8_t lx=0,ly=0,rx=0,ry=0;
- uint8_t flags=0; // leg gate, left centered, wheel priority, drive gate, roll confirmed
+ uint8_t flags=0; // leg gate, left centered, right input active, drive gate, roll confirmed
 };
 }

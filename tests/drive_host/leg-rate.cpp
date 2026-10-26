@@ -27,12 +27,14 @@
     };
     for(unsigned dt: {1u,2u,5u,10u,20u,50u})for(const auto&input:{up,down,half}){
       fixture(1992,2133);period=dt;
-      const float initial=leg_control.state.height;
+      const float initial=leg_control.state.height;float low,high;leg::movementBounds(leg_control.state.right_percent,leg_control.state.left_percent,low,high,false);
       const auto before=nowMs;send(input);wait(1000-dt);
       assert(nowMs-before==1000);
-      const float expected=input.left_stick_y==127?12.f:input.left_stick_y==-128?-12.f:12.f*56.f/111.f;
-      assert(fabsf(leg_control.state.height-initial-expected)<.01f);
-      send(center);wait(200);const auto r=leg_control.state.right_command,l=leg_control.state.left_command;
+      const float target=leg::clamp(leg::heightTarget(leg::heightInput(ps4_control::legAxis(input.left_stick_y))),initial+low,initial+high);
+      assert(fabsf(leg_control.state.height-initial-leg::clamp(target-initial,-12.f,12.f))<.01f);
+      wait(2000);assert(fabsf(leg_control.state.height-target)<.01f); // held input is a position
+      send(center);wait(2000);const auto r=leg_control.state.right_command,l=leg_control.state.left_command;
+      assert(fabsf(leg_control.state.height-leg::homeHeight())<.001f);
       assert(r==leg_control.target(true)&&l==leg_control.target(false));
       wait(500);assert(leg_control.state.right_command==r&&leg_control.state.left_command==l);
       assert(leg::inRange(true,r)&&leg::inRange(false,l));
@@ -53,5 +55,5 @@
     assert(leg::inRange(true,r)&&leg::inRange(false,l));wait(500);
     assert(Serial2.goals==atEnd&&leg_control.state.right_command==r&&leg_control.state.left_command==l);
     leg::activeGeometry()=old;
-    std::cout<<"PASS: PS4 -> UART 12 pp/s/normalized input at 1/2/5/10/20/50 ms; central hold, exact preload, return hint and paired endpoint stop\n";
+    std::cout<<"PASS: PS4 -> UART 12 pp/s bounded HOME-position input at 1/2/5/10/20/50 ms; central HOME return, exact preload, return hint and paired endpoint stop\n";
   }

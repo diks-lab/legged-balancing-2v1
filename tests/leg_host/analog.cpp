@@ -6,7 +6,7 @@
 #include <string>
 using namespace leg;
 int main(){
- static_assert(HeightRate==12&&RollRate==4&&MaxRoll==3,"preserve rates and roll limit");
+ static_assert(HeightRate==12&&RollRate==8.f/3&&MaxRoll==3,"preserve rates and roll limit");
  assert(ps4_control::legAxis(16)==0&&ps4_control::legAxis(-16)==0);
  assert(ps4_control::legAxis(127)==1&&ps4_control::legAxis(-128)==-1);
  assert(ps4_control::legAxis(17)>0&&ps4_control::legAxis(17)<.01f);
@@ -15,9 +15,9 @@ int main(){
   Control c;assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
   c.stickInput(0,int8_t(raw),0,0,true,1000,1000);const float initial=c.state.height;
   for(uint32_t t=1000+dt;t<=2000;t+=dt)c.tick(t,true,false,true,35);
-  assert(fabsf(c.state.height-initial-12.f*ps4_control::legAxis(raw))<.002f);
+  assert(fabsf(c.state.height-initial-(ps4_control::legAxis(raw)==0?0:clamp(heightTarget(heightInput(ps4_control::legAxis(raw)))-initial,-12.f,12.f)))<.002f);
   const auto h=c.state.height;c.stickInput(0,0,0,0,true,2001,2001);c.tick(2051,true,false,true,-35);
-  assert(fabsf(c.state.height-h)<.00001f);
+  assert(fabsf(c.state.height-homeHeight())<=fabsf(h-homeHeight())+.00001f);
  }
  // Movement deadzone is wider than re-arm center. Zero mapped input in the band cannot arm.
  {Control c;c.stop(Reason::ReplyInvalid);
@@ -38,7 +38,7 @@ int main(){
  }
  {Control c(true);assert(c.seed(position(true,15),position(false,15),1000));c.activate(1000);
   c.stickInput(-72,0,0,0,true,1000,1000);for(uint32_t t=1050;t<=2000;t+=50)c.tick(t,true,false,true,0);
-  assert(fabsf(c.state.requested_roll-2.f)<.0001f);
+  assert(fabsf(c.state.requested_roll-.9375f)<.0001f);
   c.stickInput(0,0,0,0,true,2001,2001);for(uint32_t t=2051;t<2700;t+=50)c.tick(t,true,false,true,0);
   assert(c.state.requested_roll==0);
  }

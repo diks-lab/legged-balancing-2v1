@@ -81,13 +81,16 @@ vm.runInContext(`
       !legFollowing(follow, false, 0).includes('通信停止／最終受信情報')) throw Error('feedback freshness');
   follow.leg_follow[4][0] = 0;
   if (legFollowing(follow, true, 0).includes('実位置 1979')) throw Error('unread must not be current');
+  const combinedPacket = { ...legPacket, leg_state: [...confirmed] };
+  combinedPacket.leg_state[2] = 3;
+  if (legPresentation(combinedPacket, true, 0, {}).values.mode !== '走行併用') throw Error('combined drive/leg mode');
   const legCache = {};
   const legState = legPresentation(legPacket, true, 0, legCache);
   if (legState.values.mode !== '支持試験（倒立OFF）' || legState.values.available !== '上下操作可能' ||
       legState.values.blocker !== 'なし') throw Error('confirmed tuple beats stale raw fields');
   const progress = { ...legPacket, leg_state: [...confirmed], legs: [...legPacket.legs] };
   progress.leg_state[4] = 1;progress.leg_state[6] = progress.leg_state[7] = 1;
-  if (!legPresentation(progress, true, 0, legCache).values.operation.includes('伸長')) throw Error('held input operation');
+  if (!legPresentation(progress, true, 0, legCache).values.operation.includes('背伸び')) throw Error('held input operation');
   for (const legacyTime of [0, 1000, 1002, 0xffffffff]) {
     progress.leg_ms = legacyTime;
     if (legPresentation(progress, true, 0, legCache).values.available !== '上下操作可能') throw Error('separate stream timing');
@@ -160,7 +163,7 @@ vm.runInContext(`
       !stickText.includes('左右 0.000') || !stickText.includes('DZ±16') || !stickText.includes('両軸±10')) throw Error('raw/applied stick split');
   if (!legStickLines(stickPacket, false)[0].includes('最終受信情報')) throw Error('stale stick');
   const rightPriority = { ...stickPacket, leg_stick: [100, 0, -128, 127, -127, -1, 0, 0, 0, .05, .1, 109] };
-  if (!legStickLines(rightPriority, true).join(' / ').includes('右優先○') ||
+  if (!legStickLines(rightPriority, true).join(' / ').includes('右入力○') ||
       !legStickLines(rightPriority, true).join(' / ').includes('速度 0.050')) throw Error('right priority observation');
   const cfgPacket = {
     leg_accept: [0, 1, 1908, 1997, 2081, 2173, 0, 0],

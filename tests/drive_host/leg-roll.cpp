@@ -22,12 +22,13 @@ int main(){
   assert(leg::decodePosition(uint16_t(Serial2.last_goal[17])|(uint16_t(Serial2.last_goal[18])<<8))==leg_control.state.left_command);};
  for(unsigned dt:{1u,5u,10u,20u,50u}){
   fixture();mpu6050.roll=0;period=dt;send(left);wait(500-dt);
-  assert(fabsf(leg_control.state.requested_roll-2)<.001f);
+  assert(fabsf(leg_control.state.requested_roll-(8.f/3*.5f))<.001f);
   send(center);wait(500-dt);assert(fabsf(leg_control.state.requested_roll)<.001f);wait(dt);
   Ps4InputState half=left;half.left_stick_x=-72;send(half);wait(1000-dt);
-  assert(fabsf(leg_control.state.requested_roll-2)<.001f);
+  assert(fabsf(leg_control.state.requested_roll-.9375f)<.001f);
+  wait(2000);assert(fabsf(leg_control.state.requested_roll-.9375f)<.001f); // same held position, never accumulated
  }
- fixture();mpu6050.roll=0;send(left);wait(1000);
+ fixture();mpu6050.roll=0;send(left);wait(1250);
  assert(leg_control.state.requested_roll==3);
  assert(leg_control.state.right_command<1992&&leg_control.state.left_command<2133);frame();
  send(center);wait(1600);assert(leg_control.state.requested_roll==0);
@@ -37,11 +38,13 @@ int main(){
  assert(leg_control.state.right_command>r&&leg_control.state.left_command>l);frame();
  r=leg_control.state.right_command;l=leg_control.state.left_command;mpu6050.roll=9.1f;wait(1000);
  assert(leg_control.state.right_command<r&&leg_control.state.left_command<l);frame();
- fixture();mpu6050.roll=0;send(right);wait(1000);assert(leg_control.state.requested_roll==-3);
+ fixture();mpu6050.roll=0;send(right);wait(1250);assert(leg_control.state.requested_roll==-3);
  assert(leg_control.state.right_command>1992&&leg_control.state.left_command>2133);frame();
  // Diagonal height+roll and end limits never leave normal range or alter height for tilt.
  Ps4InputState diagonal=left;diagonal.left_stick_y=127;send(diagonal);wait(2500);
- const float height=leg_control.state.height;send(left);wait(2000);assert(leg_control.state.height==height&&leg_control.state.limited);
+ const float height=leg_control.state.height;Ps4InputState oppositeDiagonal=diagonal;oppositeDiagonal.left_stick_x=127;
+ send(oppositeDiagonal);wait(2000);assert(leg_control.state.height==height&&leg_control.state.limited);
+ send(center);wait(2000);assert(fabsf(leg_control.state.height-leg::homeHeight())<.001f&&leg_control.state.requested_roll==0);
  frame();
  for(const auto&pair:{std::pair<int,int>{1940,2181},{2034,2094}}){
   fixture(pair.first,pair.second);mpu6050.roll=0;const float h=leg_control.state.height;
@@ -51,7 +54,7 @@ int main(){
  fixture(1697,2408);const auto goals=Serial2.goals;send(left);wait(1000);
  assert(Serial2.goals==goals&&leg_control.state.requested_roll==0&&leg_control.state.applied_roll==0);
  send(center);Ps4InputState down{};down.left_stick_y=-128;send(down);wait(6200);
- assert(!leg_control.state.recovery&&leg_control.state.requested_roll==0);send(center);wait(100);
+ assert(!leg_control.state.recovery&&leg_control.state.requested_roll==0);send(center);wait(2000);
  r=leg_control.state.right_command;l=leg_control.state.left_command;wait(100);assert(r==leg_control.state.right_command&&l==leg_control.state.left_command);
  // Reconnect cannot replay the held left target.
  fixture();mpu6050.roll=0;send(left);wait(500);PS4.disconnect_cb();cycle();

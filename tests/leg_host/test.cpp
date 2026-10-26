@@ -41,8 +41,8 @@ int main(){
   const float initial=c.state.height;
   for(uint32_t now=1001+dt;now<=2001;now+=dt){c.tick(now,true,false,true,0);check(c);}
   near(c.state.height,initial+HeightRate); // independent of packet/loop count
-  c.input(3,true);c.tick(2051,true,false,true,0);near(c.state.height,initial+HeightRate);
-  c.input(0,true);c.tick(2101,true,false,true,0);near(c.state.height,initial+HeightRate);
+  c.input(3,true);c.tick(2051,true,false,true,0);near(c.state.height,toward(initial+HeightRate,homeHeight(),.6f));
+  c.input(0,true);c.tick(2101,true,false,true,0);near(c.state.height,toward(initial+HeightRate,homeHeight(),1.2f));
   c.input(4,true);for(uint32_t now=2151;now<=4101;now+=50)c.tick(now,true,false,true,0);
   near(c.state.requested_roll,MaxRoll);assert(c.state.right_percent>c.state.left_percent);
   const float height=c.state.height,target=c.state.requested_roll;
@@ -60,7 +60,7 @@ int main(){
  }
  for(bool high:{false,true}){
   Control x(true);x.seed(position(true,high?30:0),position(false,high?30:0),1000);x.activate(1000);
-  x.input(high?1:2,true);x.tick(1050,true,false,true,0);assert(x.state.limited);
+  x.input(high?1:2,true);x.tick(1050,true,false,true,0);assert(inRange(true,x.target(true))&&inRange(false,x.target(false)));
  }
  // Default height-only commissioning: no AngleX-driven differential, even tilted.
  {Control x;ServoBus<IO> b;IO uart;
@@ -76,7 +76,7 @@ int main(){
   near(x.state.requested_roll,0);near(x.state.applied_roll,0);assert(x.state.reason==Reason::RollUnconfirmed);
   x.input(0,true);const float hold=x.state.height;
   for(uint32_t t=2000;t<2100;++t){x.tick(t,true,false,true,25);b.service(uart,x,t);}
-  near(x.state.height,hold);near(x.state.right_percent-x.state.left_percent,d);
+  assert(fabsf(x.state.height-homeHeight())<fabsf(hold-homeHeight()));near(x.state.right_percent-x.state.left_percent,d);
  }
  // A released external gate refreshes its diagnosis; it never starts an actuator.
  for(Reason prior:{Reason::ExplicitStop,Reason::Stopped,Reason::Initializing,
