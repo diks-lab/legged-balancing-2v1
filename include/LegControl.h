@@ -13,7 +13,7 @@ constexpr uint16_t ServoSpeed=150;
 constexpr uint8_t ServoAcceleration=15;
 constexpr float HeightRate=12;            // maximum servo-travel percentage points/s
 constexpr float RollRate=4,MaxRoll=3;     // deg/s, deg
-constexpr float RollGain=1;              // differential extension pp/deg
+constexpr float RollGain=2;              // differential extension pp/deg
 constexpr float DifferentialRate=4;      // pp/s, limits feedback-induced movement
 // Enable only after measuring both the IMU sign and the leg extension directions.
 #ifndef LEG_ROLL_DIRECTION_CONFIRMED
