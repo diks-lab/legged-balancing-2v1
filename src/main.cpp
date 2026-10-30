@@ -40,6 +40,7 @@
 #include "Ps4EventInbox.h"
 #include "Ps4ClassicBluetooth.h"
 #include "FocAlignmentObservation.h"
+#include "WheelOutputObservation.h"
 
 #include "Servo_STS3032.h"
 #include "LegServoBus.h"
@@ -123,6 +124,7 @@ struct FocObservationLock {
   void lock(){portENTER_CRITICAL(&mutex);}
   void unlock(){portEXIT_CRITICAL(&mutex);}
 };
+wheeloutput::Observation<FocObservationLock> wheel_output_observation;
 FocAlignmentObservation<FocObservationLock> foc_alignment_observer;
 class FocQuietPrint : public Print {
  public:
@@ -713,6 +715,8 @@ uint32_t polarity_diagnostic_last_ms = 0;
 void setBothTargetsToZero();
 void stopBothMotorsAtZero();
 void disableBothDrivers();
+void stopPolarityPulse();
+bool finishPolarityPulseIfNeeded(uint32_t now);
 void captureFocOutputSnapshot();
 void stopForActualFall(float& right_output, float& left_output);
 bool wheelSensorsOK();
@@ -1281,6 +1285,7 @@ void loop() {
   sensor2.setDiagnosticContext(wheel_context,diagnostic_last_fall_ms);
 
   if (!test_system_ready) {
+    wheel_output_observation.interrupt();
     gateWheelOutputsOff();
     serviceWheelFaultDiagnostics();
     handleSerialCommand();
@@ -1299,15 +1304,26 @@ void loop() {
   uint32_t section_start_us = micros();
   // Validate both wheels and IMU before either FOC can apply a cached command.
   if(!acquireRuntimeMeasurements()){
+    wheel_output_observation.interrupt();
     handleSerialCommand();serviceLegControl();serviceHttpRequests();return;
   }
+  const bool polarity_pulse_ended=polarity_test_active&&finishPolarityPulseIfNeeded(millis());
+  const uint32_t output_sensor_us=micros();
+  uint32_t output_foc_start[2]={},output_foc_end[2]={};
   section_start_us=micros();
   uint32_t motor1_loopfoc_us=0,motor2_loopfoc_us=0;
   if(!emergency_stop_active){
-    motor1.loopFOC();motor1_loopfoc_us=micros()-section_start_us;
-    section_start_us=micros();motor2.loopFOC();motor2_loopfoc_us=micros()-section_start_us;
+    output_foc_start[0]=micros();motor1.loopFOC();output_foc_end[0]=micros();
+    motor1_loopfoc_us=output_foc_end[0]-section_start_us;
+    section_start_us=micros();output_foc_start[1]=section_start_us;
+    motor2.loopFOC();output_foc_end[1]=micros();motor2_loopfoc_us=output_foc_end[1]-section_start_us;
   }
   captureFocOutputSnapshot();
+  if(wheel_output_observation.waitingFoc()){
+    wheel_output_observation.foc(output_sensor_us,output_foc_start,output_foc_end,
+      wheeloutput::cached(motor1,driver1,sensor1,digitalRead(motor1EnablePin)),
+      wheeloutput::cached(motor2,driver2,sensor2,digitalRead(motor2EnablePin)),!emergency_stop_active);
+  }
   const uint32_t mpu_update_us=diagnostic_imu_us;
 
   serviceBootAutoStart();
@@ -1333,7 +1349,7 @@ void loop() {
 
   applyPs4Steering(right_output, left_output);
 
-  if (polarity_test_active) {
+  if (polarity_test_active || polarity_pulse_ended) {
     const uint32_t now_ms = millis();
     const float polarity_m1_sign =
         m1_direction < 0.0f ? -1.0f : 1.0f;
@@ -1366,8 +1382,7 @@ void loop() {
       polarity_pulse_active = false;
       polarity_pulse_voltage = 0.0f;
       setBothTargetsToZero();
-    } else if (polarity_pulse_active &&
-               now_ms - polarity_pulse_start_ms >= kPolarityPulseTimeMs) {
+    } else if (polarity_pulse_ended) {
       polarity_pulse_active = false;
       polarity_pulse_voltage = 0.0f;
       setBothTargetsToZero();
@@ -1538,8 +1553,12 @@ const float left_angle_delta =
 
   section_start_us = micros();
 
+  const uint32_t output_command_us=micros();
   motor1.move(right_output);
   motor2.move(left_output);
+  wheel_output_observation.moved(output_command_us,micros(),
+    {right_output,motor1.target,motor1.current_sp},
+    {left_output,motor2.target,motor2.current_sp});
 
   const uint32_t motor_move_us =
       micros() - section_start_us;
@@ -1755,6 +1774,7 @@ bool stopOnWheelFault() {
 }
 
 void setBothTargetsToZero() {
+  wheel_output_observation.interrupt();
   diagnostic_right_command=diagnostic_left_command=0;
   diagnostic_command_ms=millis();diagnostic_command_valid=true;
   right_target_voltage = 0.0f;
@@ -1777,6 +1797,22 @@ void stopBothMotorsAtZero() {
     driver1.setPwm(0.0f, 0.0f, 0.0f);
     driver2.setPwm(0.0f, 0.0f, 0.0f);
   }
+}
+
+void stopPolarityPulse() {
+  // A completed/rejected bench pulse must leave BOTH bridges gated, even
+  // before the existing result logging. A new test requires explicit re-arm.
+  polarity_pulse_active=false;polarity_test_active=false;
+  polarity_pulse_voltage=0;
+  emergency_stop_active=true;
+  disableBothDrivers();
+}
+
+bool finishPolarityPulseIfNeeded(uint32_t now) {
+  if(!polarity_pulse_active)return false;
+  if(uint32_t(now-polarity_pulse_start_ms)<kPolarityPulseTimeMs&&
+     abs(LQR_angle-polarity_reference_angle)<=kLqrTestTiltLimitDeg)return false;
+  stopPolarityPulse();return true;
 }
 
 void disableBothDrivers() {
@@ -4704,6 +4740,16 @@ void handleWheelCalibrationAbort(){
   }
   sendSmallHttpResponse(200,"Calibration abort requested\n");
 }
+void handleWheelOutputCapture() {
+  const bool ok=wheel_output_observation.request(micros());
+  sendSmallHttpResponse(ok?202:409,ok?"Capture requested; GET /api/wheels/output\n":"Capture pending\n");
+}
+void handleWheelOutputStatus() {
+  const auto r=wheel_output_observation.copy();
+  char text[1900];const int n=wheeloutput::format(r,text,sizeof(text));
+  if(n<0||size_t(n)>=sizeof(text)){sendSmallHttpResponse(500,"Capture formatting overflow\n");return;}
+  sendSmallHttpResponse(200,text);
+}
 void handleCycleLqrTestMode() { enqueueHttpCommand('g'); }
 void handleCycleLqrSpeedSource() { enqueueHttpCommand('i'); }
 void handleStartBalanceTest() { enqueueHttpCommand('t'); }
@@ -5070,6 +5116,8 @@ void startWifiHttpServer() {
     wifi_log_server.on("/legs.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/legs.js", "application/javascript"); });
     wifi_log_server.on("/status.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/status.js", "application/javascript"); });
     wifi_log_server.on("/dashboard.js", HTTP_GET, []() { HttpMemoryRequest observed{3}; serveWebFile("/dashboard.js", "application/javascript"); });
+    wifi_log_server.on("/wheels/output-capture", HTTP_POST, [](){HttpMemoryRequest observed{4};handleWheelOutputCapture();});
+    wifi_log_server.on("/api/wheels/output", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWheelOutputStatus();});
     wifi_log_server.on("/api/status", HTTP_GET, [](){HttpMemoryRequest observed{4};handleWifiStatusPage();});
     wifi_log_server.on("/trace/velocity.csv", HTTP_GET,
                        [](){HttpMemoryRequest observed{5};sendSmallHttpResponse(410,"Trace history moved to browser recording\n");});
@@ -6770,7 +6818,7 @@ void handleSerialCommand() {
                  kLqrTestTiltLimitDeg) {
         polarity_pulse_active = false;
         polarity_pulse_voltage = 0.0f;
-        setBothTargetsToZero();
+        stopPolarityPulse();
         Serial.println("IGNORED: polarity pulse tilt exceeds 10 degrees.");
       } else {
         polarity_right_velocity_sum = 0.0f;
@@ -6809,7 +6857,7 @@ void handleSerialCommand() {
                  kLqrTestTiltLimitDeg) {
         polarity_pulse_active = false;
         polarity_pulse_voltage = 0.0f;
-        setBothTargetsToZero();
+        stopPolarityPulse();
         Serial.println("IGNORED: polarity pulse tilt exceeds 10 degrees.");
       } else {
         polarity_right_velocity_sum = 0.0f;
@@ -6891,7 +6939,8 @@ void handleSerialCommand() {
         polarity_drive_left = false;
         polarity_pulse_voltage = 0.0f;
         stopBothMotorsAtZero();
-        Serial.println("LQR POLARITY TEST ended; both targets are 0 V.");
+        stopPolarityPulse();
+        Serial.println("LQR POLARITY TEST ended; both drivers disabled.");
       }
       break;
     case 'b':

@@ -56,6 +56,7 @@ bool http_response_pending=false;
 uint16_t first_http_route=0;
 using PGM_P=const char*;
 #include "FocAlignmentObservation.h"
+#include "WheelOutputObservation.h"
 class Print { public: virtual ~Print()=default;virtual size_t write(uint8_t)=0; };
 #include "driver/gpio.h"
 #include "esp_timer.h"
@@ -261,12 +262,12 @@ names = ['handleLegSerialAction','loadLegCalibration','legCalibrationCommand','s
     'stopLqrDriveOnly','terminateLqrDriveSession','stopBalanceTest','resetLqrTestState',
     'startBalanceTest','cycleLqrTestMode','updateBalanceWait','cancelBalanceWait',
     'confirmActualFall','detectDriveSafetyFault','wheelSensorsOK','stopOnWheelFault',
-    'setBothTargetsToZero','stopBothMotorsAtZero','disableBothDrivers',
+    'setBothTargetsToZero','stopBothMotorsAtZero','disableBothDrivers','stopPolarityPulse','finishPolarityPulseIfNeeded',
     'clearVelocityTrace','clearLoopTimingTrace','clearLqrControlTrace',
     'captureFocOutputSnapshot','updateLqrControlTrace','captureLqrDriveSignTrace','captureLqrStopTrace',
     'resetLqrDriveSignTrace','resetLqrStopTrace','startLqrStopTrace','setStatusLed','printLqrStatus',
     'stopForActualFall',
-    'captureHttpStatus','serviceHttpRequests','handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','enqueueHttpCommand',
+    'handleWheelOutputCapture','handleWheelOutputStatus','captureHttpStatus','serviceHttpRequests','handleWifiStatusPage','handleStartBalanceTest','handleStopBalanceTest','enqueueHttpCommand',
     'serveWebFile','cycleLqrSpeedSource','resetPs4MotionInput','executeOperatorCommand',
     'applyPs4Steering','ps4ButtonsReleased','handlePs4Connection','processPs4Input',
     'ps4InputStatesEqual','ps4DriveSpeedRequestFromRightStickY',
@@ -476,6 +477,28 @@ int main(){
   for(int i=0;i<12;++i){delay(10);fell=confirmActualFall()||fell;}
   assert(fell);
 
+  // Completed normal-firmware pulses gate BOTH bridges before any result I/O.
+  for(unsigned side=0;side<2;++side)for(int sign:{-1,1}){
+    setupCase();polarity_test_active=polarity_pulse_active=true;
+    polarity_drive_right=side==0;polarity_drive_left=side==1;
+    polarity_pulse_voltage=.15f*sign;polarity_reference_angle=LQR_angle;
+    polarity_pulse_start_ms=millis();motor1.current_sp=.15f;motor2.current_sp=-.15f;
+    assert(!finishPolarityPulseIfNeeded(millis()+499));
+    assert(pins[27]&&pins[32]);
+    assert(finishPolarityPulseIfNeeded(millis()+500));
+    assert(!pins[27]&&!pins[32]&&emergency_stop_active&&!polarity_pulse_active);
+    assert(motor1.current_sp==0&&motor2.current_sp==0);
+  }
+  setupCase();polarity_test_active=polarity_pulse_active=true;
+  polarity_reference_angle=LQR_angle;polarity_pulse_start_ms=millis();LQR_angle+=10.01f;
+  assert(finishPolarityPulseIfNeeded(millis()));assert(!pins[27]&&!pins[32]);
+
+  // HTTP handoff remains bounded: one pending request, read does not restart.
+  setupCase();handleWheelOutputCapture();assert(wifi_log_server.status==202);
+  handleWheelOutputCapture();assert(wifi_log_server.status==409);
+  handleWheelOutputStatus();assert(wifi_log_server.body.find("state=1")!=String::npos);
+  wheel_output_observation.interrupt();handleWheelOutputStatus();
+  assert(wifi_log_server.body.find("state=4")!=String::npos);
   // Latest diagnostic output/cache observes values without storing history.
   setupCase();motor1.voltage.q=.125f;motor2.voltage.q=-.25f;
   captureFocOutputSnapshot();updateLqrControlTrace(.75f,-.5f,true);
@@ -1472,6 +1495,8 @@ for term in ['malloc(', 'free(', 'releaseHttpTraceSnapshot(', 'reapHttpTraceSnap
 loop = function('loop')
 assert loop.index('if(!acquireRuntimeMeasurements())') < loop.index('motor1.loopFOC()') < loop.index('motor1.move(right_output)')
 assert 'handleSerialCommand();serviceLegControl();serviceHttpRequests();return;' in loop
+assert loop.index('finishPolarityPulseIfNeeded(millis())') < loop.index('motor1.loopFOC()')
+assert loop.index('motor2.loopFOC()') < loop.index('wheel_output_observation.foc(') < loop.index('motor1.move(right_output)') < loop.index('wheel_output_observation.moved(')
 
 assert 'delay(' not in function('serviceLegControl')
 assert 'Ping(' not in function('serviceLegControl')

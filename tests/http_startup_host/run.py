@@ -136,6 +136,8 @@ struct WebServer {
 };
 void printHelp(){++help_count;Serial.println("NORMAL OPERATION MENU");}
 void serveWebFile(const char*,const char*){}
+void handleWheelOutputCapture(){}
+void handleWheelOutputStatus(){}
 void handleWifiStatusPage(){}
 void handleVelocityTraceDownload(){}
 void handleLoopTimingTraceDownload(){}

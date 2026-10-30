@@ -30,6 +30,7 @@ def function(source,name):
 app=Path('src/main.cpp').read_text(encoding='utf-8')
 prelude=r'''
 #include "FocAlignmentObservation.h"
+#include "WheelOutputObservation.h"
 #include "WheelCalibration.h"
 #include "HealthDiagnostics.h"
 #include <cassert>
