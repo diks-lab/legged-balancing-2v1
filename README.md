@@ -58,13 +58,15 @@ LF または CRLF で終端します。末尾に余計な空白を付けない�
 | `status` | センサー状態、実 EN 状態、PWM 初期化・FOC 成否、選択輪、指令、電圧・期限・ログ破棄数 |
 | `read left` / `read right` / `read both` | 0–360度の角度、連続角度、連続角度/360の回転数、境界通過数、サンプル経過時間 |
 | `stream on` / `stream off` | 両輪のセンサー表示を約5 Hzで開始／停止（モーターは始動しない） |
-| `motor left +` / `motor left -` | 左だけを +0.3 V／−0.3 V で最大1.5秒駆動 |
-| `motor right +` / `motor right -` | 右だけを +0.3 V／−0.3 V で最大1.5秒駆動 |
+| `motor left +` / `motor left -` | 左だけを速度指令 +6／−6 rad/s、出力上限1 Vで最大1.5秒駆動 |
+| `motor right +` / `motor right -` | 右だけを速度指令 +6／−6 rad/s、出力上限1 Vで最大1.5秒駆動 |
+| `motor both +` / `motor both -` | 右→左に順次初期化後、両輪を同符号の速度指令 +6／−6 rad/sで最大1.5秒駆動 |
+| `voltage left +` / `voltage left -` / `voltage right +` / `voltage right -` | 保存FOCで選択輪へ±0.5 V・500 ms、速度PIDなし。未保存・不整合は拒否 |
 | `stop` | 両輪の EN を LOW にし、初期化済み PWM と電圧指令をゼロにする |
 
-**各輪の初回 `motor` は、実行前に警告を送信してから、その輪だけの
-ドライバ・モーター初期化と FOC 位置合わせを行います。位置合わせでも車輪が動きます。**
-反対側の EN は常に LOW です。成功後の校正値は RAM 内で再使用し、リセットすると失われます。
+**各輪の初回 `motor` は、実行前に警告を送信してから、選択輪の
+ドライバ・モーター初期化と FOC 位置合わせを行います（位置合わせ2 V）。位置合わせでも車輪が動きます。**
+位置合わせ中は反対側の EN を LOW に保ちます。両輪指令でも初期化を右→左に一輪ずつ行います。成功後の校正値は RAM 内で再使用し、リセットすると失われます。
 `+` / `-` は指令の符号です。車体の前進・後退と対応すると断定しません。
 通常駆動中の追加 `motor` は拒否し、予約しません。停止後に改めて1コマンドずつ送ってください。
 
@@ -154,9 +156,40 @@ pio device monitor --port COM5 --baud 115200 --eol LF --echo
    その後 `motor left -` を1回送り、同様に確認する。続いて `motor right +`、
    `motor right -` をそれぞれ1回ずつ実行する。指令符号と実際の回転方向を記録する。
 4. 通常駆動中の `stop`、追加 `motor` の拒否、自動停止を確認する。
-   `motor both +`、`motor left ++`、`motor left +x` 等の不正入力で動かないことを確認する。
+   `motor both ++`、`motor left ++`、`motor left +x` 等の不正入力で動かないことを確認する。
    通信異常は、まずモーター電源 OFF でセンサー未接続を確認する。駆動中の異常確認は
    固定・電流制限と安全な故障注入方法を用意した上で行う（活線配線を短絡させない）。
+
+### 単体診断で保存FOCの固定電圧を比較する試験
+
+新規起動→`voltage right +`を一行→`FIXED RESULT`待ち→`voltage left +`→結果待ち。
+負符号も`voltage right -`／`voltage left -`で同様に試せます。
+保存値を変更せず、右→左初期化・torque/voltage・±0.5 V・500 msで両輪遮断します。
+初期化条件まで揃える場合は各試行を新規起動から行い、先に`motor`を実行しません。
+[保存値検証・停止・結果の取得時点・比較条件と全検証コマンド](docs/wheel-diagnostic-fixed-voltage.md)。
+
+### 通常ファームで同じ電圧を比較する試験
+
+通常ファームの保存FOC・出力経路を使う固定電圧比較は、支持して車輪を浮かせ、
+`d`→大文字`J`→`5`/`6`（右の生電圧±0.5 V）、`7`/`8`（左±0.5 V）、
+`+`/`-`（既存方向対応による両輪前進／後退相当）のいずれか一文字を送信します。
+各500 msで両輪遮断し、結果を一度表示します。各試行を新しい`d`→`J`から開始してください。
+小文字`j`の低電圧試験と区別します。自動昇圧・再試行なし。
+[開始条件・生指令表・停止期限・記録の読み方](docs/fixed-voltage-comparison.md)。
+
+### 通常ファームと初期化順を比較する両輪試験
+
+**上記の片輪試験後は、再起動してから比較してください。** 初期化済みPWM/FOCは同じ起動中に
+再利用されるため、`stop`だけでは割当順を初期状態へ戻せません。
+車輪を浮かせて支持し、新規起動→`motor both +`を一行だけ送信→両輪の位置合わせと
+1.5秒駆動後の自動停止を待つ→`status`で両EN無効を確認します。
+負符号も、新規起動から`motor both -`で同様に試します。初期化中に別コマンドを送ると
+試験が取り消されるため、正負コマンドをまとめて送信しないでください。
+
+初期化時だけPWMピン・初期化通番・バックエンドから取得できたMCPWMグループ／
+タイマーハンドルと管理表slotを表示します。取得できなければUNAVAILABLEで、推測値は表示しません。
+正負は速度指令の符号であり、両輪の車体前進を意味しません。
+[実機結果の位置付け・表示の意味・切り分け手順](docs/wheel-diagnostic-init-order.md)。
 
 ### ソフトウェア検証
 
@@ -197,6 +230,11 @@ external half-duplex direction/echo behavior must be checked on the machine.
 
 ### Menu
 
+Leg targets use the measured stroke and provisional 10-tick end margins from
+`include/LegGeometry.h`. HOME commands stop inside the measured endpoints;
+percentages describe servo-position travel, not linear leg height. See
+[leg settings and current procedure](docs/ps4-leg-control.md).
+
 Commands are newline-terminated:
 
 | Command | Action / expected result |
@@ -206,8 +244,8 @@ Commands are newline-terminated:
 | `ping3` | Send one standard STS-style Ping to ESP32C3 ID3. A matching, zero-error, length-2 status packet is required; a transmitted-packet echo is logged and ignored. |
 | `pingall` | Run one standard Ping each for ID1, ID2, and ID3. |
 | `pos1`, `pos2` | Read the current raw position at STS address 56 from ID1 or ID2. |
-| `rhome`, `rext` | Move only right ID1 to HOME 2061 or small extension 2044. |
-| `lhome`, `lext` | Move only left ID2 to HOME 2026 or small extension 2044. |
+| `rhome`, `rext` | Move only right ID1 using validated leg NVS geometry (new confirmed candidate after saving: inner retracted 2034 / 10% travel 2009 tick). |
+| `lhome`, `lext` | Move only left ID2 using validated leg NVS geometry (new confirmed candidate after saving: inner retracted 2094 / 10% travel 2116 tick). |
 | `c3ping` | Send the ID3 `0xA0` ASCII command `PING` (expected payload: `OK PONG`). |
 | `c3help` | Send the ID3 `0xA0` ASCII command `HELP` and display its ASCII response. |
 | `c3status` | Send the ID3 `0xA0` ASCII command `STATUS` and display its ASCII response. |
@@ -353,3 +391,24 @@ checksum, zero error byte, printable ASCII, and excluding a TX echo.
 - Any direction-enable pin (none is used by the existing source).
 - All responses and physical motion; this repository change has not been tested
   on the robot.
+
+## WebファイルとPS4操作の整理
+
+Webの配置・LittleFS・通常ファームとdataの書き込み手順は
+[docs/web-files.md](docs/web-files.md) を参照。
+現在の割当は左スティック＝脚、右スティック＝前後進・旋回、十字キー＝予約（無出力）です。
+PS4の操作一覧・共通指令経路・実機未検証範囲は
+[docs/ps4-operation.md](docs/ps4-operation.md) を参照。
+
+
+Web診断は[WebSocket・JSON・ブラウザー60秒履歴](docs/websocket-diagnostics.md)へ移行しています。ファームとLittleFSの両方を更新してください。操作の中心はPS4です。
+
+## ベースプロジェクト
+
+本プロジェクトは、fuwei007/Navbot-EN01の制御実装をベースに、
+本機体のハードウェア構成に合わせて移植・変更しています。
+
+- 参照元：https://github.com/fuwei007/Navbot-EN01
+- 主な参照対象：Src/wl_pro_robot/wl_pro_robot.ino
+- 由来・差分・変更時の方針：[docs/upstream-origin.md](docs/upstream-origin.md)
+Leg stroke has independent [four-point NVS calibration](docs/leg-range-calibration.md). No saved valid leg geometry means no leg motion; wheel initialization/control remains independent.

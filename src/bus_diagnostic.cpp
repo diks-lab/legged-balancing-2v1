@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include "LegCalibration.h"
+#include <Preferences.h>
 
 #include <cstring>
 
@@ -38,10 +40,6 @@ constexpr uint32_t kBatteryStreamIntervalMs = 1000;
 constexpr uint32_t kMinimumValidAdcMv = 50;
 constexpr uint32_t kMaximumValidAdcMv = 3000;
 
-constexpr int16_t kRightHome = 2061;
-constexpr int16_t kRightExtend = 2044;
-constexpr int16_t kLeftHome = 2026;
-constexpr int16_t kLeftExtend = 2044;
 constexpr uint16_t kMoveSpeed = 150;
 constexpr uint8_t kMoveAcceleration = 15;
 
@@ -450,6 +448,7 @@ void readPosition(uint8_t id) {
 }
 
 void moveServo(uint8_t id, int16_t position, const char* action) {
+  if(!leg::validGeometry(leg::activeGeometry())){Serial.println("LEG CALIBRATION REQUIRED: use normal firmware four-point calibration first.");return;}
   // STS3215 write at ACC(41): ACC, position L/H, time L/H, speed L/H.
   uint8_t request[] = {
       0xFF, 0xFF, id, 10, kInstWrite, kAccelerationAddress,
@@ -511,10 +510,10 @@ void handleCommand(String command) {
     pingServo(kC3Id);
   } else if (command == "pos1") readPosition(kRightId);
   else if (command == "pos2") readPosition(kLeftId);
-  else if (command == "rhome") moveServo(kRightId, kRightHome, "HOME");
-  else if (command == "rext") moveServo(kRightId, kRightExtend, "SMALL_EXTEND");
-  else if (command == "lhome") moveServo(kLeftId, kLeftHome, "HOME");
-  else if (command == "lext") moveServo(kLeftId, kLeftExtend, "SMALL_EXTEND");
+  else if (command == "rhome") moveServo(kRightId, leg::position(true,0), "HOME");
+  else if (command == "rext") moveServo(kRightId, leg::position(true,10), "SMALL_EXTEND");
+  else if (command == "lhome") moveServo(kLeftId, leg::position(false,0), "HOME");
+  else if (command == "lext") moveServo(kLeftId, leg::position(false,10), "SMALL_EXTEND");
   else if (command == "c3ping") sendC3AsciiCommand("PING");
   else if (command == "c3help") sendC3AsciiCommand("HELP");
   else if (command == "c3status") sendC3AsciiCommand("STATUS");
@@ -542,6 +541,8 @@ void handleCommand(String command) {
 
 void setup() {
   Serial.begin(kUsbBaud);
+  Preferences legPrefs;const auto legs=leg::loadLegs(legPrefs);
+  if(legs.result==leg::CalResult::Ok)leg::activeGeometry()=legs.geometry;
   Serial2.begin(kBusBaud, SERIAL_8N1, kBusRxPin, kBusTxPin);
   pinMode(kBatteryLedPin, OUTPUT);
   setLed(false);

@@ -1,0 +1,106 @@
+/* Instrument layout: no zoom or tiny text; both plots share the remaining height. */
+main { gap: 6px; padding: 10px 16px; }
+.connection-row { display: flex; gap: 16px; flex-wrap: wrap; }
+.status p { margin: 2px 0; }
+#workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(160px, 1.2fr) minmax(auto, 1fr);
+  gap: 6px;
+}
+#workspace.no-aux { grid-template-rows: minmax(180px, 1fr) auto; }
+.instruments { display: grid; grid-template-columns: 1.7fr 1fr; gap: 12px; min-height: 0; }
+.pose-panel { display: flex; flex-direction: column; min-height: 0; background: white; border: 1px solid #bdc8d6; border-radius: 6px; }
+.panel-title { display: flex; justify-content: space-between; gap: 10px; padding: 4px 10px; font-size: 14px; }
+.pose-canvas { flex: 1; min-height: 0; }
+#pose-legend { display: flex; gap: 10px; padding: 4px; }
+.meters { display: grid; grid-template-columns: 1fr 1fr; align-items: center; gap: 10px; }
+.meter { text-align: center; min-width: 0; }
+.meter h2 { font-size: 17px; margin: 0; }
+.meter p { font-size: 14px; }
+.meter-body { position: relative; max-width: 190px; width: min(100%, 22vh); margin: auto; aspect-ratio: 1; }
+.meter-body canvas { width: 100%; height: 100%; }
+.meter-body strong { position: absolute; top: 45%; left: 6%; right: 6%; font-size: 17px; }
+.meter-body strong[data-state='unknown'], .meter-body strong[data-state='disabled'] { color: #687789; font-size: 15px; }
+#auxiliary { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.aux-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#auxiliary.collapsed { min-height: 0 !important; }
+#auxiliary.collapsed .aux-body { display: none; }
+#auxiliary .plot { min-height: 100px; flex: 1 1 0; }
+#aux-toggle { font-size: 14px; text-align: left; padding: 3px; margin-bottom: 4px; }
+#legend { margin-top: 4px; }
+nav { flex: none; margin: 0; }
+@media (max-width: 700px) {
+  #workspace { flex: none; grid-template-rows: 400px 260px; }
+  .instruments { grid-template-columns: 1fr; }
+  .instruments { grid-template-rows: 180px 200px; }
+}
+
+#recovery-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.condition { padding: 2px 6px; border: 1px solid #aab4bf; border-radius: 4px; background: #eef0f3; }
+.condition[data-ok='true'] { color: #075923; background: #d7f4df; border-color: #24834a; }
+.condition[data-ok='false'] { color: #6d2830; background: #f3e8e9; }
+.condition[data-ok='unknown'] { color: #556170; }
+
+.meter-note { grid-column: 1 / -1; margin: 0; text-align: center; font-size: 14px; }
+
+/* Reserve room for short states, but never constrain wrapped diagnostic text. */
+#leg-diagnostics .leg-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 8px 0;
+  gap: 4px 16px;
+}
+.leg-field {
+  display: grid;
+  grid-template-columns: 9em minmax(0, 1fr);
+  align-items: start;
+  box-sizing: border-box;
+  min-height: 4.5em;
+  padding: 8px 0;
+  min-width: 0;
+  border-bottom: 1px solid #d4dce5;
+}
+.leg-field dt { font-weight: bold; min-width: 0; overflow-wrap: anywhere; }
+.leg-field dd { margin: 0; min-width: 0; white-space: pre-line; line-height: 1.5; overflow-wrap: anywhere; }
+.leg-blocker, .leg-failure { grid-column: 1 / -1; }
+#leg-freshness { min-height: 3em; margin: 4px 0; }
+#leg-blocker[data-blocked='true'] { color: #8c2634; font-weight: bold; }
+#leg-diagnostics details { margin: 6px 0; }
+#leg-diagnostics li { margin: 6px 0; }
+@media (max-width: 700px) {
+  #leg-diagnostics .leg-fields { grid-template-columns: 1fr; }
+}
+
+#leg-position p { white-space: pre-line; }
+
+/* A single outer details scroller; nested diagnostics grow with their content. */
+#details details[open] { max-height: none; overflow: visible; }
+#leg-diagnostics, #leg-range-calibration { min-width: 0; max-width: 100%; line-height: 1.5; }
+#leg-diagnostics p, #leg-diagnostics li, #leg-diagnostics summary,
+#leg-range-calibration p, #leg-range-calibration label,
+#leg-range-calibration button { overflow-wrap: anywhere; }
+#leg-diagnostics pre, #leg-diagnostics code {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+@media (max-width: 1200px) {
+  #leg-diagnostics .leg-fields { grid-template-columns: 1fr; }
+}
+@media (max-width: 800px) {
+  .leg-field { grid-template-columns: 1fr; gap: 4px; }
+}
+
+/* Open diagnostics use document flow as well as the outer details scroller.
+   Do not squeeze the instrument grid below its children and paint over it. */
+main:has(> #details[open], > #leg-range-calibration[open]) {
+  height: auto;
+  min-height: 100dvh;
+}
+main:has(> #details[open], > #leg-range-calibration[open]) #workspace {
+  flex: none;
+  height: max(360px, 50dvh);
+}

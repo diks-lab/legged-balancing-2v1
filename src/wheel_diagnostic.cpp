@@ -6,6 +6,15 @@
 #include <atomic>
 #include <esp_timer.h>
 #include <driver/gpio.h>
+#include <Preferences.h>
+#include "WheelCalibration.h"
+
+// Read the pinned SimpleFOC backend's allocation metadata, not an inferred
+// group based on wheel name/order. No register reads or library patch needed.
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+#include "drivers/hardware_specific/esp32/esp32_driver_mcpwm.h"
+extern mcpwm_timer_handle_t timers[2][3];
+#endif
 
 namespace {
 // Wiring and the provisional 7 pole pairs follow main.cpp, not the 2208 label.
@@ -20,6 +29,29 @@ constexpr uint16_t kI2cTimeoutMs = 5;
 constexpr uint8_t kRightEnable = 27, kLeftEnable = 32;
 constexpr float kTau = 6.283185307179586f;
 constexpr float kTargetVelocity = 6.0f;
+constexpr float kFixedVoltage = 0.5f;
+constexpr uint32_t kFixedMs = 500;
+
+// Same ordered fingerprint as main.cpp::calibrationConfig(). Keep storage
+// read-only; wheelcal::load validates ABI/CRC, both wheels and newest config.
+uint32_t savedConfig() {
+  const uint32_t words[]={240,7,7,13,12,14,27,26,25,33,32,19,18,23,5,0x36,2000,8300};
+  uint32_t h=2166136261u;
+  for(auto word:words) h=(h^word)*16777619u;
+  return h;
+}
+struct ReadOnlyFoc {
+  Preferences prefs;
+  bool readFailed=false;
+  size_t read(int slot,void* data,size_t size) {
+    const char* key=slot==0?"slot0":"slot1";
+    const size_t n=prefs.getBytesLength(key);
+    if(n!=size) return n;
+    const size_t got=prefs.getBytes(key,data,size);
+    if(got!=size) readFailed=true;
+    return got;
+  }
+};
 
 void gateOff() {
   // Arduino-ESP32 3.x digitalWrite() ignores pins not yet registered by
@@ -157,6 +189,10 @@ struct Wheel {
   bool driverReady = false;
   bool calibrated = false;
   bool initFault = false;
+  bool savedMode = false, speedCalibrated = false;
+  Direction speedDirection = Direction::UNKNOWN;
+  float speedZero = 0;
+  bool speedPp = false;
 };
 Wheel right{"right", rightSensor, rightMotor, rightDriver, kRightEnable};
 Wheel left{"left", leftSensor, leftMotor, leftDriver, kLeftEnable};
@@ -169,6 +205,55 @@ float commandVelocity = 0;
 char command[64];
 size_t commandLength = 0;
 bool discardLine = false;
+uint32_t pwmInitSequence = 0;
+bool fixedActive = false;
+bool fixedDrain = false, fixedAllocationCompatible = true;
+Wheel* fixedSelected = nullptr;
+float fixedRequest = 0;
+uint32_t fixedRejected = 0;
+struct FixedSample {
+  int direction=0, modulation=0;
+  bool centered=false;
+  float zero=0, requested=0, command=0, q=0;
+  double start=0, end=0;
+  float velocity=0;
+  uint32_t samples=0, sampleMs=0;
+};
+FixedSample fixedSamples[2];
+uint32_t fixedGeneration=0;
+
+void fixedResult(const char* reason) {
+  logLine("FIXED RESULT reason=%s elapsed=%lu ms rejected=%lu EN_after=%d/%d generation=%lu\n",
+      reason, static_cast<unsigned long>(millis()-runStarted),
+      static_cast<unsigned long>(fixedRejected), digitalRead(kRightEnable), digitalRead(kLeftEnable),
+      static_cast<unsigned long>(fixedGeneration));
+  for(unsigned i=0;i<2;++i) {
+    const auto& r=fixedSamples[i];
+    logLine("FIXED %s FOC dir=%d zero=%.7f modulation=%d centered=%d pp=7/valid torque/voltage supply=8.3 limit=1 V\n",
+        i?"left":"right",r.direction,r.zero,r.modulation,r.centered);
+    logLine("FIXED %s requested=%+.3f command=%+.3f q=%+.3f V samples=%lu sample_ms=%lu\n",
+        i?"left":"right",r.requested,r.command,r.q,
+        static_cast<unsigned long>(r.samples),static_cast<unsigned long>(r.sampleMs));
+    logLine("FIXED %s start=%.5f end=%.5f delta=%+.5f deg velocity=%+.4f rad/s sensor_fault=%d\n",
+        i?"left":"right",r.start*360/kTau,r.end*360/kTau,(r.end-r.start)*360/kTau,r.velocity,
+        i?leftSensor.fault:rightSensor.fault);
+  }
+}
+
+void reportPwmAllocation(Wheel& w) {
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+  const auto* p = static_cast<const ESP32MCPWMDriverParams*>(w.driver.params);
+  if (p && p->group_id >= 0 && p->group_id < 2) {
+    int slot = -1;
+    for (int i = 0; i < 3; ++i)
+      if (p->timers[0] && timers[p->group_id][i] == p->timers[0]) slot = i;
+    logLine("PWM %s source=SimpleFOC_backend_params group=%d timer_slot=%d timer_handle=%p (-1=unknown slot; not register readback)\n",
+            w.name, p->group_id, slot, static_cast<void*>(p->timers[0]));
+    return;
+  }
+#endif
+  logLine("PWM %s allocation=UNAVAILABLE (no inferred group/timer)\n", w.name);
+}
 
 void stopAll(const char* reason) {
   gateOff();  // Gate first, before any PWM work.
@@ -177,6 +262,13 @@ void stopAll(const char* reason) {
     w->motor.target = 0;
     w->motor.voltage.q = w->motor.voltage.d = 0;
     if (w->driverReady) w->motor.disable();
+  }
+  if (fixedActive) {
+    fixedDrain = Serial.available()!=0;
+    discardLine = discardLine || commandLength!=0;
+    commandLength = 0;
+    fixedActive = false; // Clear before reporting: exactly one result, after gate-off.
+    fixedResult(reason);
   }
   running = nullptr;
   runningBoth = false;
@@ -219,18 +311,20 @@ void reportStatus() {
 }
 void help() {
   logLine("help | status | read left | read right | read both | stream on | stream off | stop\n");
+  logLine("voltage left + | voltage left - | voltage right + | voltage right - (saved FOC, +/-0.5 V, 500 ms)\n");
   logLine("motor left + | motor left - | motor right + | motor right - | motor both + | motor both -\n");
-  logLine("First motor command aligns selected wheels. +/- commands +6.0/-6.0 rad/s; + is forward on both.\n");
+  logLine("First motor command aligns selected wheels. +/- is velocity command sign (+6.0/-6.0 rad/s), NOT vehicle forward/reverse.\n");
+  logLine("Both initializes right -> left; allocation-order comparison requires fresh boot, no prior motor command.\n");
   logLine("Blocking init/initFOC: serial stop unavailable; FOC guard=6000ms, run timer=1500ms. Use power cut.\n");
 }
 
-bool initializeWheel(Wheel& w) {
+bool initializeWheel(Wheel& w, const wheelcal::Wheel* saved = nullptr) {
   gateOff();
-  if (!w.calibrated) {
+  if (!w.calibrated || saved || w.savedMode) {
     // Warning is sent before enabling any motor. Blocking output is allowed
     // ONLY here, while both enable pins are LOW.
     while (txRead != txWrite) { pumpLog(); delay(1); }
-    Serial.printf("WARNING: %s first initFOC can MOVE at %.2f V; blocking ~4+ s. "
+    if (!saved && !w.speedCalibrated) Serial.printf("WARNING: %s first initFOC can MOVE at %.2f V; blocking ~4+ s. "
                   "Serial stop unavailable; FOC gate-off guard=6000ms; use physical power cut.\n",
                   w.name, kAlignVoltage);
     Serial.flush();
@@ -238,32 +332,45 @@ bool initializeWheel(Wheel& w) {
     // Driver limit is phase/PWM range; motor limit bounds commanded Uq.
     // Keep centering at half the actual supply, avoiding phase clipping.
     w.driver.voltage_limit = kSupplyVoltage;
-    if (!w.driver.init()) {
+    if (!w.driverReady) logLine("PWM INIT seq=%lu wheel=%s A=%d B=%d C=%d EN=%u\n",
+            static_cast<unsigned long>(++pwmInitSequence), w.name,
+            w.driver.pwmA, w.driver.pwmB, w.driver.pwmC, w.enable);
+    if (!w.driverReady && !w.driver.init()) {
       w.initFault = true;
       stopAll("driver init failed");
       return false;
     }
+    if (!w.driverReady && pwmInitSequence==1 && &w!=&right) fixedAllocationCompatible=false;
     w.driverReady = true;
     w.driver.disable();
+    reportPwmAllocation(w);  // Initialization only, with both EN LOW.
     w.motor.linkDriver(&w.driver);
     w.motor.linkSensor(&w.sensor);
     w.motor.voltage_limit = kAlignVoltage;
     w.motor.voltage_sensor_align = kAlignVoltage;
-    w.motor.controller = MotionControlType::velocity;
+    w.motor.controller = saved ? MotionControlType::torque : MotionControlType::velocity;
+    w.motor.foc_modulation = FOCModulationType::SinePWM;
+    w.motor.modulation_centered = 1; // Same SimpleFOC defaults as main.cpp.
     w.motor.PID_velocity.P = 0.075f;  // 変更前は0.05f
     w.motor.PID_velocity.I = 0.4f;
     w.motor.PID_velocity.D = 0.0f;
     w.motor.PID_velocity.output_ramp = 5.0f;
-    w.motor.LPF_velocity.Tf = 0.05f;
+    w.motor.LPF_velocity.Tf = saved ? DEF_VEL_FILTER_Tf : 0.05f;
     w.motor.velocity_limit = kTargetVelocity;
     w.motor.torque_controller = TorqueControlType::voltage;
     // motor.init() enables after a 500ms delay. An error BEFORE that enable
     // is excluded by fresh checks above; errors during initFOC gate off in
     // CheckedAS5600. This synchronous path performs no subsequent enable.
+    w.motor.target = w.motor.current_sp = 0;
+    w.motor.voltage.q = w.motor.voltage.d = 0;
+    w.motor.sensor_direction = saved ? static_cast<Direction>(saved->direction) :
+        (w.speedCalibrated ? w.speedDirection : Direction::UNKNOWN);
+    w.motor.zero_electric_angle = saved ? saved->zero : (w.speedCalibrated ? w.speedZero : NOT_SET);
+    w.motor.pp_check_result = saved ? saved->pp==1 : (w.speedCalibrated && w.speedPp);
     const bool initOK = w.motor.init();
     const bool guardOK = initOK && armTimer(kAlignMs);
     alignmentWheel = w.name;
-    traceAlignment = true;
+    traceAlignment = !saved;
     const bool focOK = guardOK && w.motor.initFOC();
     traceAlignment = false;
     logLine("INIT %s ENTRY: initOK=%d guardOK=%d\n", w.name,
@@ -284,7 +391,11 @@ bool initializeWheel(Wheel& w) {
     }
     // SimpleFOC treats pole-pair mismatch as a warning, not failure. For this
     // diagnostic reject it; do not silently accept an estimated pole count.
-    if (!focOK || timerExpired.load() || !w.motor.pp_check_result || !sensorsOK()) {
+    const bool savedMatch = !saved ||
+        (static_cast<int>(w.motor.sensor_direction)==saved->direction &&
+         w.motor.zero_electric_angle==saved->zero &&
+         w.motor.foc_modulation==FOCModulationType::SinePWM && w.motor.modulation_centered==1);
+    if (!focOK || timerExpired.load() || !w.motor.pp_check_result || !sensorsOK() || !savedMatch) {
       logLine("INIT %s CHECK: focOK=%d timeout=%d ppOK=%d sensorsOK=%d\n", w.name,
               static_cast<int>(focOK),
               static_cast<int>(timerExpired.load()),
@@ -295,6 +406,13 @@ bool initializeWheel(Wheel& w) {
       return false;
     }
     w.calibrated = true;
+    w.savedMode = saved != nullptr;
+    if (!saved) {
+      w.speedCalibrated=true;
+      w.speedDirection=w.motor.sensor_direction;
+      w.speedZero=w.motor.zero_electric_angle;
+      w.speedPp=w.motor.pp_check_result;
+    }
     logLine("%s FOC OK direction=%d zero=%.5f rad pp_check=OK\n",
             w.name, static_cast<int>(w.motor.sensor_direction), w.motor.zero_electric_angle);
     // Do not replay commands received during blocking init. Any input cancels
@@ -319,12 +437,19 @@ void startWheels(Wheel& first, Wheel* second, float sign) {
   }
   // Each initialization gates both outputs off and disables its motor before
   // the next begins. Failure or input cancels the entire requested run.
-  if (!initializeWheel(first)) return;
-  if (second) {
+  // Normalize ONLY dual initialization order. Keep the existing run/enable and
+  // loopFOC iteration orders so this comparison changes allocation order alone.
+  Wheel& initFirst = second ? right : first;
+  Wheel* initSecond = second ? &left : nullptr;
+  if (second) logLine("BOTH init order=%s->%s first=%s second=%s; compare allocation only from fresh boot\n",
+                      initFirst.name, initSecond->name, initFirst.calibrated ? "REUSE" : "NEW",
+                      initSecond->calibrated ? "REUSE" : "NEW");
+  if (!initializeWheel(initFirst)) return;
+  if (initSecond) {
     rightSensor.update();
     leftSensor.update();
     if (!sensorsOK()) { stopAll("sensor fault between initializations"); return; }
-    if (!initializeWheel(*second)) return;
+    if (!initializeWheel(*initSecond)) return;
   }
   // Fresh communication check after all blocking library delays, before enable.
   rightSensor.update();
@@ -332,6 +457,8 @@ void startWheels(Wheel& first, Wheel* second, float sign) {
   if (!sensorsOK()) { stopAll("sensor fault before drive"); return; }
   for (Wheel* w : {&first, second}) {
     if (!w) continue;
+    w->motor.controller = MotionControlType::velocity;
+    w->motor.torque_controller = TorqueControlType::voltage;
     w->motor.updateVoltageLimit(kDriveVoltage);
     w->motor.PID_velocity.reset();
     w->motor.target = 0;
@@ -358,7 +485,69 @@ void startWheels(Wheel& first, Wheel* second, float sign) {
 
 void startWheel(Wheel& w, float sign) { startWheels(w, nullptr, sign); }
 
+void startFixed(Wheel& selected,float sign) {
+  if(running) return;
+  gateOff();
+  if(!fixedAllocationCompatible) { stopAll("fixed test requires right-first allocation; reboot"); return; }
+  rightSensor.update(); leftSensor.update();
+  if(!sensorsOK() || right.initFault || left.initFault || !timerReady) {
+    stopAll("sensor/init/timer fault; fixed test refused"); return;
+  }
+  ReadOnlyFoc storage;
+  wheelcal::Record saved;
+  int slot=-1;
+  if(!storage.prefs.begin("wheel-foc",true) ||
+      wheelcal::load(storage,savedConfig(),saved,slot)!=wheelcal::Load::Valid || storage.readFailed) {
+    stopAll("missing/invalid saved FOC; no alignment or NVS write"); return;
+  }
+  storage.prefs.end();
+  // Always allocate/init both right -> left, including a single-wheel pulse.
+  if(!initializeWheel(right,&saved.wheels[0])) return;
+  rightSensor.update(); leftSensor.update();
+  if(!sensorsOK()) { stopAll("sensor fault between saved initializations"); return; }
+  if(!initializeWheel(left,&saved.wheels[1])) return;
+  rightSensor.update(); leftSensor.update();
+  if(!sensorsOK()) { stopAll("sensor fault before fixed drive"); return; }
+  for(Wheel* w:{&right,&left}) {
+    w->motor.controller=MotionControlType::torque;
+    w->motor.torque_controller=TorqueControlType::voltage;
+    w->motor.updateVoltageLimit(kDriveVoltage);
+    w->motor.PID_velocity.reset();
+    w->motor.target=w->motor.current_sp=0;
+    w->motor.voltage.q=w->motor.voltage.d=0;
+  }
+  // Flush initialization diagnostics while gated off; no output during pulse.
+  while(txRead!=txWrite) { pumpLog(); delay(1); }
+  // Input during initialization/flush cancels the test, never replay it.
+  if(Serial.available()) {
+    bool boundary=false;
+    while(Serial.available()) boundary=Serial.read()=='\n';
+    commandLength=0; discardLine=!boundary;
+    stopAll("input before fixed drive; cancelled"); return;
+  }
+  fixedSelected=&selected; fixedRequest=sign*kFixedVoltage; fixedRejected=0;
+  fixedGeneration=saved.generation;
+  for(unsigned i=0;i<2;++i) {
+    Wheel& w=i?left:right;
+    auto& r=fixedSamples[i]; r=FixedSample{};
+    r.direction=static_cast<int>(w.motor.sensor_direction); r.zero=w.motor.zero_electric_angle;
+    r.modulation=static_cast<int>(w.motor.foc_modulation); r.centered=w.motor.modulation_centered;
+    r.start=r.end=static_cast<int>(w.motor.sensor_direction)*w.sensor.getPreciseAngle()-w.motor.sensor_offset;
+    r.requested=&w==fixedSelected?fixedRequest:0;
+  }
+  runStarted=millis(); fixedActive=true;
+  if(!armTimer(kFixedMs)) { stopAll("output timer failed"); return; }
+  running=&right; runningBoth=true;
+  for(Wheel* w:{&right,&left}) {
+    checkStop(); if(!running) return;
+    w->motor.enable();
+    checkStop(); if(!running) return;
+  }
+}
+
 void dispatch(const char* s) {
+  if(fixedActive && strcmp(s,"stop")) { ++fixedRejected; return; }
+
   if (!strcmp(s, "stop")) stopAll("command");
   else if (!strcmp(s, "help")) help();
   else if (!strcmp(s, "status")) reportStatus();
@@ -367,6 +556,10 @@ void dispatch(const char* s) {
   else if (!strcmp(s, "read both")) { reportSensor(left); reportSensor(right); }
   else if (!strcmp(s, "stream on")) { streaming = true; logLine("stream=on (5 Hz)\n"); }
   else if (!strcmp(s, "stream off")) { streaming = false; logLine("stream=off\n"); }
+  else if (!strcmp(s, "voltage left +")) startFixed(left,1);
+  else if (!strcmp(s, "voltage left -")) startFixed(left,-1);
+  else if (!strcmp(s, "voltage right +")) startFixed(right,1);
+  else if (!strcmp(s, "voltage right -")) startFixed(right,-1);
   else if (!strcmp(s, "motor left +")) startWheel(left, 1);
   else if (!strcmp(s, "motor left -")) startWheel(left, -1);
   else if (!strcmp(s, "motor right +")) startWheel(right, 1);
@@ -380,6 +573,11 @@ void dispatch(const char* s) {
 void receiveCommands() {
   for (int budget = 0; budget < 64 && Serial.available(); ++budget) {
     const int c = Serial.read();
+    if (fixedDrain) {
+      discardLine = c != '\n';
+      if (!Serial.available()) fixedDrain = false;
+      continue;
+    }
     if (c == '\n') {
       if (!discardLine) {
         if (commandLength && command[commandLength - 1] == '\r') --commandLength;
@@ -389,7 +587,8 @@ void receiveCommands() {
         commandLength = 0;
         dispatch(command);
       } else {
-        logLine("REJECT: oversized/non-printable/initialization input\n");
+        if (fixedActive) ++fixedRejected;
+        else logLine("REJECT: oversized/non-printable/initialization input\n");
         commandLength = 0;
         discardLine = false;
       }
@@ -405,7 +604,7 @@ void checkStop() {
   if (!running) return;
   if (timerExpired.load()) stopAll("independent output timer");
   else if (!sensorsOK()) stopAll("sensor fault latched");
-  else if (static_cast<uint32_t>(millis() - runStarted) >= kRunMs) stopAll("timeout");
+  else if (static_cast<uint32_t>(millis() - runStarted) >= (fixedActive?kFixedMs:kRunMs)) stopAll("timeout");
 }
 }  // namespace
 
@@ -446,11 +645,25 @@ void loop() {
     if (!isRunning(*w)) continue;
     w->motor.loopFOC();  // Exactly one sensor update per active wheel.
     checkStop();
-    if (isRunning(*w)) w->motor.move(commandVelocity);
+    if (isRunning(*w)) {
+      const float requested=fixedActive?(w==fixedSelected?fixedRequest:0):commandVelocity;
+      const float sampledQ=w->motor.voltage.q;
+      w->motor.move(requested);
+      if(fixedActive) {
+        auto& r=fixedSamples[w==&right?0:1];
+        r.command=requested; r.q=sampledQ;
+        // Same signed shaft frame as main.cpp's comparison, without I2C reads.
+        r.end=static_cast<int>(w->motor.sensor_direction)*w->sensor.getPreciseAngle()-w->motor.sensor_offset;
+        r.velocity=w->motor.shaft_velocity; r.sampleMs=millis(); ++r.samples;
+        if(!isfinite(r.q)||!isfinite(r.end)||!isfinite(r.velocity)) {
+          stopAll("nonfinite FOC/sensor"); break;
+        }
+      }
+    }
     checkStop();
   }
   static uint32_t focLogAt = 0;
-  if (running && uint32_t(millis() - focLogAt) >= 50) {
+  if (running && !fixedActive && uint32_t(millis() - focLogAt) >= 50) {
     focLogAt = millis();
     for (Wheel* w : {&left, &right}) {
       if (!isRunning(*w)) continue;
@@ -466,10 +679,10 @@ void loop() {
           static_cast<unsigned long>(loggedAt - sensor.lastGoodMs));
     }
   }
-  if (streaming && static_cast<uint32_t>(millis() - streamAt) >= kStreamMs) {
+  if (!fixedActive && streaming && static_cast<uint32_t>(millis() - streamAt) >= kStreamMs) {
     streamAt = millis();
     reportSensor(left);
     reportSensor(right);
   }
-  pumpLog();
+  if (!fixedActive) pumpLog();
 }

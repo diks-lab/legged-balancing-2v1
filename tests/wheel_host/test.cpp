@@ -25,22 +25,32 @@ int main(int argc, char** argv) {
   assert(gpioEvents[1] == std::make_pair(32, LOW));
   assert(gpioEvents[2] == std::make_pair(27, OUTPUT + 10));
   assert(gpioEvents[3] == std::make_pair(32, OUTPUT + 10));
-  if (scenario.rfind("both_", 0) == 0) {
+  if (scenario == "both_reuse_left" || scenario == "both_reuse_right") {
+    const bool leftFirst=scenario=="both_reuse_left";
+    input(leftFirst?"motor left +\n":"motor right +\n");
+    input("stop\n");disabled();
+    input("motor both -\n");assert(runningBoth);
+    assert((driverInitEvents==std::vector<int>{leftFirst?32:27,leftFirst?27:32}));
+    assert(leftMotor.initCalls==1&&rightMotor.initCalls==1&&pwmInitSequence==2);
+    assert(leftMotor.target==-6&&rightMotor.target==-6);
+    input("stop\n");disabled();
+  } else if (scenario.rfind("both_", 0) == 0) {
     int initializations = 0;
     const bool secondFailure = scenario.find("second_") != std::string::npos;
     const bool firstFailure = scenario.find("first_") != std::string::npos;
     if (firstFailure && scenario == "both_first_driver") driverInitOK = false;
+    if (scenario == "both_first_motor") motorInitOK = false;
     if (scenario == "both_missing") rightBus.nack = 2;
     if (scenario == "both_timer_create") timerReady = false;
     duringFOC = [&] {
       ++initializations;
       // Sequential alignment: the other enable must be LOW throughout.
-      if (initializations == 1) assert(!pins[27]);
-      else { assert(!pins[32]); assert(leftDriver.pwm == 0); }
+      if (initializations == 1) {assert(!pins[32]);assert(driverInitEvents.front()==27);}
+      else { assert(!pins[27]); assert(rightDriver.pwm == 0);assert(driverInitEvents.back()==32); }
       if ((firstFailure && initializations == 1) || (secondFailure && initializations == 2)) {
         if (scenario.find("foc") != std::string::npos) focInitOK = false;
         if (scenario.find("pp") != std::string::npos) ppOK = false;
-        if (scenario.find("sensor") != std::string::npos) rightBus.nack = 2;
+        if (scenario.find("sensor") != std::string::npos) {if(initializations==1)rightBus.nack=2;else leftBus.nack=2;}
         if (scenario.find("timeout") != std::string::npos) { delay(kAlignMs); disabled(); }
         if (scenario.find("stop") != std::string::npos) Serial.feed("stop\n");
         if (scenario.find("partial") != std::string::npos) Serial.feed("motor both");
@@ -55,11 +65,13 @@ int main(int argc, char** argv) {
         scenario == "both_timer_create" || scenario == "both_timer_start") {
       disabled(); assert(!running && !runningBoth);
       assert(leftMotor.moveCalls == 0 && rightMotor.moveCalls == 0);
-      if (firstFailure) assert(rightMotor.initCalls == 0);
+      if (firstFailure) {assert(leftMotor.initCalls == 0);assert(leftDriver.initCalls==0);}
       if (scenario.find("partial") != std::string::npos) { input(" +\n"); disabled(); }
     } else {
       assert(pins[27] && pins[32] && runningBoth);
       assert(left.calibrated && right.calibrated);
+      assert((driverInitEvents==std::vector<int>{27,32}));
+      assert(pwmInitSequence==2);
       const float target = scenario == "both_negative" ? -6.0f : 6.0f;
       assert(leftMotor.target == target && rightMotor.target == target);
       for (Wheel* w : {&left, &right}) {
@@ -69,8 +81,18 @@ int main(int argc, char** argv) {
         assert(w->motor.voltage_limit == 1 && w->motor.voltage_sensor_align == 2);
         assert(w->motor.PID_velocity.resets == 2); // setup plus run
       }
+      size_t lastRightEnable=0,lastLeftEnable=0;
+      for(size_t i=0;i<gpioEvents.size();++i)if(gpioEvents[i].second==HIGH){
+        if(gpioEvents[i].first==27)lastRightEnable=i;
+        if(gpioEvents[i].first==32)lastLeftEnable=i;
+      }
+      assert(lastLeftEnable<lastRightEnable); // Existing left->right run enable order.
       const int l = leftBus.requests, r = rightBus.requests;
+      std::vector<int> reads;
+      leftBus.onRequest=[&]{reads.push_back(32);};rightBus.onRequest=[&]{reads.push_back(27);};
       loop(); assert(leftBus.requests == l + 1 && rightBus.requests == r + 1);
+      assert((reads==std::vector<int>{32,27})); // Existing FOC order is unchanged.
+      leftBus.onRequest=nullptr;rightBus.onRequest=nullptr;
       input("motor left -\nmotor both -\n"); assert(commandVelocity == target);
       if (scenario == "both_left_sensor") leftBus.nack = 2;
       else if (scenario == "both_right_sensor") rightBus.count = 1;
@@ -124,6 +146,13 @@ int main(int argc, char** argv) {
   } else if (scenario == "init_sensor") {
     duringFOC = [] { leftBus.nack = 2; };
     input("motor left +\n"); disabled(); assert(leftSensor.fault && left.initFault);
+  } else if (scenario == "left_negative" || scenario == "right_positive") {
+    const bool isLeft=scenario=="left_negative";
+    input(isLeft?"motor left -\n":"motor right +\n");
+    if(isLeft)onlyLeft();else onlyRight();
+    assert(commandVelocity==(isLeft?-6:6));
+    assert(driverInitEvents==std::vector<int>{isLeft?32:27});
+    input("stop\n");disabled();
   } else if (scenario == "right") {
     input("motor right -\n"); onlyRight(); assert(commandVelocity == -kTargetVelocity);
     input("stop\n"); disabled(); assert(!running && rightDriver.pwm == 0);
@@ -159,6 +188,31 @@ int main(int argc, char** argv) {
       // No loop invocation: timer gates off independently of blocked printing.
       delay(kRunMs); disabled(); loop(); assert(!running);
     } else { input("stop\n"); disabled(); assert(!running && leftDriver.pwm == 0); }
+  }
+  // Output comes from the real diagnostic source; backend itself is a double.
+  Serial.room=128;
+  while(txRead!=txWrite)pumpLog();
+  assert(Serial.output.find("+ is forward on both")==std::string::npos);
+  assert(Serial.output.find("NOT vehicle forward/reverse")!=std::string::npos);
+  if(scenario=="both_stop"||scenario=="both_negative"){
+    const auto r=Serial.output.find("PWM INIT seq=1 wheel=right A=13 B=12 C=14 EN=27");
+    const auto l=Serial.output.find("PWM INIT seq=2 wheel=left A=26 B=25 C=33 EN=32");
+    assert(r!=std::string::npos&&l!=std::string::npos&&r<l);
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+    assert(Serial.output.find("PWM right source=SimpleFOC_backend_params group=1 timer_slot=2")!=std::string::npos);
+    assert(Serial.output.find("PWM left source=SimpleFOC_backend_params group=0 timer_slot=2")!=std::string::npos);
+    assert(Serial.output.find("allocation=UNAVAILABLE")==std::string::npos);
+#else
+    assert(Serial.output.find("allocation=UNAVAILABLE")!=std::string::npos);
+    assert(Serial.output.find("source=SimpleFOC_backend_params")==std::string::npos);
+#endif
+  }
+  if(scenario=="both_restart"||scenario=="both_reuse_left"||scenario=="both_reuse_right"){
+    size_t count=0,pos=0;
+    while((pos=Serial.output.find("PWM INIT seq=",pos))!=std::string::npos){++count;++pos;}
+    assert(count==2); // No new allocation log on reuse.
+    if(scenario=="both_reuse_left")assert(Serial.output.find("first=NEW second=REUSE")!=std::string::npos);
+    if(scenario=="both_reuse_right")assert(Serial.output.find("first=REUSE second=NEW")!=std::string::npos);
   }
   // Single-wheel runs and cancelled dual runs must never enable both pins.
   int r = 0, l = 0;

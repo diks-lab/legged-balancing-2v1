@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP32 姿勢・左右出力</title>
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <main>
+    <header class="status">
+      <h1>姿勢・左右出力 <small>操作はPS4・Webは診断と明示校正</small></h1>
+      <div class="connection-row">
+        <p id="connection" role="status">HTML解析中…</p>
+        <p id="subscription" role="status">配信未設定</p>
+      </div>
+      <p id="health">初期化状態：未取得</p>
+      <div id="recovery-checks" aria-label="復帰条件"></div>
+      <p id="calibration">校正状態：未取得</p>
+    </header>
+    <div id="workspace">
+      <section class="instruments">
+        <div class="pose-panel">
+          <div class="panel-title"><strong>機体姿勢 ±30°固定</strong><span id="pose-value">測定待ち</span></div>
+          <div class="pose-canvas"><canvas id="pose" aria-label="姿勢角と基準角、±30度固定、中央0度"></canvas></div>
+          <div id="pose-legend"></div>
+        </div>
+        <div class="meters" aria-label="左右出力の方向統一表示">
+          <section class="meter">
+            <h2>左出力</h2>
+            <div class="meter-body"><canvas id="left-meter" aria-label="左指令電圧の符号反転表示、真上0V"></canvas><strong id="left-reading">更新停止／不明</strong></div>
+            <p id="left-limit">指令電圧・±1 V＝半周</p>
+          </section>
+          <section class="meter">
+            <h2>右出力</h2>
+            <div class="meter-body"><canvas id="right-meter" aria-label="右指令電圧、真上0V"></canvas><strong id="right-reading">更新停止／不明</strong></div>
+            <p id="right-limit">指令電圧・±1 V＝半周</p>
+          </section>
+          <p class="meter-note">左右表示は向きを統一。左は実指令の符号を反転</p>
+        </div>
+      </section>
+      <section id="auxiliary">
+        <button id="aux-toggle" aria-expanded="true">補助の制御グラフ（クリックで折りたたみ）</button>
+        <div class="aux-body">
+        <div class="plot"><canvas id="plot" aria-label="補助制御値、姿勢グラフと共通の時間軸"></canvas></div>
+        <div id="legend"></div>
+        </div>
+      </section>
+    </div>
+    <nav>
+      <button id="start">配信開始</button><button id="stop">配信停止</button>
+      <button id="pause">表示一時停止</button><button id="clear">ブラウザー履歴消去</button>
+      <button id="reconnect">再接続</button>
+      <label class="scale-option"><input id="autoscale" type="checkbox">補助軸の自動スケール</label>
+    </nav>
+    <details id="selection">
+      <summary>補助グラフの項目選択（配信中は200 msで自動反映）</summary>
+      <label>プリセット
+        <select id="preset">
+          <option value="stationary">姿勢・出力＋角速度</option>
+          <option value="vibration">振動比較</option>
+          <option value="control">制御入力の比較</option>
+          <option value="position">位置保持</option>
+          <option value="drive">PS4走行・旋回</option>
+        </select>
+      </label>
+      <p>姿勢角・基準角・左右指令電圧は常設配信。ここを全解除しても常設表示は継続します。</p>
+      <div id="fields"></div>
+    </details>
+    <details id="details">
+      <summary>詳細診断・単位・CSV保存</summary>
+      <div class="explanation">
+        <p id="connection-details">通信詳細：未取得</p>
+        <p id="loss">欠落：未取得</p>
+        <p id="measurement">測定更新：未取得</p>
+        <p id="recovery-details">復帰詳細：未取得</p>
+        <p id="stop-history">最新停止履歴：未取得</p>
+        <p>車輪再校正は磁石・モーター・センサー・相配線変更時のみ。
+          PS4等で停止後、機体を保持してください。校正中は車輪が動きます。完了後は自動倒立しません。</p>
+        <button id="calibrate">明示校正（車輪が動きます）</button>
+        <button id="calibrate-abort">校正中断</button>
+        <p id="calibration-action" role="status"></p>
+        <p>1クライアント・20 Hz・履歴60秒／1200点。
+          配信開始／停止は通信のみ。表示一時停止中も受信・履歴・異常・メーターは更新。
+          未受信履歴は復元不可。</p>
+        <p>姿勢角は既存相補フィルター後のAngleY。実測時刻imu_ms／更新番号imu_seqを追跡し、
+          無効区間は線を切ります。基準角と走行目標傾斜は別です。
+          ±30°は表示範囲で、倒立開始／転倒判定の閾値ではありません。</p>
+        <p>メーターは安全判定後・move直前の指令。左のみ符号反転。補助グラフ・CSV・通信は元符号。
+          真上0 V、正は青・時計回り、負は赤紫・反時計回り。±1 Vで半周。
+          超過時も実数値と警告を表示。トルク・電流・FOC実出力とは別です。
+          通信／配信停止・250 ms超・無効値は現在出力として表示しません。</p>
+        <p>補助グラフは単位別の独立軸。異なる単位の線の交差は同じ数値を意味しません。
+          通常の最低範囲はdeg±20、deg/s±100、V±1、rad/s±6。姿勢専用軸は自動スケール対象外。
+          無効／未使用制御値はnull。表示用フィルターなし。</p>
+        <p>制御角度誤差は実際の姿勢PID入力（基準＋目標傾斜＋既存バイアスとの差）。
+          車輪位置・速度はSimpleFOCの方向補正・既存LPF後に車体前進符号を適用。
+          平均速度は制御が実際に選んだ通常LPF後／PS4速度窓で、再度2で割りません。
+          FOC q電圧はloopFOC後・同周期move前のキャッシュ（foc_capture_us）。指令と取得時点が異なります。</p>
+        <p>sample_msは制御状態コピー時刻で、IMU実測時刻と別です。
+          メモリーは通信タスクの送信準備時。凡例は表示だけを切替。
+          一時停止中も履歴上限は60秒。</p>
+        <button id="save">直近60秒をCSV保存</button>
+      </div>
+    </details>
+  </main>
+  <script>
+    document.addEventListener('DOMContentLoaded', async () => {
+      const message = document.getElementById('connection');
+      let target = '/style.css';
+      async function asset(path) {
+        message.textContent = `取得中: ${path}`;
+        const response = await fetch(path, {
+          cache: 'no-store', signal: AbortSignal.timeout(3000)
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.text();
+      }
+      try {
+        for (target of ['/style.css', '/panels.css']) {
+          const style = document.createElement('style');
+          style.textContent = await asset(target);
+          document.head.appendChild(style);
+        }
+        for (target of ['/signals.js', '/history.js', '/plot.js', '/subscribe.js', '/diagnosis.js', '/leg-reply.js', '/leg-state.js', '/leg-config.js', '/leg-measure.js', '/leg-calibration.js', '/legs.js', '/status.js', '/dashboard.js', '/app.js']) {
+          const script = document.createElement('script');
+          script.textContent = await asset(target);
+          document.head.appendChild(script);
+        }
+        if (typeof window.startLogger !== 'function') throw new Error('JS準備失敗');
+        target = 'JS初期化';
+        window.startLogger();
+      } catch (error) {
+        message.textContent = `取得・準備失敗: ${target}: ${error.message}。` +
+          '自動再試行なし。再読み込みしてください。';
+      }
+    }, { once: true });
+  </script>
+</body>
+</html>

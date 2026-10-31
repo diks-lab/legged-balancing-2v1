@@ -8,7 +8,9 @@ start = source.index('void printLqrStatus() {')
 end = source.index('\nvoid printDistanceDiagnostic()', start)
 status = source[start:end]
 drive_start = source.index('  if (lqr_direction_test_armed) {\n    const float motor1_output_sign')
-drive_end = source.index('\n  if (polarity_test_active)', drive_start)
+drive_end = source.index('\n  applyPs4Steering(', drive_start)
+# Balance output mapping is checked here; production steering has separate
+# gate/headroom tests in tests/drive_host/run.py.
 drive = 'void driveOutputs(float& right_output, float& left_output) {\n' + source[drive_start:drive_end] + '\n}\n'
 harness = r'''
 #include "Arduino.h"

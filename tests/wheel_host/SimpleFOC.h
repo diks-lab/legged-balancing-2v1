@@ -5,17 +5,39 @@
 #include "common/base_classes/Sensor.h"
 enum class MotionControlType { torque, velocity };
 enum class TorqueControlType { voltage };
+enum class FOCModulationType { SinePWM, SpaceVectorPWM };
+constexpr float NOT_SET=-12345;
+constexpr float DEF_VEL_FILTER_Tf=.005f;
+inline std::function<void()> duringEnable;
 inline bool driverInitOK = true, motorInitOK = true, focInitOK = true, ppOK = true;
 inline std::function<void()> duringFOC;
+inline std::vector<int> driverInitEvents;
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+#include "drivers/hardware_specific/esp32/esp32_driver_mcpwm.h"
+#endif
 class BLDCDriver3PWM {
  public:
-  int en, initCalls = 0;
+  int en, pwmA, pwmB, pwmC, initCalls = 0;
   float voltage_power_supply = 0, voltage_limit = 0;
   float pwm = 0;
-  BLDCDriver3PWM(int, int, int, int e) : en(e) {}
-  bool init() { ++initCalls; return driverInitOK; }
+  void* params = nullptr;
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+  ESP32MCPWMDriverParams allocation{};
+#endif
+  BLDCDriver3PWM(int a, int b, int c, int e) : en(e), pwmA(a), pwmB(b), pwmC(c) {}
+  bool init() {
+    ++initCalls; driverInitEvents.push_back(en);
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+    // Deliberately non-default assignments distinguish backend readout from
+    // a guessed group0/timer0 based on initialization order.
+    allocation.group_id = en == 27 ? 1 : 0;
+    allocation.timers[0] = timers[allocation.group_id][2];
+    params = &allocation;
+#endif
+    return driverInitOK;
+  }
   void disable() { pwm = 0; digitalWrite(en, LOW); }
-  void enable() { pwm = 0; digitalWrite(en, HIGH); }
+  void enable() { pwm = 0; digitalWrite(en, HIGH); if(duringEnable) duringEnable(); }
 };
 class BLDCMotor {
  public:
@@ -23,6 +45,7 @@ class BLDCMotor {
   BLDCDriver3PWM* driver = nullptr;
   Sensor* sensor = nullptr;
   int initCalls = 0, focCalls = 0, loopCalls = 0, moveCalls = 0;
+  float sensor_offset=0;
   float current_sp = 0, shaft_velocity = 0, velocity_limit = 0;
   struct { float P=0, I=0, D=0, output_ramp=0, limit=0; int resets=0; void reset() { ++resets; } } PID_velocity;
   struct { float Tf=0; } LPF_velocity;
@@ -32,6 +55,8 @@ class BLDCMotor {
   struct { float q = 0, d = 0; } voltage;
   bool pp_check_result = false;
   Direction sensor_direction = CW;
+  FOCModulationType foc_modulation=FOCModulationType::SinePWM;
+  int modulation_centered=1;
   MotionControlType controller;
   TorqueControlType torque_controller;
   void linkDriver(BLDCDriver3PWM* d) { driver = d; }
@@ -39,6 +64,8 @@ class BLDCMotor {
   bool init() { ++initCalls; delay(500); enable(); delay(500); return motorInitOK; }
   bool initFOC() {
     ++focCalls; if (duringFOC) duringFOC(); sensor->update();
+    if(sensor_direction==Direction::UNKNOWN) sensor_direction=CW;
+    if(zero_electric_angle==NOT_SET) zero_electric_angle=.1f;
     pp_check_result = ppOK; return focInitOK;
   }
   void enable() { driver->enable(); }
