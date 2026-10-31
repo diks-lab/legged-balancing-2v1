@@ -18,10 +18,10 @@ int main(){
  for(unsigned i=0;i<2;++i){auto&m=*motors[i];auto&d=*drivers[i];
    s[i].init();m.linkSensor(&s[i]);d.voltage_power_supply=d.voltage_limit=8.3f;assert(d.init());
    m.linkDriver(&d);m.controller=MotionControlType::torque;m.torque_controller=TorqueControlType::voltage;
-   m.voltage_limit=1;m.sensor_direction=Direction::CCW;m.zero_electric_angle=i?5.8521371f:1.3360963f;
+   m.voltage_limit=1;m.sensor_direction=Direction::CCW;m.zero_electric_angle=i?4.3810487f:1.4419413f;
    assert(m.init());m.motor_status=FOCMotorStatus::motor_ready;
  }
- for(float sign:{-1.f,1.f}){
+ for(float sign:{-1.f,1.f,-.5f,.5f}){
    assert(obs.request(test_us));assert(!obs.request(test_us));
    const float commands[]={sign,-sign};
    r.loopFOC();l.loopFOC();const float previous=r.voltage.q;

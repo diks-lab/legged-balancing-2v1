@@ -58,7 +58,7 @@ wheelcal::Record saved_wheel_calibration;
 int fault_mode=0,timer_start_result=0,timer_stop_result=0;
 std::vector<unsigned long> delays;
 std::vector<float> commands;
-std::atomic<bool> wheelAlignExpired{false};
+std::atomic<bool> wheelAlignExpired{false};std::atomic<bool> polarity_guard_mode{false};
 void* wheelAlignTimer=reinterpret_cast<void*>(1);
 constexpr int ESP_OK=0;
 void gateWheelOutputsOffFrom(FocGateSource);

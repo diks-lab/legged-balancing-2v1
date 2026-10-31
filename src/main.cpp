@@ -41,6 +41,7 @@
 #include "Ps4ClassicBluetooth.h"
 #include "FocAlignmentObservation.h"
 #include "WheelOutputObservation.h"
+#include "PolarityComparison.h"
 
 #include "Servo_STS3032.h"
 #include "LegServoBus.h"
@@ -150,7 +151,18 @@ void gateRightSensorFault(){gateWheelOutputsOffFrom(FocGateSource::RightSensor);
 void gateLeftSensorFault(){gateWheelOutputsOffFrom(FocGateSource::LeftSensor);sensorHealthFault(1);}
 esp_timer_handle_t wheelAlignTimer = nullptr;
 std::atomic<bool> wheelAlignExpired{false};
+// Reuse the existing independent gate timer only after FOC initialization.
+// Keep this selector on pulse after stop so a queued callback cannot be
+// misreported as an alignment fault. Alignment explicitly selects its role.
+std::atomic<bool> polarity_guard_mode{false}, polarity_guard_expired{false};
+std::atomic<uint32_t> polarity_guard_dispatch_us{0};
 void wheelAlignTimeout(void*) {
+  if(polarity_guard_mode.load()){
+    polarity_guard_dispatch_us.store(micros());
+    polarity_guard_expired.store(true);
+    gateWheelOutputsOffFrom(FocGateSource::Timer);
+    return; // Timer task performs GPIO gating only, not motor/Serial operations.
+  }
   gateWheelOutputsOffFrom(FocGateSource::Timer);
   wheelAlignExpired.store(true);
   portENTER_CRITICAL(&health_diagnostics_lock);
@@ -690,6 +702,9 @@ bool lqr_startup_diagnostic_active = false;
 uint32_t lqr_startup_diagnostic_start_ms = 0;
 uint32_t lqr_startup_diagnostic_last_ms = 0;
 uint32_t lqr_run_diagnostic_last_ms = 0;
+std::atomic<bool> polarity_fixed_voltage_mode{false};
+bool polarity_explicit_stop=false;
+PolarityComparison polarity_comparison;
 bool polarity_test_active = false;
 bool polarity_pulse_active = false;
 bool polarity_drive_right = false;
@@ -716,6 +731,13 @@ void setBothTargetsToZero();
 void stopBothMotorsAtZero();
 void disableBothDrivers();
 void stopPolarityPulse();
+void armPolarityComparison();
+void beginPolarityPulse(char command);
+void polarityPulseOutput(float& right_output,float& left_output);
+void capturePolaritySample();
+void completePolarityComparison();
+void servicePolarityResult();
+void applyWheelOutputs(float right_output,float left_output);
 bool finishPolarityPulseIfNeeded(uint32_t now);
 void captureFocOutputSnapshot();
 void stopForActualFall(float& right_output, float& left_output);
@@ -1275,9 +1297,10 @@ void advanceStartup() {
 }  // namespace
 
 void loop() {
+  servicePolarityResult();
   sensor1.releaseControlCycle();sensor2.releaseControlCycle();
   updatePs4Controller();
-  servicePs4DiagnosticSerial();
+  if(!(polarity_fixed_voltage_mode.load()&&polarity_pulse_active))servicePs4DiagnosticSerial();
   const uint8_t wheel_context=(test_system_ready?1:0)|(lqr_direction_test_armed?2:0)|
     (emergency_stop_active?4:0)|(polarity_test_active?8:0)|(calibration_active.load()?16:0)|
     (boot_auto_start.pending()?32:0)|(fall_auto_recovery.pending?64:0);
@@ -1323,6 +1346,17 @@ void loop() {
     wheel_output_observation.foc(output_sensor_us,output_foc_start,output_foc_end,
       wheeloutput::cached(motor1,driver1,sensor1,digitalRead(motor1EnablePin)),
       wheeloutput::cached(motor2,driver2,sensor2,digitalRead(motor2EnablePin)),!emergency_stop_active);
+  }
+  if(polarity_fixed_voltage_mode.load()||polarity_comparison.pending){
+    if(polarity_pulse_active)capturePolaritySample();
+    float right_output=0,left_output=0;
+    polarityPulseOutput(right_output,left_output);
+    if(emergency_stop_active)right_output=left_output=0;
+    updateLqrControlTrace(right_output,left_output);
+    applyWheelOutputs(right_output,left_output);
+    handleSerialCommand();serviceLegControl();serviceHttpRequests();
+    servicePolarityResult();
+    return;
   }
   const uint32_t mpu_update_us=diagnostic_imu_us;
 
@@ -1421,15 +1455,7 @@ const float left_angle_delta =
                         polarity_velocity_sample_count));
     }
 
-    right_output =
-        polarity_pulse_active && polarity_drive_right
-            ? polarity_pulse_voltage * polarity_m1_sign
-            : 0.0f;
-
-    left_output =
-        polarity_pulse_active && polarity_drive_left
-            ? polarity_pulse_voltage * polarity_m2_sign
-            : 0.0f;
+    polarityPulseOutput(right_output,left_output);
     if (now_ms - polarity_diagnostic_last_ms >=
         kPolarityDiagnosticIntervalMs) {
       polarity_diagnostic_last_ms = now_ms;
@@ -1553,12 +1579,7 @@ const float left_angle_delta =
 
   section_start_us = micros();
 
-  const uint32_t output_command_us=micros();
-  motor1.move(right_output);
-  motor2.move(left_output);
-  wheel_output_observation.moved(output_command_us,micros(),
-    {right_output,motor1.target,motor1.current_sp},
-    {left_output,motor2.target,motor2.current_sp});
+  applyWheelOutputs(right_output,left_output);
 
   const uint32_t motor_move_us =
       micros() - section_start_us;
@@ -1655,6 +1676,7 @@ bool initializeWheelFoc(BLDCMotor& motor) {
   bool raw_called=false;
   if (wheelSensorsOK() && wheelAlignTimer && (calibration_active.load()||calibration_loaded)) {
     wheelAlignExpired.store(false);
+    polarity_guard_mode.store(false);
     start=esp_timer_start_once(wheelAlignTimer,6000000);
     if(start==ESP_OK) {
 #ifndef SIMPLEFOC_DISABLE_DEBUG
@@ -1799,7 +1821,161 @@ void stopBothMotorsAtZero() {
   }
 }
 
+void armPolarityComparison() {
+  if(polarity_fixed_voltage_mode.load()||polarity_comparison.pending)return;
+  if(!polarity_explicit_stop||!emergency_stop_active||digitalRead(motor1EnablePin)||digitalRead(motor2EnablePin)||
+     lqr_direction_test_armed||lqr_diagnostic_armed||balance_wait_active||polarity_test_active||
+     boot_auto_start.pending()||fall_auto_recovery.pending||calibration_active.load()||
+     leg_control.state.calibration.active()||!test_system_ready||wheel_comm_suspended||
+     (fallRecoveryChecks()&14u)!=14u||!wheelAlignTimer){
+    Serial.println("FIXED TEST REJECTED: explicit d stop, healthy saved FOC/sensors/IMU and timer required.");return;
+  }
+  polarity_explicit_stop=false;polarity_comparison={};
+  polarity_reference_angle=LQR_angle;
+  polarity_test_active=true;polarity_pulse_active=false;
+  polarity_fixed_voltage_mode.store(true);
+  Serial.println("FIXED TEST ARMED: lift/support wheels; 0.5 V, 500 ms, no PID/yaw. 5/6=right raw +/-; 7/8=left raw +/-; +/-=vehicle forward/backward equivalent. d=stop.");
+}
+
+void polarityPulseOutput(float& right_output,float& left_output) {
+  right_output=left_output=0;
+  if(!polarity_pulse_active)return;
+  const bool both=polarity_drive_right&&polarity_drive_left;
+  // Fixed single-wheel trials compare RAW signs. Dual trials retain the
+  // existing vehicle direction correspondence; no display-sign conversion.
+  const bool vehicle=!polarity_fixed_voltage_mode.load()||both;
+  if(polarity_drive_right)right_output=polarity_pulse_voltage*(vehicle?(m1_direction<0?-1.0f:1.0f):1.0f);
+  if(polarity_drive_left)left_output=polarity_pulse_voltage*(vehicle?(m2_direction<0?-1.0f:1.0f):1.0f);
+}
+
+void beginPolarityPulse(char command) {
+  if(polarity_pulse_active){++polarity_comparison.rejected;return;}
+  if(!polarity_test_active){Serial.println("IGNORED: enter j (legacy) or d then J (fixed comparison) first.");return;}
+  const bool fixed=polarity_fixed_voltage_mode.load();
+  if(abs(LQR_angle-polarity_reference_angle)>kLqrTestTiltLimitDeg){
+    polarity_comparison.reason="TILT_LIMIT";stopPolarityPulse();
+    Serial.println("PULSE REJECTED: tilt exceeds existing 10 degree window; both disabled.");return;
+  }
+  if(fixed&&(!emergency_stop_active||digitalRead(motor1EnablePin)||digitalRead(motor2EnablePin)||
+     wheel_comm_suspended||(fallRecoveryChecks()&14u)!=14u||
+     motor1.controller!=MotionControlType::torque||motor2.controller!=MotionControlType::torque||
+     motor1.torque_controller!=TorqueControlType::voltage||motor2.torque_controller!=TorqueControlType::voltage)){
+    polarity_comparison.reason="START_HEALTH_REJECTED";stopPolarityPulse();
+    Serial.println("FIXED TEST REJECTED: health/mode changed; both disabled.");return;
+  }
+  polarity_right_velocity_sum=polarity_left_velocity_sum=0;
+  polarity_right_velocity_peak=polarity_left_velocity_peak=0;polarity_velocity_sample_count=0;
+  polarity_pulse_command=command;
+  polarity_drive_right=command=='+'||command=='-'||command=='5'||command=='6';
+  polarity_drive_left=command=='+'||command=='-'||command=='7'||command=='8';
+  polarity_right_start_angle=motor1.shaft_angle;polarity_left_start_angle=motor2.shaft_angle;
+  const bool positive=command=='+'||command=='5'||command=='7';
+  polarity_pulse_voltage=(positive?1.0f:-1.0f)*(fixed?0.5f:polarity_test_voltage);
+  polarity_pulse_active=true;
+  float right=0,left=0;polarityPulseOutput(right,left);
+  // All formatting precedes enable. Nothing prints synchronously while fixed
+  // output is active, including rejected serial requests.
+  Serial.printf("%s PULSE command=%c RAW right=%+.3f V left=%+.3f V duration=500 ms (left meter reverses sign)\n",
+                fixed?"FIXED":"LEGACY",command,right,left);
+  polarity_pulse_start_ms=millis();
+  if(!fixed)return;
+  auto& r=polarity_comparison;
+  r.started=true;r.start_us=micros();r.start_sample_us=last_control_update_us;
+  r.wheels[0].requested=right;r.wheels[1].requested=left;
+  r.wheels[0].start_angle=motor1.shaft_angle;r.wheels[1].start_angle=motor2.shaft_angle;
+  polarity_guard_expired.store(false);polarity_guard_dispatch_us.store(0);
+  esp_timer_stop(wheelAlignTimer);polarity_guard_mode.store(true);
+  if(esp_timer_start_once(wheelAlignTimer,uint64_t(kPolarityPulseTimeMs)*1000)!=ESP_OK){
+    r.reason="TIMER_START_FAILED";stopPolarityPulse();return;
+  }
+  // Enable at zero; move/FOC in the normal loop owns the applied command.
+  // Check after EACH enable as the independent callback may have fired inside.
+  if(!polarity_guard_expired.load())motor1.enable();
+  if(!polarity_guard_expired.load())motor2.enable();
+  if(polarity_guard_expired.load()){
+    r.reason="INDEPENDENT_TIMER";stopPolarityPulse();return;
+  }
+  emergency_stop_active=false;
+  r.motor_enabled=(motor1.enabled?1:0)|(motor2.enabled?2:0);
+  r.driver_en=(digitalRead(motor1EnablePin)?1:0)|(digitalRead(motor2EnablePin)?2:0);
+}
+
+void capturePolaritySample() {
+  if(!polarity_fixed_voltage_mode.load()||!polarity_pulse_active)return;
+  auto&r=polarity_comparison;
+  r.foc_sample_us=last_foc_output.capture_us;
+  r.wheels[0].q=last_foc_output.right_voltage_q;r.wheels[1].q=last_foc_output.left_voltage_q;
+  r.motor_enabled=(motor1.enabled?1:0)|(motor2.enabled?2:0);
+  r.driver_en=(digitalRead(motor1EnablePin)?1:0)|(digitalRead(motor2EnablePin)?2:0);
+  polarity_right_velocity_sum+=motor1.shaft_velocity;polarity_left_velocity_sum+=motor2.shaft_velocity;
+  polarity_right_velocity_peak=max(polarity_right_velocity_peak,abs(motor1.shaft_velocity));
+  polarity_left_velocity_peak=max(polarity_left_velocity_peak,abs(motor2.shaft_velocity));
+  ++polarity_velocity_sample_count;
+}
+
+void completePolarityComparison() {
+  if(polarity_comparison.pending)return;
+  // Called only AFTER both GPIO gates are LOW and BEFORE zeroing motor caches.
+  if(wheelAlignTimer)esp_timer_stop(wheelAlignTimer);
+  emergency_stop_active=true;boot_auto_start.cancel();fall_auto_recovery.cancel();
+  polarity_pulse_active=polarity_test_active=false;
+  polarity_explicit_stop=false;
+  auto&r=polarity_comparison;
+  if(!r.started){polarity_fixed_voltage_mode.store(false);return;}
+  r.end_us=micros();r.end_sample_us=last_control_update_us;
+  r.timer_dispatch_us=polarity_guard_dispatch_us.load();
+  if(!r.reason)r.reason=polarity_guard_expired.load()?"INDEPENDENT_TIMER":"OUTPUT_DISABLED";
+  r.wheels[0].end_angle=motor1.shaft_angle;r.wheels[1].end_angle=motor2.shaft_angle;
+  r.wheels[0].velocity=motor1.shaft_velocity;r.wheels[1].velocity=motor2.shaft_velocity;
+  r.samples=polarity_velocity_sample_count;
+  r.wheels[0].mean_velocity=r.samples?polarity_right_velocity_sum/r.samples:0;
+  r.wheels[1].mean_velocity=r.samples?polarity_left_velocity_sum/r.samples:0;
+  r.wheels[0].peak_velocity=polarity_right_velocity_peak;r.wheels[1].peak_velocity=polarity_left_velocity_peak;
+  r.stopped_en=(digitalRead(motor1EnablePin)?1:0)|(digitalRead(motor2EnablePin)?2:0);
+  r.faults=(sensor1.fault?1:0)|(sensor2.fault?2:0)|
+    ((!diagnostic_imu_io_ok||!diagnostic_imu_finite)?4:0)|(wheel_comm_suspended?8:0)|
+    ((r.reason&&(!strcmp(r.reason,"PS4_DISCONNECT")||!strcmp(r.reason,"PS4_FIFO_OVERFLOW")))?16:0);
+  last_stop_reason=r.reason;recordDiagnosticStop(r.reason);
+  r.pending=true; // Hold busy until buffered input is discarded and result sent.
+}
+
+void servicePolarityResult() {
+  auto&r=polarity_comparison;
+  if(!r.pending||digitalRead(motor1EnablePin)||digitalRead(motor2EnablePin))return;
+  // No buffered action from the powered interval may become a new test later.
+  for(unsigned budget=0;budget<64&&Serial.available();++budget){Serial.read();++r.rejected;}
+  if(Serial.available())return;
+  r.pending=false;polarity_fixed_voltage_mode.store(false);
+  Serial.printf("FIXED RESULT reason=%s elapsed_us=%lu samples=%lu rejected_actions_or_bytes=%lu motor_enabled_mask=%u EN_sample_mask=%u EN_after_mask=%u faults_mask=%u (bits right/left sensor, IMU, comm_pause, PS4 link/FIFO; cached angles invalid on fault)\n",
+    r.reason,(unsigned long)(r.end_us-r.start_us),(unsigned long)r.samples,
+    (unsigned long)r.rejected,unsigned(r.motor_enabled),unsigned(r.driver_en),unsigned(r.stopped_en),unsigned(r.faults));
+  Serial.printf("FIXED TIME arm_us=%lu first_move_us=%lu foc_sample_us=%lu end_us=%lu timer_dispatch_us=%lu sensor_sample_us=%lu..%lu\n",
+    (unsigned long)r.start_us,(unsigned long)r.first_move_us,(unsigned long)r.foc_sample_us,
+    (unsigned long)r.end_us,(unsigned long)r.timer_dispatch_us,(unsigned long)r.start_sample_us,(unsigned long)r.end_sample_us);
+  for(unsigned i=0;i<2;++i){const auto&w=r.wheels[i];
+    Serial.printf("FIXED %s RAW requested=%+.6f V command=%+.6f V q=%+.6f V angle_start=%.7f end=%.7f delta=%+.7f rad velocity=%+.6f mean=%+.6f peak_abs=%.6f rad/s\n",
+      i?"LEFT":"RIGHT",w.requested,w.command,w.q,w.start_angle,w.end_angle,w.end_angle-w.start_angle,
+      w.velocity,w.mean_velocity,w.peak_velocity);
+  }
+}
+
+void applyWheelOutputs(float right_output,float left_output) {
+  const uint32_t output_command_us=micros();
+  motor1.move(right_output);
+  motor2.move(left_output);
+  wheel_output_observation.moved(output_command_us,micros(),
+    {right_output,motor1.target,motor1.current_sp},
+    {left_output,motor2.target,motor2.current_sp});
+
+  if(polarity_fixed_voltage_mode.load()&&polarity_pulse_active){
+    if(!polarity_comparison.first_move_us)polarity_comparison.first_move_us=output_command_us;
+    polarity_comparison.wheels[0].command=right_output;
+    polarity_comparison.wheels[1].command=left_output;
+  }
+}
+
 void stopPolarityPulse() {
+  // The shared disable path captures a fixed result before caches clear.
   // A completed/rejected bench pulse must leave BOTH bridges gated, even
   // before the existing result logging. A new test requires explicit re-arm.
   polarity_pulse_active=false;polarity_test_active=false;
@@ -1810,6 +1986,15 @@ void stopPolarityPulse() {
 
 bool finishPolarityPulseIfNeeded(uint32_t now) {
   if(!polarity_pulse_active)return false;
+  if(polarity_fixed_voltage_mode.load()){
+    const char* reason=polarity_guard_expired.load()?"INDEPENDENT_TIMER":
+      !wheelSensorsOK()?"WHEEL_FAULT":
+      (fallRecoveryChecks()&14u)!=14u?"HEALTH_FAULT":
+      abs(LQR_angle-polarity_reference_angle)>kLqrTestTiltLimitDeg?"TILT_LIMIT":
+      uint32_t(now-polarity_pulse_start_ms)>=kPolarityPulseTimeMs?"LOOP_DEADLINE":nullptr;
+    if(!reason)return false;
+    polarity_comparison.reason=reason;stopPolarityPulse();return true;
+  }
   if(uint32_t(now-polarity_pulse_start_ms)<kPolarityPulseTimeMs&&
      abs(LQR_angle-polarity_reference_angle)<=kLqrTestTiltLimitDeg)return false;
   stopPolarityPulse();return true;
@@ -1817,6 +2002,7 @@ bool finishPolarityPulseIfNeeded(uint32_t now) {
 
 void disableBothDrivers() {
   gateWheelOutputsOff();
+  if(polarity_fixed_voltage_mode.load())completePolarityComparison();
   setBothTargetsToZero();
   if (driver1_initialized) {
     driver1.disable();
@@ -1888,17 +2074,19 @@ bool acquireRuntimeMeasurements() {
   const uint32_t start=micros();mpu6050.update();diagnostic_imu_us=micros()-start;
   LQR_angle=mpu6050.getAngleY();LQR_gyro=mpu6050.getGyroY();noteImuMeasurement();
   if(!(fallRecoveryChecks()&2u)){
+    if(polarity_fixed_voltage_mode.load())if(!polarity_comparison.pending){polarity_comparison.reason="IMU_FAULT";}
     disableBothDrivers();test_system_ready=false;emergency_stop_active=true;
     lqr_direction_test_armed=lqr_diagnostic_armed=false;
     last_stop_reason="IMU_FAULT";recordDiagnosticStop(last_stop_reason);
     return false;
   }
   if(!test_system_ready||!(fallRecoveryChecks()&8u)){
+    if(polarity_fixed_voltage_mode.load())if(!polarity_comparison.pending){polarity_comparison.reason="FOC_HEALTH_FAULT";}
     disableBothDrivers();test_system_ready=false;emergency_stop_active=true;
     lqr_direction_test_armed=lqr_diagnostic_armed=false;
     last_stop_reason="FOC_HEALTH_FAULT";recordDiagnosticStop(last_stop_reason);return false;
   }
-  if(!right||!left){stopOnWheelFault();return false;}
+  if(!right||!left){if(polarity_fixed_voltage_mode.load())if(!polarity_comparison.pending){polarity_comparison.reason="WHEEL_FAULT";}stopOnWheelFault();return false;}
   if(wheel_comm_suspended){
     // Reset elapsed-difference state, never the requested mode/position origin.
     sensor1.rebaseVelocity();sensor2.rebaseVelocity();
@@ -4493,6 +4681,9 @@ void terminateLqrDriveSession(const char* reason, bool require_recenter) {
 }
 
 bool stopBalanceTest() {
+  if(polarity_fixed_voltage_mode.load()){
+    if(!polarity_comparison.pending){polarity_comparison.reason="EXPLICIT_STOP";}stopPolarityPulse();
+  }
   if(calibration_active.load()){
     gateWheelOutputsOff();calibration_abort.store(true);calibration_commit_phase.store(1);
   }
@@ -4670,11 +4861,14 @@ void captureHttpStatus();
 void formatHttpResources(char* text, size_t capacity);
 
 void serviceHttpRequests() {
-  serviceLegCalibrationResult();
+  if(!(polarity_fixed_voltage_mode.load()&&polarity_pulse_active))serviceLegCalibrationResult();
   publishDiagnosticSnapshot(false);
   if (!http_status_queue) return;
   char command = 0;
   if (xQueueReceive(http_command_queue, &command, 0) == pdTRUE) {
+    if(polarity_fixed_voltage_mode.load()&&command!='d'){
+      ++polarity_comparison.rejected;return;
+    }
     switch (command) {
       case 'c':
         if(calibration_abort.load()&&calibration_commit_phase.load()==1)calibration_status="ABORTED";
@@ -4703,6 +4897,9 @@ void serviceHttpRequests() {
 void sendSmallHttpResponse(int code,const char* text);
 
 void enqueueHttpCommand(char command) {
+  if(polarity_fixed_voltage_mode.load()&&command!='d'){
+    sendSmallHttpResponse(409,"Fixed voltage test active; no request queued\n");return;
+  }
   if (command == 't' && !startup_foc_ready.load()) {
     sendSmallHttpResponse(409, "FOC NOT INITIALIZED; START REJECTED\n");
     return;
@@ -4714,6 +4911,9 @@ void enqueueHttpCommand(char command) {
   sendSmallHttpResponse(202, "Command queued; check status for result\n");
 }
 void handleWheelCalibrationRequest(){
+  if(polarity_fixed_voltage_mode.load()){
+    sendSmallHttpResponse(409,"Fixed voltage test active; calibration rejected\n");return;
+  }
   bool expected=false;
   if(calibration_active.load()||!calibration_request_pending.compare_exchange_strong(expected,true)){
     sendSmallHttpResponse(409,"Calibration already pending/active\n");return;
@@ -4768,7 +4968,7 @@ void captureHttpStatus() {
   HttpStatus status{};
   const bool test_active =
       lqr_direction_test_armed || balance_wait_active || polarity_test_active;
-  const char* state = polarity_test_active ? "POLARITY TEST" :
+  const char* state = polarity_fixed_voltage_mode.load()?"FIXED VOLTAGE TEST":polarity_test_active ? "POLARITY TEST" :
       (balance_wait_active ? "BALANCE WAIT" :
        (lqr_direction_test_armed ? "RUNNING" : "STOPPED"));
   snprintf(status.text, sizeof(status.text),
@@ -5495,7 +5695,9 @@ void printHelp() {
                  "  g : cycle LQR test mode FULL / ATTITUDE + SPEED / "
                  "ATTITUDE + DISTANCE / ATTITUDE ONLY");
   Serial.println("  b : toggle the speed brake during Balance Wait");
-  Serial.println("  j : enter LQR polarity test mode");
+  Serial.println("  j : legacy low-voltage polarity test (u first)");
+  Serial.println("  J : after explicit d, arm FIXED 0.5 V / 500 ms comparison; support/lift wheels");
+  Serial.println("      5/6=right raw +/-; 7/8=left raw +/-; +/-=vehicle forward/backward equivalent");
   Serial.println("  + or - : both wheels, 500 ms polarity pulse");
   Serial.println("  5 : right only positive polarity voltage for 500 ms");
   Serial.println("  6 : right only negative polarity voltage for 500 ms");
@@ -5941,10 +6143,18 @@ void resetPs4MotionInput() {
 }
 
 bool executeOperatorCommand(OperatorCommand command) {
+  if(polarity_fixed_voltage_mode.load()){
+    if(command!=OperatorCommand::FullStop&&command!=OperatorCommand::EndTest&&command!=OperatorCommand::SoftStop){
+      ++polarity_comparison.rejected;return false;
+    }
+    if(!polarity_comparison.pending){polarity_comparison.reason="OPERATOR_STOP";}stopPolarityPulse();
+    if(command==OperatorCommand::SoftStop)return true;
+  }
   if(leg_control.state.calibration.active()&&command!=OperatorCommand::FullStop&&command!=OperatorCommand::EndTest)return false;
   switch (command) {
     case OperatorCommand::Start:
       if (!startBalanceTest(false)) return false;
+      polarity_explicit_stop=false;
       resetPs4MotionInput();
       setPs4DriveState(Ps4DriveState::OutsideDeadzone);
       return true;
@@ -5953,6 +6163,7 @@ bool executeOperatorCommand(OperatorCommand command) {
     case OperatorCommand::CycleMode:
       return cycleLqrTestMode();
     case OperatorCommand::FullStop: {
+      polarity_explicit_stop=true;
       const bool was_active = lqr_direction_test_armed || balance_wait_active || polarity_test_active;
       ps4_controls_released = false;
       // Remove actuator authority before any potentially blocking log output.
@@ -5976,6 +6187,7 @@ bool executeOperatorCommand(OperatorCommand command) {
       if (!test_system_ready || wheel_comm_suspended || !wheelSensorsOK() || lqr_direction_test_armed || balance_wait_active ||
           polarity_test_active) return false;
       setBothTargetsToZero();
+      polarity_explicit_stop=false;
       driver1.enable();
       driver2.enable();
       emergency_stop_active = false;
@@ -6007,6 +6219,9 @@ bool ps4ButtonsReleased(const Ps4InputState& input) {
 }
 
 void handlePs4Connection(bool connected) {
+  if(!connected&&polarity_fixed_voltage_mode.load()){
+    if(!polarity_comparison.pending){polarity_comparison.reason="PS4_DISCONNECT";}stopPolarityPulse();
+  }
   if (connected == ps4_was_connected) return;
   ps4_was_connected = connected;
   leg_control.disconnect();
@@ -6198,6 +6413,9 @@ void updatePs4Controller() {
     ps4_has_held_input=false;
   }
   if (batch.disconnect_pending) {
+    if(polarity_fixed_voltage_mode.load()){
+      if(!polarity_comparison.pending){polarity_comparison.reason="PS4_DISCONNECT";}stopPolarityPulse();
+    }
     if (!batch.cross_pending &&
         (lqr_auto_drive_active || lqr_drive_start_pending || lqr_soft_stop_active)) {
       executePs4Command(OperatorCommand::SoftStop);
@@ -6206,6 +6424,9 @@ void updatePs4Controller() {
     ps4_has_held_input=false;
   }
   if (batch.overflowed) {
+    if(polarity_fixed_voltage_mode.load()){
+      if(!polarity_comparison.pending){polarity_comparison.reason="PS4_FIFO_OVERFLOW";}stopPolarityPulse();
+    }
     raisePs4ControlBarrier(batch.sequence);
     ps4_event_rearm_required=true;leg_control.disconnect();
     // An actually received neutral transition is retained outside the FIFO too.
@@ -6567,12 +6788,23 @@ void handleSerialCommand() {
   }
 
   const char command = Serial.read();
+  if(polarity_comparison.pending){++polarity_comparison.rejected;return;}
   static leg::LegCalSerialParser leg_parser;char leg_action=0;
   if(leg_parser.feed(command,leg_action)){
-   if(leg_action)handleLegSerialAction(leg_action);
+   if(leg_action){if(polarity_fixed_voltage_mode.load())++polarity_comparison.rejected;else handleLegSerialAction(leg_action);}
    return;
   }
 
+  if(polarity_fixed_voltage_mode.load()){
+    const bool stop=command=='d'||command=='D'||command=='s'||command=='S'||command=='0'||
+      command=='k'||command=='K'||command=='e'||command=='E';
+    if(command=='\r'||command=='\n'||command==' '||command=='\t')return;
+    if(stop){polarity_comparison.reason="SERIAL_STOP";stopPolarityPulse();}
+    else if(polarity_pulse_active){++polarity_comparison.rejected;return;}
+    else if(command!='+'&&command!='-'&&command!='5'&&command!='6'&&command!='7'&&command!='8'){
+      ++polarity_comparison.rejected;return;
+    }
+  }
   if(leg_control.state.calibration.active()&&command!='d'&&command!='D'&&command!='h'&&command!='H'&&command!='?'&&command!='\r'&&command!='\n'){
     leg_control.state.calibration.event(leg::CalResult::Busy,millis());return;
   }
@@ -6772,8 +7004,9 @@ void handleSerialCommand() {
         Serial.println("IGNORED: LQR drive request is already active.");
       }
       break;
-    case 'j':
     case 'J':
+      armPolarityComparison();break;
+    case 'j':
       if (!test_system_ready) {
         Serial.println("IGNORED: system initialization is not complete.");
       } else if (emergency_stop_active) {
@@ -6812,94 +7045,11 @@ void handleSerialCommand() {
       break;
     case '+':
     case '-':
-      if (!polarity_test_active) {
-        Serial.println("IGNORED: enter LQR polarity test mode with 'j' first.");
-      } else if (abs(LQR_angle - polarity_reference_angle) >
-                 kLqrTestTiltLimitDeg) {
-        polarity_pulse_active = false;
-        polarity_pulse_voltage = 0.0f;
-        stopPolarityPulse();
-        Serial.println("IGNORED: polarity pulse tilt exceeds 10 degrees.");
-      } else {
-        polarity_right_velocity_sum = 0.0f;
-        polarity_left_velocity_sum = 0.0f;
-        polarity_right_velocity_peak = 0.0f;
-        polarity_left_velocity_peak = 0.0f;
-        polarity_velocity_sample_count = 0;
-        polarity_pulse_command = command;
-        polarity_drive_right = true;
-        polarity_drive_left = true;
-        polarity_right_start_angle = motor1.shaft_angle;
-        polarity_left_start_angle = motor2.shaft_angle;
-        polarity_pulse_voltage =
-            command == '+' ? polarity_test_voltage : -polarity_test_voltage;
-        polarity_pulse_start_ms = millis();
-        polarity_pulse_active = true;
-        const float polarity_m1_sign =
-            m1_direction < 0.0f ? -1.0f : 1.0f;
-        const float polarity_m2_sign =
-            m2_direction < 0.0f ? -1.0f : 1.0f;
-        Serial.println("POLARITY PULSE:");
-        Serial.printf("command=%c\n", command);
-        Serial.printf("right_output=%.6f\n",
-                      polarity_pulse_voltage * polarity_m1_sign);
-        Serial.printf("left_output=%.6f\n",
-                      polarity_pulse_voltage * polarity_m2_sign);
-      }
-      break;
     case '5':
     case '6':
     case '7':
     case '8':
-      if (!polarity_test_active) {
-        Serial.println("IGNORED: enter LQR polarity test mode with 'j' first.");
-      } else if (abs(LQR_angle - polarity_reference_angle) >
-                 kLqrTestTiltLimitDeg) {
-        polarity_pulse_active = false;
-        polarity_pulse_voltage = 0.0f;
-        stopPolarityPulse();
-        Serial.println("IGNORED: polarity pulse tilt exceeds 10 degrees.");
-      } else {
-        polarity_right_velocity_sum = 0.0f;
-        polarity_left_velocity_sum = 0.0f;
-        polarity_right_velocity_peak = 0.0f;
-        polarity_left_velocity_peak = 0.0f;
-        polarity_velocity_sample_count = 0;
-        polarity_pulse_command = command;
-
-        polarity_drive_right = command == '5' || command == '6';
-        polarity_drive_left = command == '7' || command == '8';
-
-        polarity_right_start_angle = motor1.shaft_angle;
-        polarity_left_start_angle = motor2.shaft_angle;
-
-        const bool positive_pulse = command == '5' || command == '7';
-        polarity_pulse_voltage =
-            positive_pulse ? polarity_test_voltage : -polarity_test_voltage;
-
-        polarity_pulse_start_ms = millis();
-        polarity_pulse_active = true;
-
-        const float polarity_m1_sign =
-            m1_direction < 0.0f ? -1.0f : 1.0f;
-        const float polarity_m2_sign =
-            m2_direction < 0.0f ? -1.0f : 1.0f;
-
-        const float right_pulse_output =
-            polarity_drive_right
-                ? polarity_pulse_voltage * polarity_m1_sign
-                : 0.0f;
-        const float left_pulse_output =
-            polarity_drive_left
-                ? polarity_pulse_voltage * polarity_m2_sign
-                : 0.0f;
-
-        Serial.println("SINGLE-WHEEL POLARITY PULSE:");
-        Serial.printf("command=%c\n", command);
-        Serial.printf("right_output=%.6f\n", right_pulse_output);
-        Serial.printf("left_output=%.6f\n", left_pulse_output);
-      }
-      break;
+      beginPolarityPulse(command);break;
     case '[':
     case ']':
       if (!polarity_test_active) {

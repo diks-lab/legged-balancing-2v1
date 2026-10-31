@@ -57,6 +57,7 @@ uint16_t first_http_route=0;
 using PGM_P=const char*;
 #include "FocAlignmentObservation.h"
 #include "WheelOutputObservation.h"
+#include "PolarityComparison.h"
 class Print { public: virtual ~Print()=default;virtual size_t write(uint8_t)=0; };
 #include "driver/gpio.h"
 #include "esp_timer.h"
@@ -104,6 +105,7 @@ struct DriveSerial : FakeSerial {
     if(onSerialOutput) onSerialOutput();
     FakeSerial::printf(s,args...);
   }
+  void println(char c){char t[]={c,0};println(t);}
   template<class T> void print(T) {}
 } driveSerial;
 #define Serial driveSerial
@@ -204,10 +206,12 @@ struct {
 } Serial2;
 struct {bool servo_off=false;} sms_sts;
 enum class FOCMotorStatus { motor_ready=4, motor_calib_failed=5 };
+std::function<void(int)> onMotorEnable;
 struct DriveTestMotor {
   explicit DriveTestMotor(int) {}
   Direction sensor_direction=Direction::CCW;int pole_pairs=7;float zero_electric_angle=1;
   float shaft_angle=0,shaft_velocity=0,target=0,current_sp=0;
+  MotionControlType controller=MotionControlType::torque;TorqueControlType torque_controller=TorqueControlType::voltage;
   int enabled=0;FOCMotorStatus motor_status=FOCMotorStatus::motor_ready;
   struct {float q=0,d=0;} voltage;
   Sensor* cachedSensor=nullptr;int moveCalls=0;
@@ -215,7 +219,7 @@ struct DriveTestMotor {
   LowPassFilter LPF_velocity{0.01f};
   float shaftVelocity(){return cachedSensor?sensor_direction*LPF_velocity(cachedSensor->getVelocity()):shaft_velocity;}
   int enablePin=-1;
-  void enable(){enabled=1;if(enablePin>=0)digitalWrite(enablePin,HIGH);}
+  void enable(){enabled=1;if(enablePin>=0)digitalWrite(enablePin,HIGH);if(onMotorEnable)onMotorEnable(enablePin);}
   void move(float v){++moveCalls;target=current_sp=v;}
 };
 struct DriveTestDriver {
@@ -263,6 +267,7 @@ names = ['handleLegSerialAction','loadLegCalibration','legCalibrationCommand','s
     'startBalanceTest','cycleLqrTestMode','updateBalanceWait','cancelBalanceWait',
     'confirmActualFall','detectDriveSafetyFault','wheelSensorsOK','stopOnWheelFault',
     'setBothTargetsToZero','stopBothMotorsAtZero','disableBothDrivers','stopPolarityPulse','finishPolarityPulseIfNeeded',
+    'armPolarityComparison','beginPolarityPulse','polarityPulseOutput','capturePolaritySample','completePolarityComparison','servicePolarityResult','applyWheelOutputs','handleSerialCommand',
     'clearVelocityTrace','clearLoopTimingTrace','clearLqrControlTrace',
     'captureFocOutputSnapshot','updateLqrControlTrace','captureLqrDriveSignTrace','captureLqrStopTrace',
     'resetLqrDriveSignTrace','resetLqrStopTrace','startLqrStopTrace','setStatusLed','printLqrStatus',
@@ -291,6 +296,10 @@ void printLqrDriveSignTrace(const char*){}
 void printLqrStopTrace(const char*){}
 void publishStartupPhase(const char* stage){diagnostic_startup_phase.store(stage);}
 void printAndResetLqrRunTime(){}
+void printHelp(){} void printDistanceDiagnostic(){} void printSpeedDiagnostic(){}
+void pingLegServos(){} void calibrateMpu6050(){}
+void moveRightLegForTest(int16_t){} void moveLeftLegForTest(int16_t,const char*){}
+bool motionCommandAllowed(){return false;}
 
 void printVelocityTrace(){}
 void printLoopTimingTrace(){}
@@ -313,6 +322,12 @@ void nearAt(float x,float y,int line){if(!(std::fabs(x-y)<1e-5f))fprintf(stderr,
 #define near(x,y) nearAt(x,y,__LINE__)
 void setupCase(LqrTestMode mode=LqrTestMode::Full){
   nowMs+=1000;
+  polarity_fixed_voltage_mode=false;polarity_comparison={};polarity_explicit_stop=false;
+  polarity_pulse_active=polarity_test_active=false;polarity_guard_expired=false;
+  polarity_guard_mode=false;polarity_guard_dispatch_us=0;
+  wheelAlignTimer=&fakeTimer;fakeTimer.callback=wheelAlignTimeout;fakeTimer.armed=false;
+  startTimerOK=true;Serial.rx.clear();
+  tickTimer=[] {if(fakeTimer.armed&&uint32_t(nowMs-fakeTimer.start)>=fakeTimer.duration){fakeTimer.armed=false;fakeTimer.callback(nullptr);}};
   leg_control=leg::Control{};leg_bus=leg::ServoBus<LegUartIO>{};sms_sts.servo_off=false;
   Serial2.mode=0;Serial2.head=Serial2.tail=0;Serial2.capacity=128;
   motor1.cachedSensor=motor2.cachedSensor=nullptr;
@@ -1465,9 +1480,9 @@ int main(){
   std::cout<<"PASS: production PS4 release/edges/reconnect, start/neutral/disconnect/full-stop, leg bounds, yaw headroom, feedback signs, recovery/fall, latest telemetry/stop event and Web status\n";
 }
 '''
-checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-rate.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+Path('tests/drive_host/leg-log.cpp').read_text()+Path('tests/drive_host/leg-combined.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
+checks=checks.replace('  std::cout<<"PASS: production PS4 release',Path('tests/drive_host/sticks.cpp').read_text()+Path('tests/drive_host/leg-rate.cpp').read_text()+Path('tests/drive_host/left-y.cpp').read_text()+Path('tests/drive_host/leg-motion.cpp').read_text()+Path('tests/drive_host/leg-calibration.cpp').read_text()+Path('tests/drive_host/leg-log.cpp').read_text()+Path('tests/drive_host/leg-combined.cpp').read_text()+Path('tests/drive_host/polarity.cpp').read_text()+'  std::cout<<"PASS: production PS4 release')
 if os.environ.get('DRIVE_ROLL_TEST'):
-    checks=checks[:checks.index('int main(){')]+Path('tests/drive_host/leg-roll.cpp').read_text().replace(' std::cout<<"PASS: production roll flags',Path('tests/drive_host/leg-log.cpp').read_text()+Path('tests/drive_host/leg-combined.cpp').read_text()+' std::cout<<"PASS: production roll flags')
+    checks=checks[:checks.index('int main(){')]+Path('tests/drive_host/leg-roll.cpp').read_text().replace(' std::cout<<"PASS: production roll flags',Path('tests/drive_host/leg-log.cpp').read_text()+Path('tests/drive_host/leg-combined.cpp').read_text()+Path('tests/drive_host/polarity.cpp').read_text()+' std::cout<<"PASS: production roll flags')
     import configparser,shlex
     ini=configparser.ConfigParser();ini.read('platformio.ini')
     production_flags=shlex.split(ini['env:esp32dev']['build_flags'])
@@ -1493,10 +1508,19 @@ for term in ['malloc(', 'free(', 'releaseHttpTraceSnapshot(', 'reapHttpTraceSnap
 
 # The production loop cannot reach loopFOC or move after preflight failure.
 loop = function('loop')
-assert loop.index('if(!acquireRuntimeMeasurements())') < loop.index('motor1.loopFOC()') < loop.index('motor1.move(right_output)')
+assert loop.index('if(!acquireRuntimeMeasurements())') < loop.index('motor1.loopFOC()') < loop.index('applyWheelOutputs(right_output,left_output)')
 assert 'handleSerialCommand();serviceLegControl();serviceHttpRequests();return;' in loop
 assert loop.index('finishPolarityPulseIfNeeded(millis())') < loop.index('motor1.loopFOC()')
-assert loop.index('motor2.loopFOC()') < loop.index('wheel_output_observation.foc(') < loop.index('motor1.move(right_output)') < loop.index('wheel_output_observation.moved(')
+assert loop.index('motor2.loopFOC()') < loop.index('wheel_output_observation.foc(') < loop.index('applyWheelOutputs(right_output,left_output)')
+assert function('applyWheelOutputs').index('motor2.move(left_output)') < function('applyWheelOutputs').index('wheel_output_observation.moved(')
+
+fixed_branch=loop[loop.index('if(polarity_fixed_voltage_mode.load()||polarity_comparison.pending)'):loop.index('const uint32_t mpu_update_us')]
+for term in ['updateLqrDiagnostic(', 'updateBalanceWait(', 'applyPs4Steering(', 'Serial.']:
+    assert term not in fixed_branch
+for name in ['capturePolaritySample','polarityPulseOutput','applyWheelOutputs','completePolarityComparison']:
+    for forbidden in ['Serial.', 'malloc(', 'new ', 'delay(', 'snprintf']:
+        assert forbidden not in function(name),(name,forbidden)
+assert function('disableBothDrivers').index('gateWheelOutputsOff()')<function('disableBothDrivers').index('completePolarityComparison()')<function('disableBothDrivers').index('setBothTargetsToZero()')
 
 assert 'delay(' not in function('serviceLegControl')
 assert 'Ping(' not in function('serviceLegControl')

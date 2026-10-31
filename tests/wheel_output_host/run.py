@@ -48,6 +48,6 @@ print('PASS: real MCPWM allocator: first 3PWM group0/timer0, second group1/timer
 # Integration ordering is part of the capture contract, even though this host
 # executable does not run the complete WiFi/PS4 application loop.
 app=Path('src/main.cpp').read_text();loop=app[app.index('void loop() {'):app.index('// Motor / Sensor Control')]
-assert loop.index('motor2.loopFOC()')<loop.index('wheel_output_observation.foc(')<loop.index('motor1.move(right_output)')<loop.index('wheel_output_observation.moved(')
+assert loop.index('motor2.loopFOC()')<loop.index('wheel_output_observation.foc(')<loop.index('applyWheelOutputs(right_output,left_output)')
 assert '/wheels/output-capture' in app and '/api/wheels/output' in app
 assert 'Serial.' not in Path('include/WheelOutputObservation.h').read_text()
