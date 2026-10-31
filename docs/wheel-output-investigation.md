@@ -1,5 +1,9 @@
 # 通常ファームの左車輪出力調査
 
+> 追加の実機結果と、単体診断を右→左の初期化順へそろえる比較は
+> [車輪診断の初期化順比較](wheel-diagnostic-init-order.md)を参照。
+> 以下の通常ファーム調査・更新対象の記録は`1ee6d27`時点。
+
 基準: `be45f14cb2f45ceea82973e22e1a494185990862`、`codex/2208-web-ps4`。
 `AGENTS.md`・[実装の由来](upstream-origin.md)を確認。SimpleFOCは
 v2.4.0 / `4f072b365f6e0185adca544071e595834405babc`。
@@ -34,7 +38,7 @@ HALだけを代替しており、ESP32端子や実モーターの再現試験で
 | 左対応 | motor2 / driver2 / sensor2、I2C1 SDA23/SCL5、AS5600 0x36 | leftMotor / leftDriver / leftSensor、同じバス・ピン |
 | 右PWM / EN | A13 B12 C14 / 27 | 同じ |
 | 左PWM / EN | A26 B25 C33 / 32 | 同じ |
-| 電源・制限 | supply/driver limit=8.3 V、初期化/align=2 V、起動完了後motor limit=1 V | supply/driver limit=8.3 V、motor/align=2 V |
+| 電源・制限 | supply/driver limit=8.3 V、初期化/align=2 V、起動完了後motor limit=1 V | supply/driver limit=8.3 V、初期化/align=2 V、駆動時motor limit=1 V |
 | 制御 | torque / voltage。targetはV、moveがcurrent_spへ転記 | velocity / voltage。targetはrad/s、速度PIDがcurrent_spを生成 |
 | ±6の意味 | ±6 Vなら1 Vへ制限される（今回要求しない） | ±6 rad/s。PID出力のq電圧とは別物 |
 | 初期化 | EN低→UART/両I2C/Web準備→MPU確認/校正→右driver/motor/FOC→左driver/motor/FOC→両motor limit更新 | EN低→両センサー準備→明示要求した輪のdriver/motor/FOC。both要求時は両輪を順に初期化 |

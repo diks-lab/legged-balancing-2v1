@@ -7,13 +7,31 @@ enum class MotionControlType { torque, velocity };
 enum class TorqueControlType { voltage };
 inline bool driverInitOK = true, motorInitOK = true, focInitOK = true, ppOK = true;
 inline std::function<void()> duringFOC;
+inline std::vector<int> driverInitEvents;
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+#include "drivers/hardware_specific/esp32/esp32_driver_mcpwm.h"
+#endif
 class BLDCDriver3PWM {
  public:
-  int en, initCalls = 0;
+  int en, pwmA, pwmB, pwmC, initCalls = 0;
   float voltage_power_supply = 0, voltage_limit = 0;
   float pwm = 0;
-  BLDCDriver3PWM(int, int, int, int e) : en(e) {}
-  bool init() { ++initCalls; return driverInitOK; }
+  void* params = nullptr;
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+  ESP32MCPWMDriverParams allocation{};
+#endif
+  BLDCDriver3PWM(int a, int b, int c, int e) : en(e), pwmA(a), pwmB(b), pwmC(c) {}
+  bool init() {
+    ++initCalls; driverInitEvents.push_back(en);
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+    // Deliberately non-default assignments distinguish backend readout from
+    // a guessed group0/timer0 based on initialization order.
+    allocation.group_id = en == 27 ? 1 : 0;
+    allocation.timers[0] = timers[allocation.group_id][2];
+    params = &allocation;
+#endif
+    return driverInitOK;
+  }
   void disable() { pwm = 0; digitalWrite(en, LOW); }
   void enable() { pwm = 0; digitalWrite(en, HIGH); }
 };

@@ -7,6 +7,13 @@
 #include <esp_timer.h>
 #include <driver/gpio.h>
 
+// Read the pinned SimpleFOC backend's allocation metadata, not an inferred
+// group based on wheel name/order. No register reads or library patch needed.
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+#include "drivers/hardware_specific/esp32/esp32_driver_mcpwm.h"
+extern mcpwm_timer_handle_t timers[2][3];
+#endif
+
 namespace {
 // Wiring and the provisional 7 pole pairs follow main.cpp, not the 2208 label.
 constexpr int kPolePairs = 7;
@@ -169,6 +176,22 @@ float commandVelocity = 0;
 char command[64];
 size_t commandLength = 0;
 bool discardLine = false;
+uint32_t pwmInitSequence = 0;
+
+void reportPwmAllocation(Wheel& w) {
+#if defined(ESP_H) && defined(ARDUINO_ARCH_ESP32) && defined(SOC_MCPWM_SUPPORTED) && !defined(SIMPLEFOC_ESP32_USELEDC)
+  const auto* p = static_cast<const ESP32MCPWMDriverParams*>(w.driver.params);
+  if (p && p->group_id >= 0 && p->group_id < 2) {
+    int slot = -1;
+    for (int i = 0; i < 3; ++i)
+      if (p->timers[0] && timers[p->group_id][i] == p->timers[0]) slot = i;
+    logLine("PWM %s source=SimpleFOC_backend_params group=%d timer_slot=%d timer_handle=%p (-1=unknown slot; not register readback)\n",
+            w.name, p->group_id, slot, static_cast<void*>(p->timers[0]));
+    return;
+  }
+#endif
+  logLine("PWM %s allocation=UNAVAILABLE (no inferred group/timer)\n", w.name);
+}
 
 void stopAll(const char* reason) {
   gateOff();  // Gate first, before any PWM work.
@@ -220,7 +243,8 @@ void reportStatus() {
 void help() {
   logLine("help | status | read left | read right | read both | stream on | stream off | stop\n");
   logLine("motor left + | motor left - | motor right + | motor right - | motor both + | motor both -\n");
-  logLine("First motor command aligns selected wheels. +/- commands +6.0/-6.0 rad/s; + is forward on both.\n");
+  logLine("First motor command aligns selected wheels. +/- is velocity command sign (+6.0/-6.0 rad/s), NOT vehicle forward/reverse.\n");
+  logLine("Both initializes right -> left; allocation-order comparison requires fresh boot, no prior motor command.\n");
   logLine("Blocking init/initFOC: serial stop unavailable; FOC guard=6000ms, run timer=1500ms. Use power cut.\n");
 }
 
@@ -238,6 +262,9 @@ bool initializeWheel(Wheel& w) {
     // Driver limit is phase/PWM range; motor limit bounds commanded Uq.
     // Keep centering at half the actual supply, avoiding phase clipping.
     w.driver.voltage_limit = kSupplyVoltage;
+    logLine("PWM INIT seq=%lu wheel=%s A=%d B=%d C=%d EN=%u\n",
+            static_cast<unsigned long>(++pwmInitSequence), w.name,
+            w.driver.pwmA, w.driver.pwmB, w.driver.pwmC, w.enable);
     if (!w.driver.init()) {
       w.initFault = true;
       stopAll("driver init failed");
@@ -245,6 +272,7 @@ bool initializeWheel(Wheel& w) {
     }
     w.driverReady = true;
     w.driver.disable();
+    reportPwmAllocation(w);  // Initialization only, with both EN LOW.
     w.motor.linkDriver(&w.driver);
     w.motor.linkSensor(&w.sensor);
     w.motor.voltage_limit = kAlignVoltage;
@@ -319,12 +347,19 @@ void startWheels(Wheel& first, Wheel* second, float sign) {
   }
   // Each initialization gates both outputs off and disables its motor before
   // the next begins. Failure or input cancels the entire requested run.
-  if (!initializeWheel(first)) return;
-  if (second) {
+  // Normalize ONLY dual initialization order. Keep the existing run/enable and
+  // loopFOC iteration orders so this comparison changes allocation order alone.
+  Wheel& initFirst = second ? right : first;
+  Wheel* initSecond = second ? &left : nullptr;
+  if (second) logLine("BOTH init order=%s->%s first=%s second=%s; compare allocation only from fresh boot\n",
+                      initFirst.name, initSecond->name, initFirst.calibrated ? "REUSE" : "NEW",
+                      initSecond->calibrated ? "REUSE" : "NEW");
+  if (!initializeWheel(initFirst)) return;
+  if (initSecond) {
     rightSensor.update();
     leftSensor.update();
     if (!sensorsOK()) { stopAll("sensor fault between initializations"); return; }
-    if (!initializeWheel(*second)) return;
+    if (!initializeWheel(*initSecond)) return;
   }
   // Fresh communication check after all blocking library delays, before enable.
   rightSensor.update();
