@@ -5,6 +5,10 @@
 #include "common/base_classes/Sensor.h"
 enum class MotionControlType { torque, velocity };
 enum class TorqueControlType { voltage };
+enum class FOCModulationType { SinePWM, SpaceVectorPWM };
+constexpr float NOT_SET=-12345;
+constexpr float DEF_VEL_FILTER_Tf=.005f;
+inline std::function<void()> duringEnable;
 inline bool driverInitOK = true, motorInitOK = true, focInitOK = true, ppOK = true;
 inline std::function<void()> duringFOC;
 inline std::vector<int> driverInitEvents;
@@ -33,7 +37,7 @@ class BLDCDriver3PWM {
     return driverInitOK;
   }
   void disable() { pwm = 0; digitalWrite(en, LOW); }
-  void enable() { pwm = 0; digitalWrite(en, HIGH); }
+  void enable() { pwm = 0; digitalWrite(en, HIGH); if(duringEnable) duringEnable(); }
 };
 class BLDCMotor {
  public:
@@ -41,6 +45,7 @@ class BLDCMotor {
   BLDCDriver3PWM* driver = nullptr;
   Sensor* sensor = nullptr;
   int initCalls = 0, focCalls = 0, loopCalls = 0, moveCalls = 0;
+  float sensor_offset=0;
   float current_sp = 0, shaft_velocity = 0, velocity_limit = 0;
   struct { float P=0, I=0, D=0, output_ramp=0, limit=0; int resets=0; void reset() { ++resets; } } PID_velocity;
   struct { float Tf=0; } LPF_velocity;
@@ -50,6 +55,8 @@ class BLDCMotor {
   struct { float q = 0, d = 0; } voltage;
   bool pp_check_result = false;
   Direction sensor_direction = CW;
+  FOCModulationType foc_modulation=FOCModulationType::SinePWM;
+  int modulation_centered=1;
   MotionControlType controller;
   TorqueControlType torque_controller;
   void linkDriver(BLDCDriver3PWM* d) { driver = d; }
@@ -57,6 +64,8 @@ class BLDCMotor {
   bool init() { ++initCalls; delay(500); enable(); delay(500); return motorInitOK; }
   bool initFOC() {
     ++focCalls; if (duringFOC) duringFOC(); sensor->update();
+    if(sensor_direction==Direction::UNKNOWN) sensor_direction=CW;
+    if(zero_electric_angle==NOT_SET) zero_electric_angle=.1f;
     pp_check_result = ppOK; return focInitOK;
   }
   void enable() { driver->enable(); }

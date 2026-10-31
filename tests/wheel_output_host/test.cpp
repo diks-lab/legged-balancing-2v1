@@ -8,8 +8,9 @@
 struct Lock {std::mutex m;void lock(){m.lock();}void unlock(){m.unlock();}};
 struct TestSensor:Sensor {using Sensor::init;int reads=0;float raw=1;float getSensorAngle() override{++reads;return raw;}};
 float written[2][3];
+unsigned pwmWrites=0;
 void* _configure3PWM(long,int a,int,int){return &written[a==26];}
-void _writeDutyCycle3PWM(float a,float b,float c,void* p){float* v=(float*)p;v[0]=a;v[1]=b;v[2]=c;}
+void _writeDutyCycle3PWM(float a,float b,float c,void* p){++pwmWrites;float* v=(float*)p;v[0]=a;v[1]=b;v[2]=c;}
 void near(float a,float b){assert(std::abs(a-b)<1e-5f);}
 int main(){
  TestSensor s[2];BLDCMotor r(7),l(7);BLDCMotor* motors[]={&r,&l};
@@ -19,7 +20,12 @@ int main(){
    s[i].init();m.linkSensor(&s[i]);d.voltage_power_supply=d.voltage_limit=8.3f;assert(d.init());
    m.linkDriver(&d);m.controller=MotionControlType::torque;m.torque_controller=TorqueControlType::voltage;
    m.voltage_limit=1;m.sensor_direction=Direction::CCW;m.zero_electric_angle=i?4.3810487f:1.4419413f;
-   assert(m.init());m.motor_status=FOCMotorStatus::motor_ready;
+   assert(m.init());
+   const auto before=pwmWrites;const auto direction=m.sensor_direction;const auto zero=m.zero_electric_angle;
+   m.pp_check_result=true;assert(m.initFOC());
+   assert(pwmWrites==before); // No alignment phase-voltage write.
+   assert(m.sensor_direction==direction&&m.zero_electric_angle==zero&&m.pp_check_result);
+   assert(m.foc_modulation==FOCModulationType::SinePWM&&m.modulation_centered==1);
  }
  for(float sign:{-1.f,1.f,-.5f,.5f}){
    assert(obs.request(test_us));assert(!obs.request(test_us));

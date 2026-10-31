@@ -61,6 +61,7 @@ LF または CRLF で終端します。末尾に余計な空白を付けない�
 | `motor left +` / `motor left -` | 左だけを速度指令 +6／−6 rad/s、出力上限1 Vで最大1.5秒駆動 |
 | `motor right +` / `motor right -` | 右だけを速度指令 +6／−6 rad/s、出力上限1 Vで最大1.5秒駆動 |
 | `motor both +` / `motor both -` | 右→左に順次初期化後、両輪を同符号の速度指令 +6／−6 rad/sで最大1.5秒駆動 |
+| `voltage left +` / `voltage left -` / `voltage right +` / `voltage right -` | 保存FOCで選択輪へ±0.5 V・500 ms、速度PIDなし。未保存・不整合は拒否 |
 | `stop` | 両輪の EN を LOW にし、初期化済み PWM と電圧指令をゼロにする |
 
 **各輪の初回 `motor` は、実行前に警告を送信してから、選択輪の
@@ -158,6 +159,14 @@ pio device monitor --port COM5 --baud 115200 --eol LF --echo
    `motor both ++`、`motor left ++`、`motor left +x` 等の不正入力で動かないことを確認する。
    通信異常は、まずモーター電源 OFF でセンサー未接続を確認する。駆動中の異常確認は
    固定・電流制限と安全な故障注入方法を用意した上で行う（活線配線を短絡させない）。
+
+### 単体診断で保存FOCの固定電圧を比較する試験
+
+新規起動→`voltage right +`を一行→`FIXED RESULT`待ち→`voltage left +`→結果待ち。
+負符号も`voltage right -`／`voltage left -`で同様に試せます。
+保存値を変更せず、右→左初期化・torque/voltage・±0.5 V・500 msで両輪遮断します。
+初期化条件まで揃える場合は各試行を新規起動から行い、先に`motor`を実行しません。
+[保存値検証・停止・結果の取得時点・比較条件と全検証コマンド](docs/wheel-diagnostic-fixed-voltage.md)。
 
 ### 通常ファームで同じ電圧を比較する試験
 
